@@ -4,7 +4,13 @@ import { hasSupabaseBrowserConfig } from "@/lib/supabase/client";
 
 type SupabaseRepositoryEnvironment = Record<string, string | undefined>;
 
+type CreateContentRepositoryOptions = {
+  environment?: SupabaseRepositoryEnvironment;
+};
+
 export type ContentRepositoryMode = "demo" | "supabase";
+
+let demoRepository: ContentRepository | undefined;
 
 export function getContentRepositoryMode(
   environment: SupabaseRepositoryEnvironment = process.env,
@@ -19,9 +25,14 @@ export function getContentRepositoryMode(
  * Resolves persistence only on the server. No configuration means an isolated,
  * no-network demo repository.
  */
-export async function createContentRepository(): Promise<ContentRepository> {
-  if (getContentRepositoryMode() === "demo") {
-    return createDemoRepository();
+export async function createContentRepository(
+  options: CreateContentRepositoryOptions = {},
+): Promise<ContentRepository> {
+  const environment = options.environment ?? process.env;
+
+  if (getContentRepositoryMode(environment) === "demo") {
+    demoRepository ??= createDemoRepository();
+    return demoRepository;
   }
 
   const [{ createSupabaseServerClient, createSupabaseServiceRoleClient }, { createSupabaseRepository }] =
@@ -40,4 +51,9 @@ export async function createContentRepository(): Promise<ContentRepository> {
   }
 
   return createSupabaseRepository(createSupabaseServiceRoleClient(), user.id);
+}
+
+/** Test support only; production code never resets process-local demo state. */
+export function resetDemoRepositoryForTests(): void {
+  demoRepository = undefined;
 }

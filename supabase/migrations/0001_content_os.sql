@@ -127,6 +127,76 @@ begin
 end;
 $$;
 
+create function public.is_owner_profile(profile_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.profiles
+    where id = profile_id and role = 'owner'
+  );
+$$;
+
+create function public.create_content_item_with_targets(
+  p_owner_id uuid,
+  p_business_line text,
+  p_service text,
+  p_niche text,
+  p_content_type text,
+  p_objective text,
+  p_format text,
+  p_cta text,
+  p_human_description text,
+  p_allowed_facts jsonb
+)
+returns public.content_items
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  created_item public.content_items;
+begin
+  if not public.is_owner_profile(p_owner_id) then
+    raise exception 'Only an owner profile can create content';
+  end if;
+
+  insert into public.content_items (
+    owner_id, business_line, service, niche, content_type, objective, format,
+    cta, human_description, allowed_facts, state
+  ) values (
+    p_owner_id, p_business_line, p_service, p_niche, p_content_type, p_objective,
+    p_format, p_cta, p_human_description, p_allowed_facts, 'DRAFT'
+  ) returning * into created_item;
+
+  insert into public.publication_targets (
+    owner_id, content_item_id, platform, status
+  ) values
+    (p_owner_id, created_item.id, 'FACEBOOK', 'PENDING_REVIEW'),
+    (p_owner_id, created_item.id, 'INSTAGRAM', 'PENDING_REVIEW');
+
+  insert into public.audit_events (
+    owner_id, actor_id, content_item_id, event_type, metadata
+  ) values (
+    p_owner_id, p_owner_id, created_item.id, 'CONTENT_CREATED', '{}'::jsonb
+  );
+
+  return created_item;
+end;
+$$;
+
+revoke all on function public.is_owner_profile(uuid) from public;
+grant execute on function public.is_owner_profile(uuid) to authenticated, service_role;
+revoke all on function public.create_content_item_with_targets(
+  uuid, text, text, text, text, text, text, text, text, jsonb
+) from public, anon, authenticated;
+grant execute on function public.create_content_item_with_targets(
+  uuid, text, text, text, text, text, text, text, text, jsonb
+) to service_role;
+
 create function public.assert_content_item_asset_owner()
 returns trigger
 language plpgsql
@@ -213,6 +283,9 @@ $$;
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.create_profile_for_auth_user();
+insert into public.profiles (id, role)
+select id, 'reviewer' from auth.users
+on conflict (id) do nothing;
 create trigger profiles_set_updated_at
   before update on public.profiles
   for each row execute function public.set_updated_at();
@@ -251,12 +324,15 @@ create policy "Users read their profile" on public.profiles
 create policy "Users read their assets" on public.assets
   for select to authenticated using (auth.uid() = owner_id);
 create policy "Users upload their assets" on public.assets
-  for insert to authenticated with check (auth.uid() = owner_id);
+  for insert to authenticated with check (
+    auth.uid() = owner_id and public.is_owner_profile(auth.uid())
+  );
 create policy "Users read their content" on public.content_items
   for select to authenticated using (auth.uid() = owner_id);
 create policy "Users create uploaded content" on public.content_items
   for insert to authenticated with check (
     state = 'UPLOADED' and auth.uid() = owner_id
+    and public.is_owner_profile(auth.uid())
   );
 create policy "Users read their copy drafts" on public.copy_drafts
   for select to authenticated using (auth.uid() = owner_id);
@@ -280,4 +356,5 @@ create policy "Authenticated owners upload content assets" on storage.objects
   for insert to authenticated with check (
     bucket_id = 'content-assets'
     and owner_id = (select auth.uid()::text)
+    and public.is_owner_profile(auth.uid())
   );

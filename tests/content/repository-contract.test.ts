@@ -4,7 +4,11 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { createDemoRepository } from "@/lib/demo/repository";
-import { getContentRepositoryMode } from "@/lib/content/repository-factory";
+import {
+  createContentRepository,
+  getContentRepositoryMode,
+  resetDemoRepositoryForTests,
+} from "@/lib/content/repository-factory";
 import { AUTOMATION_RUN_KINDS } from "@/lib/content/repository";
 
 const validBrief = {
@@ -60,6 +64,17 @@ describe("content repository contract", () => {
       true,
     );
     expect(new Set(targets.map((target) => target.id)).size).toBe(2);
+  });
+
+  it("keeps demo content across separate factory resolutions", async () => {
+    resetDemoRepositoryForTests();
+    const firstRepository = await createContentRepository({ environment: {} });
+    const item = await firstRepository.createContentItem(validBrief);
+    const secondRepository = await createContentRepository({ environment: {} });
+
+    await expect(secondRepository.listPublicationTargets(item.id)).resolves.toHaveLength(
+      2,
+    );
   });
 
   it("rejects a content item whose brief is not valid", async () => {
@@ -120,6 +135,20 @@ describe("content storage migration", () => {
     expect(sql).toMatch(/create trigger assert_publication_target_content_owner/i);
     expect(sql).toMatch(/create trigger assert_automation_run_content_owner/i);
     expect(sql).toMatch(/create trigger assert_audit_event_reference_owner/i);
+    expect(sql).toMatch(/create function public\.create_content_item_with_targets/i);
+    expect(sql).toMatch(/insert into public\.publication_targets[\s\S]*'FACEBOOK'[\s\S]*'INSTAGRAM'/i);
+    expect(sql).toMatch(/insert into public\.audit_events[\s\S]*'CONTENT_CREATED'/i);
+    expect(sql).toMatch(
+      /insert into public\.profiles \(id, role\)[\s\S]*select id, 'reviewer'[\s\S]*on conflict \(id\) do nothing/i,
+    );
+    expect(sql).toMatch(/create function public\.is_owner_profile/i);
+    expect(sql).toMatch(/role = 'owner'/i);
+    expect(sql).toMatch(
+      /revoke all on function public\.create_content_item_with_targets/i,
+    );
+    expect(sql).toMatch(
+      /grant execute on function public\.create_content_item_with_targets[\s\S]*to service_role/i,
+    );
     expect(sql).toMatch(
       /publication_target\.content_item_id\s*=\s*new\.content_item_id/i,
     );

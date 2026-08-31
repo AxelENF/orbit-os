@@ -30,6 +30,22 @@ with the Supabase CLI or SQL editor in the intended environment. The migration
 creates a private `content-assets` storage bucket and owner-only RLS policies.
 Live RLS/migration verification remains pending until staging credentials exist.
 
+## Initial owner bootstrap
+
+The migration creates and backfills profiles as `reviewer`, and clients cannot
+change roles. After identifying the intended user's Auth UUID, an operator with
+server/database access promotes that UUID to `owner` in `public.profiles`.
+Do this through a reviewed, privileged runbook; never from the browser and never
+by hardcoding an email in a migration. Only an `owner` profile can invoke the
+protected content-creation RPC.
+
+```sql
+-- Run only through a privileged operator session after verifying this Auth UUID.
+update public.profiles
+set role = 'owner'
+where id = '<auth-user-uuid>';
+```
+
 Automation idempotency is scoped to `(kind, idempotency_key)`: a copy or
 publish request and its callback can share one logical key, while a duplicate
 of the same kind is rejected.

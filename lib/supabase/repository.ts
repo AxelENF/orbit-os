@@ -1,62 +1,81 @@
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { z } from "zod";
 
-import type { ContentBrief } from "@/lib/content/contracts";
+import { contentBriefSchema } from "@/lib/content/contracts";
 import {
   PUBLICATION_PLATFORMS,
+  PUBLICATION_TARGET_STATUSES,
   type ContentItem,
   type ContentRepository,
   type PublicationTarget,
 } from "@/lib/content/repository";
-import { parseContentBrief } from "@/lib/content/validation";
+import { contentStateSchema } from "@/lib/content/state-machine";
 
-type ContentItemRow = {
-  id: string;
-  business_line: ContentBrief["businessLine"];
-  service: ContentBrief["service"];
-  niche: ContentBrief["niche"];
-  content_type: ContentBrief["contentType"];
-  objective: ContentBrief["objective"];
-  format: ContentBrief["format"];
-  cta: string;
-  human_description: string;
-  allowed_facts: string[];
-  state: "DRAFT";
-  created_at: string;
-};
+const contentItemRowSchema = z.object({
+  id: z.string().uuid(),
+  business_line: z.string(),
+  service: z.string(),
+  niche: z.string(),
+  content_type: z.string(),
+  objective: z.string(),
+  format: z.string(),
+  cta: z.string(),
+  human_description: z.string(),
+  allowed_facts: z.array(z.string()),
+  state: contentStateSchema,
+  created_at: z.string().datetime({ offset: true }),
+});
 
-type PublicationTargetRow = {
-  id: string;
-  content_item_id: string;
-  platform: PublicationTarget["platform"];
-  status: PublicationTarget["status"];
-};
+const publicationTargetRowSchema = z.object({
+  id: z.string().uuid(),
+  content_item_id: z.string().uuid(),
+  platform: z.enum(PUBLICATION_PLATFORMS),
+  status: z.enum(PUBLICATION_TARGET_STATUSES),
+});
 
-function toContentItem(row: ContentItemRow): ContentItem {
+function toContentItem(row: unknown): ContentItem {
+  const parsedRow = contentItemRowSchema.safeParse(row);
+  if (!parsedRow.success) {
+    throw new Error("Supabase returned an invalid content item.");
+  }
+
+  const brief = contentBriefSchema.safeParse({
+    businessLine: parsedRow.data.business_line,
+    service: parsedRow.data.service,
+    niche: parsedRow.data.niche,
+    contentType: parsedRow.data.content_type,
+    objective: parsedRow.data.objective,
+    format: parsedRow.data.format,
+    cta: parsedRow.data.cta,
+    humanDescription: parsedRow.data.human_description,
+    allowedFacts: parsedRow.data.allowed_facts,
+  });
+  if (!brief.success) {
+    throw new Error("Supabase returned an invalid content brief.");
+  }
+
   return {
-    id: row.id,
-    businessLine: row.business_line,
-    service: row.service,
-    niche: row.niche,
-    contentType: row.content_type,
-    objective: row.objective,
-    format: row.format,
-    cta: row.cta,
-    humanDescription: row.human_description,
-    allowedFacts: row.allowed_facts,
-    state: row.state,
-    createdAt: row.created_at,
+    ...brief.data,
+    id: parsedRow.data.id,
+    state: parsedRow.data.state,
+    createdAt: parsedRow.data.created_at,
   };
 }
 
-function toPublicationTarget(row: PublicationTargetRow): PublicationTarget {
-  return {
+function toPublicationTargets(rows: unknown): PublicationTarget[] {
+  const parsedRows = z.array(publicationTargetRowSchema).safeParse(rows);
+  if (!parsedRows.success) {
+    throw new Error("Supabase returned invalid publication targets.");
+  }
+
+  return parsedRows.data.map((row) => ({
     id: row.id,
     contentItemId: row.content_item_id,
     platform: row.platform,
     status: row.status,
-  };
+  }));
 }
 
 class SupabaseContentRepository implements ContentRepository {
@@ -66,46 +85,28 @@ class SupabaseContentRepository implements ContentRepository {
   ) {}
 
   async createContentItem(input: unknown): Promise<ContentItem> {
-    const brief = parseContentBrief(input);
-    const { data, error } = await this.client
-      .from("content_items")
-      .insert({
-        owner_id: this.ownerId,
-        business_line: brief.businessLine,
-        service: brief.service,
-        niche: brief.niche,
-        content_type: brief.contentType,
-        objective: brief.objective,
-        format: brief.format,
-        cta: brief.cta,
-        human_description: brief.humanDescription,
-        allowed_facts: brief.allowedFacts,
-        state: "DRAFT",
-      })
-      .select()
-      .single();
+    const brief = contentBriefSchema.parse(input);
+    const { data, error } = await this.client.rpc(
+      "create_content_item_with_targets",
+      {
+        p_owner_id: this.ownerId,
+        p_business_line: brief.businessLine,
+        p_service: brief.service,
+        p_niche: brief.niche,
+        p_content_type: brief.contentType,
+        p_objective: brief.objective,
+        p_format: brief.format,
+        p_cta: brief.cta,
+        p_human_description: brief.humanDescription,
+        p_allowed_facts: brief.allowedFacts,
+      },
+    );
 
     if (error) {
       throw new Error("Unable to create the content item.");
     }
 
-    const item = toContentItem(data as ContentItemRow);
-    const { error: targetsError } = await this.client
-      .from("publication_targets")
-      .insert(
-        PUBLICATION_PLATFORMS.map((platform) => ({
-          owner_id: this.ownerId,
-          content_item_id: item.id,
-          platform,
-          status: "PENDING_REVIEW",
-        })),
-      );
-
-    if (targetsError) {
-      throw new Error("Unable to create publication targets.");
-    }
-
-    return item;
+    return toContentItem(data);
   }
 
   async listPublicationTargets(
@@ -122,7 +123,7 @@ class SupabaseContentRepository implements ContentRepository {
       throw new Error("Unable to list publication targets.");
     }
 
-    return (data as PublicationTargetRow[]).map(toPublicationTarget);
+    return toPublicationTargets(data);
   }
 }
 
