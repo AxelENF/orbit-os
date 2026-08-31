@@ -95,10 +95,10 @@ create table public.automation_runs (
 
 create table public.audit_events (
   id uuid primary key default gen_random_uuid(),
-  owner_id uuid not null references public.profiles(id) on delete cascade,
-  actor_id uuid references public.profiles(id) on delete set null,
-  content_item_id uuid references public.content_items(id) on delete cascade,
-  publication_target_id uuid references public.publication_targets(id) on delete cascade,
+  owner_id uuid not null references public.profiles(id) on delete restrict,
+  actor_id uuid references public.profiles(id) on delete restrict,
+  content_item_id uuid references public.content_items(id) on delete restrict,
+  publication_target_id uuid references public.publication_targets(id) on delete restrict,
   event_type text not null,
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
@@ -280,6 +280,16 @@ begin
 end;
 $$;
 
+create function public.reject_audit_event_mutation()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  raise exception 'Audit events are immutable: % is not allowed', tg_op;
+end;
+$$;
+
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.create_profile_for_auth_user();
@@ -308,8 +318,11 @@ create trigger assert_automation_run_content_owner
   before insert or update of owner_id, content_item_id, publication_target_id on public.automation_runs
   for each row execute function public.assert_automation_run_owner();
 create trigger assert_audit_event_reference_owner
-  before insert or update of owner_id, content_item_id, publication_target_id on public.audit_events
+  before insert on public.audit_events
   for each row execute function public.assert_audit_event_reference_owner();
+create trigger prevent_audit_event_mutation
+  before update or delete on public.audit_events
+  for each row execute function public.reject_audit_event_mutation();
 
 alter table public.profiles enable row level security;
 alter table public.assets enable row level security;

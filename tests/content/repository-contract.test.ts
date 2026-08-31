@@ -135,6 +135,8 @@ describe("content storage migration", () => {
     expect(sql).toMatch(/create trigger assert_publication_target_content_owner/i);
     expect(sql).toMatch(/create trigger assert_automation_run_content_owner/i);
     expect(sql).toMatch(/create trigger assert_audit_event_reference_owner/i);
+    expect(sql).toMatch(/create function public\.reject_audit_event_mutation/i);
+    expect(sql).toMatch(/create trigger prevent_audit_event_mutation/i);
     expect(sql).toMatch(/create function public\.create_content_item_with_targets/i);
     expect(sql).toMatch(/insert into public\.publication_targets[\s\S]*'FACEBOOK'[\s\S]*'INSTAGRAM'/i);
     expect(sql).toMatch(/insert into public\.audit_events[\s\S]*'CONTENT_CREATED'/i);
@@ -168,5 +170,12 @@ describe("content storage migration", () => {
     expect(sql).not.toMatch(
       /create policy[^;]*on public\.audit_events\s+for (?:insert|update|delete)/i,
     );
+
+    const auditEventsTable = sql.match(
+      /create table public\.audit_events\s*\(([\s\S]*?)\n\);/i,
+    )?.[1];
+    expect(auditEventsTable).toBeDefined();
+    expect(auditEventsTable).not.toMatch(/on delete cascade/i);
+    expect(auditEventsTable).toMatch(/on delete restrict/i);
   });
 });

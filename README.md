@@ -30,6 +30,10 @@ with the Supabase CLI or SQL editor in the intended environment. The migration
 creates a private `content-assets` storage bucket and owner-only RLS policies.
 Live RLS/migration verification remains pending until staging credentials exist.
 
+Audit events are immutable. Their related profile, content item, and publication
+target references use `RESTRICT`, so those records cannot be deleted while an
+audit event depends on them.
+
 ## Initial owner bootstrap
 
 The migration creates and backfills profiles as `reviewer`, and clients cannot
