@@ -119,6 +119,10 @@ describe("content storage migration", () => {
     expect(sql).toMatch(/create trigger assert_copy_draft_content_owner/i);
     expect(sql).toMatch(/create trigger assert_publication_target_content_owner/i);
     expect(sql).toMatch(/create trigger assert_automation_run_content_owner/i);
+    expect(sql).toMatch(/create trigger assert_audit_event_reference_owner/i);
+    expect(sql).toMatch(
+      /publication_target\.content_item_id\s*=\s*new\.content_item_id/i,
+    );
 
     for (const protectedTable of [
       "copy_drafts",
@@ -133,7 +137,7 @@ describe("content storage migration", () => {
       );
     }
     expect(sql).not.toMatch(
-      /create policy[^;]*on public\.audit_events\s+for (?:update|delete)/i,
+      /create policy[^;]*on public\.audit_events\s+for (?:insert|update|delete)/i,
     );
   });
 });

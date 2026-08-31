@@ -177,8 +177,34 @@ begin
     select 1 from public.publication_targets publication_target
     where publication_target.id = new.publication_target_id
       and publication_target.owner_id = new.owner_id
+      and publication_target.content_item_id = new.content_item_id
   ) then
-    raise exception 'Automation run owner must match publication target owner';
+    raise exception 'Automation run target must match owner and content item';
+  end if;
+  return new;
+end;
+$$;
+
+create function public.assert_audit_event_reference_owner()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if new.content_item_id is not null and not exists (
+    select 1 from public.content_items content_item
+    where content_item.id = new.content_item_id
+      and content_item.owner_id = new.owner_id
+  ) then
+    raise exception 'Audit event owner must match content item owner';
+  end if;
+  if new.publication_target_id is not null and not exists (
+    select 1 from public.publication_targets publication_target
+    where publication_target.id = new.publication_target_id
+      and publication_target.owner_id = new.owner_id
+      and publication_target.content_item_id = new.content_item_id
+  ) then
+    raise exception 'Audit event target must match owner and content item';
   end if;
   return new;
 end;
@@ -208,6 +234,9 @@ create trigger assert_publication_target_content_owner
 create trigger assert_automation_run_content_owner
   before insert or update of owner_id, content_item_id, publication_target_id on public.automation_runs
   for each row execute function public.assert_automation_run_owner();
+create trigger assert_audit_event_reference_owner
+  before insert or update of owner_id, content_item_id, publication_target_id on public.audit_events
+  for each row execute function public.assert_audit_event_reference_owner();
 
 alter table public.profiles enable row level security;
 alter table public.assets enable row level security;
@@ -237,8 +266,6 @@ create policy "Users read their automation runs" on public.automation_runs
   for select to authenticated using (auth.uid() = owner_id);
 create policy "Users read their audit events" on public.audit_events
   for select to authenticated using (auth.uid() = owner_id);
-create policy "Users append their audit events" on public.audit_events
-  for insert to authenticated with check (auth.uid() = owner_id);
 
 insert into storage.buckets (id, name, public)
 values ('content-assets', 'content-assets', false)
