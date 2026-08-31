@@ -19,11 +19,17 @@ npm run lint
 - **Demo (default):** leave the Supabase variables unset. The app uses the
   in-memory repository for local development and tests only.
 - **Configured Supabase (later):** copy `.env.example` to `.env.local` and set
-  `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`. These values
-  allow the browser and server to construct anon-key clients only when present.
-  The service-role key is intentionally not included or exposed to the browser.
+  `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and the
+  server-only `SUPABASE_SERVICE_ROLE_KEY`. The selector stays in demo mode
+  until all three are present. The service-role key is never imported into or
+  exposed to the browser.
 
 The database schema has not been applied by this repository. When a Supabase
 project is ready, review `supabase/migrations/0001_content_os.sql` and apply it
 with the Supabase CLI or SQL editor in the intended environment. The migration
 creates a private `content-assets` storage bucket and owner-only RLS policies.
+Live RLS/migration verification remains pending until staging credentials exist.
+
+Automation idempotency is scoped to `(kind, idempotency_key)`: a copy or
+publish request and its callback can share one logical key, while a duplicate
+of the same kind is rejected.
