@@ -17,7 +17,8 @@ npm run lint
 ## Modes
 
 - **Demo (default):** leave the Supabase variables unset. The app uses the
-  in-memory repository for local development and tests only.
+  in-memory repository and browser-local asset previews for local development
+  and tests only. Nothing is uploaded to a remote service.
 - **Configured Supabase (later):** copy `.env.example` to `.env.local` and set
   `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and the
   server-only `SUPABASE_SERVICE_ROLE_KEY`. The selector stays in demo mode

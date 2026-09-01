@@ -1,4 +1,10 @@
+"use client";
+
+import Image from "next/image";
 import Link from "next/link";
+import { useEffect, useState } from "react";
+
+import { readDemoAssets, type DemoBrowserAsset } from "@/lib/demo/browser-assets";
 
 const lanes = [
   { title: "Controlar", description: "POS, inventario y operación visible.", tone: "text-cyan-200" },
@@ -7,6 +13,13 @@ const lanes = [
 ];
 
 export default function LibraryPage() {
+  const [assets, setAssets] = useState<DemoBrowserAsset[]>([]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setAssets(readDemoAssets()), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   return (
     <div className="mx-auto max-w-6xl">
       <div className="flex flex-col gap-6 border-b border-white/[0.08] pb-8 md:flex-row md:items-end md:justify-between">
@@ -40,6 +53,25 @@ export default function LibraryPage() {
         ))}
       </div>
 
+      {assets.length > 0 ? (
+        <section className="mt-8 grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+          {assets.map((asset) => (
+            <article key={asset.contentItemId} className="overflow-hidden rounded-3xl border border-white/[0.08] bg-[#0b1429]">
+              <div className="relative aspect-[4/5] overflow-hidden bg-[#081127]">
+                <Image src={asset.previewDataUrl} alt={`Creativo ${asset.filename}`} fill sizes="(min-width: 1280px) 30vw, (min-width: 640px) 45vw, 100vw" unoptimized className="object-cover" />
+              </div>
+              <div className="space-y-3 p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-cyan-200/75">{asset.content.state}</span>
+                  <span className="text-xs text-slate-500">Demo local</span>
+                </div>
+                <h2 className="truncate text-sm font-semibold text-white">{asset.filename}</h2>
+                <p className="text-xs leading-5 text-slate-500">{asset.content.service} · {asset.content.niche} · {asset.content.contentType}</p>
+              </div>
+            </article>
+          ))}
+        </section>
+      ) : (
       <section className="mt-8 rounded-3xl border border-dashed border-cyan-200/20 bg-cyan-200/[0.025] px-6 py-14 text-center sm:px-10">
         <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-cyan-200/10 text-2xl text-cyan-100 ring-1 ring-cyan-200/20">✦</div>
         <p className="mt-6 font-mono text-[0.65rem] uppercase tracking-[0.22em] text-cyan-200/75">Sin activos todavía</p>
@@ -51,6 +83,7 @@ export default function LibraryPage() {
           Crear primer registro
         </Link>
       </section>
+      )}
     </div>
   );
 }

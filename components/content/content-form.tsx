@@ -16,6 +16,7 @@ import {
   type ContentBrief,
 } from "@/lib/content/contracts";
 import type { ContentRepository } from "@/lib/content/repository";
+import { persistDemoAsset } from "@/lib/demo/browser-assets";
 import { createDemoRepository } from "@/lib/demo/repository";
 
 type FormState = Omit<ContentBrief, "allowedFacts"> & {
@@ -138,7 +139,8 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
       if (onSubmit) {
         await onSubmit(parsedBrief.data, asset);
       } else {
-        await (repository ?? demoRepository).createContentItem(parsedBrief.data);
+        const createdItem = await (repository ?? demoRepository).createContentItem(parsedBrief.data);
+        if (!repository) await persistDemoAsset(createdItem, asset);
       }
       setSuccess(true);
     } catch {
@@ -219,10 +221,10 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
             }))}
           />
           <div>
-            <label className="text-sm font-semibold text-slate-100" htmlFor="format">
+            <p className="text-sm font-semibold text-slate-100">
               Formato
-            </label>
-            <div className={`${inputClasses()} flex items-center justify-between text-slate-300`} id="format">
+            </p>
+            <div className={`${inputClasses()} flex items-center justify-between text-slate-300`} aria-label="Formato">
               <span>Feed 4:5</span>
               <span className="font-mono text-[0.68rem] uppercase tracking-[0.16em] text-cyan-200/80">
                 1080 × 1350
@@ -246,13 +248,17 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
             </label>
             <input
               aria-label="CTA"
+              aria-required="true"
+              aria-invalid={hasAttemptedSubmit && !state.cta.trim()}
+              aria-describedby="cta-help"
               className={inputClasses()}
               id="cta"
+              required
               value={state.cta}
               onChange={(event) => updateField("cta", event.target.value)}
               placeholder="Ej. Escribe AGENDA por WhatsApp"
             />
-            <p className="mt-2 text-xs leading-5 text-slate-500">
+            <p className="mt-2 text-xs leading-5 text-slate-500" id="cta-help">
               Una sola acción clara para la persona que verá el creativo.
             </p>
           </div>
@@ -265,8 +271,12 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
             </label>
             <textarea
               aria-label="Descripción humana"
+              aria-required="true"
+              aria-invalid={hasAttemptedSubmit && !state.humanDescription.trim()}
+              aria-describedby="description-help"
               className={`${inputClasses()} min-h-32 resize-y`}
               id="human-description"
+              required
               value={state.humanDescription}
               onChange={(event) => updateField("humanDescription", event.target.value)}
               placeholder="Qué debe comunicar el creativo y para quién."
@@ -279,13 +289,17 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
             </label>
             <textarea
               aria-label="Hechos permitidos"
+              aria-required="true"
+              aria-invalid={hasAttemptedSubmit && splitAllowedFacts(state.allowedFactsText).length === 0}
+              aria-describedby="facts-help"
               className={`${inputClasses()} min-h-32 resize-y`}
               id="allowed-facts"
+              required
               value={state.allowedFactsText}
               onChange={(event) => updateField("allowedFactsText", event.target.value)}
               placeholder={"Un hecho por línea.\nEj. Atiende solicitudes.\nEj. Agenda citas."}
             />
-            <p className="mt-2 text-xs leading-5 text-slate-500">
+            <p className="mt-2 text-xs leading-5 text-slate-500" id="facts-help">
               Solo se usarán hechos escritos aquí; no agregues promesas, precios o métricas sin respaldo.
             </p>
           </div>
@@ -302,7 +316,7 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
         <button
           className="inline-flex min-h-12 shrink-0 items-center justify-center rounded-xl bg-orange-300 px-5 text-sm font-bold text-[#17110a] shadow-lg shadow-orange-300/10 transition hover:bg-orange-200 focus:outline-none focus:ring-2 focus:ring-orange-200 focus:ring-offset-2 focus:ring-offset-[#0a1020] disabled:cursor-not-allowed disabled:opacity-40"
           type="submit"
-          disabled={!isComplete || isSubmitting}
+          disabled={!isComplete || isSubmitting || success}
           aria-busy={isSubmitting}
         >
           Generar borradores

@@ -4,6 +4,7 @@ import { useId, useState } from "react";
 
 const ACCEPTED_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
 const ACCEPTED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"] as const;
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 
 type AssetDropzoneProps = {
   value: File | null;
@@ -30,6 +31,12 @@ export function AssetDropzone({ value, onChange }: AssetDropzoneProps) {
     if (!isAcceptedImage(file)) {
       onChange(null);
       setError("Usa un archivo PNG, JPG o WEBP para continuar.");
+      return;
+    }
+
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      onChange(null);
+      setError("El creativo debe pesar menos de 20 MB.");
       return;
     }
 
@@ -78,6 +85,8 @@ export function AssetDropzone({ value, onChange }: AssetDropzoneProps) {
       >
         <input
           aria-label="Creativo final de Canva"
+          aria-required="true"
+          required
           id={inputId}
           className="sr-only"
           type="file"
