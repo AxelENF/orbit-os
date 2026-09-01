@@ -17,6 +17,7 @@ import {
 } from "@/lib/content/contracts";
 import type { ContentRepository } from "@/lib/content/repository";
 import { persistDemoAsset } from "@/lib/demo/browser-assets";
+import { persistDemoDraft } from "@/lib/demo/draft-store";
 import { createDemoRepository } from "@/lib/demo/repository";
 
 type FormState = Omit<ContentBrief, "allowedFacts"> & {
@@ -97,6 +98,7 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [createdItemId, setCreatedItemId] = useState<string | null>(null);
   const [demoRepository] = useState(() => createDemoRepository());
 
   const parsedBrief = useMemo(
@@ -136,12 +138,18 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
     setSubmitError(null);
 
     try {
+      let createdItemIdForLink: string | null = null;
       if (onSubmit) {
         await onSubmit(parsedBrief.data, asset);
       } else {
         const createdItem = await (repository ?? demoRepository).createContentItem(parsedBrief.data);
-        if (!repository) await persistDemoAsset(createdItem, asset);
+        createdItemIdForLink = createdItem.id;
+        if (!repository) {
+          await persistDemoAsset(createdItem, asset);
+          persistDemoDraft(createdItem);
+        }
       }
+      setCreatedItemId(createdItemIdForLink);
       setSuccess(true);
     } catch {
       setSubmitError(
@@ -349,6 +357,12 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
           <p className="mt-1 text-xs leading-5 text-slate-400">
             No se envió ninguna solicitud a servicios externos.
           </p>
+          <a
+            className="mt-4 inline-flex rounded-lg border border-cyan-200/25 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-200/10"
+            href={createdItemId ? `/drafts/${createdItemId}` : "/drafts"}
+          >
+            Revisar borradores →
+          </a>
         </div>
       ) : null}
     </form>

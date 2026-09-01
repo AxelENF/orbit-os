@@ -5,6 +5,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ContentForm } from "@/components/content/content-form";
+import { clearDemoDrafts, readDemoDrafts } from "@/lib/demo/draft-store";
+import { clearDemoAssets } from "@/lib/demo/browser-assets";
 
 const completeBriefFields = () => {
   fireEvent.change(screen.getByLabelText("CTA"), {
@@ -24,7 +26,11 @@ const completeBriefFields = () => {
 };
 
 describe("ContentForm", () => {
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    clearDemoDrafts();
+    clearDemoAssets();
+  });
 
   it("keeps generate disabled until the commercial brief is factual and complete", () => {
     render(<ContentForm onSubmit={vi.fn()} />);
@@ -65,5 +71,21 @@ describe("ContentForm", () => {
     expect(
       screen.getByText("Siguiente paso: revisar los borradores antes de publicar."),
     ).toBeInTheDocument();
+  });
+
+  it("creates two local draft options after a default demo submission", async () => {
+    render(<ContentForm />);
+
+    completeBriefFields();
+    fireEvent.click(screen.getByRole("button", { name: "Generar borradores" }));
+
+    await waitFor(() => expect(screen.getByText("Borrador guardado en modo local")).toBeInTheDocument());
+
+    const drafts = readDemoDrafts();
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]?.drafts).toHaveLength(2);
+    expect(drafts[0]?.visualAnalysis.source).toBe("local-demo");
+    expect(drafts[0]?.targets.map((target) => target.platform)).toEqual(["FACEBOOK", "INSTAGRAM"]);
+
   });
 });

@@ -2,7 +2,7 @@ import type { ContentBrief } from "@/lib/content/contracts";
 import type { ContentState } from "@/lib/content/state-machine";
 
 export const PUBLICATION_PLATFORMS = ["FACEBOOK", "INSTAGRAM"] as const;
-export const PUBLICATION_TARGET_STATUSES = ["PENDING_REVIEW"] as const;
+export const PUBLICATION_TARGET_STATUSES = ["PENDING_REVIEW", "APPROVED"] as const;
 export const AUTOMATION_RUN_KINDS = [
   "COPY_REQUEST",
   "COPY_CALLBACK",
