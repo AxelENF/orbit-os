@@ -281,6 +281,9 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
               onChange={(event) => updateField("humanDescription", event.target.value)}
               placeholder="Qué debe comunicar el creativo y para quién."
             />
+            <p className="mt-2 text-xs leading-5 text-slate-500" id="description-help">
+              Describe el dolor, el resultado y el tipo de negocio al que va dirigido.
+            </p>
           </div>
 
           <div>
@@ -367,8 +370,10 @@ function SelectField({ id, label, value, options, onChange }: SelectFieldProps) 
         {label}
       </label>
       <select
+        aria-required="true"
         className={inputClasses()}
         id={id}
+        required
         value={value}
         onChange={(event) => onChange(event.target.value)}
       >
