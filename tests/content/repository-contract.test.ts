@@ -179,3 +179,18 @@ describe("content storage migration", () => {
     expect(auditEventsTable).toMatch(/on delete restrict/i);
   });
 });
+
+describe("n8n configuration contract", () => {
+  it("uses one shared-secret environment variable across portal documentation", async () => {
+    const envPath = fileURLToPath(new URL("../../.env.example", import.meta.url));
+    const readmePath = fileURLToPath(new URL("../../README.md", import.meta.url));
+    const [environmentExample, readme] = await Promise.all([
+      readFile(envPath, "utf8"),
+      readFile(readmePath, "utf8"),
+    ]);
+
+    expect(environmentExample).toContain("SNAPGAD_N8N_SHARED_SECRET=");
+    expect(environmentExample).not.toMatch(/^N8N_SHARED_SECRET=/m);
+    expect(readme).toContain("SNAPGAD_N8N_SHARED_SECRET");
+  });
+});

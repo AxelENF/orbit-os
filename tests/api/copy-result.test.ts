@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createCopyResultHandler,
@@ -108,6 +108,26 @@ describe("POST /api/integrations/n8n/copy-result", () => {
       getSecret: () => SECRET,
       nowMs: () => NOW_MS,
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("reads the shared secret name used by the n8n workflow", async () => {
+    vi.stubEnv("SNAPGAD_N8N_SHARED_SECRET", SECRET);
+    const item = await repository.createContentItem(validBrief);
+    await repository.beginCopyGeneration(item.id);
+    const environmentHandler = createCopyResultHandler({
+      getRepository: async () => repository,
+      nowMs: () => NOW_MS,
+    });
+
+    const response = await environmentHandler(
+      signedRequest(validCallback(item.id)),
+    );
+
+    expect(response.status).toBe(202);
   });
 
   it("rejects missing or invalid signatures before persistence", async () => {

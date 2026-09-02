@@ -1,4 +1,7 @@
-import type { ContentRepository } from "@/lib/content/repository";
+import type {
+  ContentRepository,
+  CopyResultRepository,
+} from "@/lib/content/repository";
 import { createDemoRepository } from "@/lib/demo/repository";
 import { hasSupabaseBrowserConfig } from "@/lib/supabase/client";
 
@@ -10,7 +13,9 @@ type CreateContentRepositoryOptions = {
 
 export type ContentRepositoryMode = "demo" | "supabase";
 
-let demoRepository: ContentRepository | undefined;
+let demoRepository:
+  | (ContentRepository & Pick<CopyResultRepository, "ingestCopyResult">)
+  | undefined;
 
 export function getContentRepositoryMode(
   environment: SupabaseRepositoryEnvironment = process.env,
@@ -19,6 +24,15 @@ export function getContentRepositoryMode(
     Boolean(environment.SUPABASE_SERVICE_ROLE_KEY)
     ? "supabase"
     : "demo";
+}
+
+function hasSupabaseServiceRoleConfig(
+  environment: SupabaseRepositoryEnvironment,
+): boolean {
+  return Boolean(
+    environment.NEXT_PUBLIC_SUPABASE_URL &&
+      environment.SUPABASE_SERVICE_ROLE_KEY,
+  );
 }
 
 /**
@@ -51,6 +65,30 @@ export async function createContentRepository(
   }
 
   return createSupabaseRepository(createSupabaseServiceRoleClient(), user.id);
+}
+
+/**
+ * Resolves the HMAC-authenticated machine-to-machine callback boundary.
+ * Supabase callbacks use only the service-role client; owner identity is
+ * derived from the locked content item inside the database RPC.
+ */
+export async function createN8nCallbackRepository(
+  options: CreateContentRepositoryOptions = {},
+): Promise<Pick<CopyResultRepository, "ingestCopyResult">> {
+  const environment = options.environment ?? process.env;
+
+  if (!hasSupabaseServiceRoleConfig(environment)) {
+    demoRepository ??= createDemoRepository();
+    return demoRepository;
+  }
+
+  const [{ createSupabaseServiceRoleClient }, { createSupabaseCallbackRepository }] =
+    await Promise.all([
+      import("@/lib/supabase/server"),
+      import("@/lib/supabase/repository"),
+    ]);
+
+  return createSupabaseCallbackRepository(createSupabaseServiceRoleClient());
 }
 
 /** Test support only; production code never resets process-local demo state. */

@@ -350,7 +350,7 @@ Expected: fail because signature verification and endpoint are absent.
 
 - [ ] **Step 4: Implement callback only**
 
-Verify a SHA-256 HMAC against `N8N_SHARED_SECRET`; reject missing/invalid
+Verify a SHA-256 HMAC against `SNAPGAD_N8N_SHARED_SECRET`; reject missing/invalid
 signatures with 401. Validate body with Zod, persist draft alternatives and
 audit event exactly once, then move content `GENERATING → DRAFT`.
 

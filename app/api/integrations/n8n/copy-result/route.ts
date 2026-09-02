@@ -2,11 +2,10 @@ import { z } from "zod";
 
 import {
   CopyResultConflictError,
-  type ContentRepository,
   type CopyResultCallback,
   type CopyResultRepository,
 } from "@/lib/content/repository";
-import { createContentRepository } from "@/lib/content/repository-factory";
+import { createN8nCallbackRepository } from "@/lib/content/repository-factory";
 import { verifyN8nSignature } from "@/lib/integrations/n8n-signature";
 
 const requiredText = z.string().trim().min(1).max(10_000);
@@ -42,19 +41,10 @@ export const copyResultSchema = z
   .strict();
 
 type CopyResultHandlerDependencies = {
-  getRepository?: () => Promise<ContentRepository>;
+  getRepository?: () => Promise<Pick<CopyResultRepository, "ingestCopyResult">>;
   getSecret?: () => string | undefined;
   nowMs?: () => number;
 };
-
-function supportsCopyResultIngestion(
-  repository: ContentRepository,
-): repository is ContentRepository & Pick<CopyResultRepository, "ingestCopyResult"> {
-  return (
-    typeof (repository as Partial<CopyResultRepository>).ingestCopyResult ===
-    "function"
-  );
-}
 
 function jsonError(error: string, status: number): Response {
   return Response.json({ error }, { status });
@@ -63,8 +53,11 @@ function jsonError(error: string, status: number): Response {
 export function createCopyResultHandler(
   dependencies: CopyResultHandlerDependencies = {},
 ): (request: Request) => Promise<Response> {
-  const getRepository = dependencies.getRepository ?? createContentRepository;
-  const getSecret = dependencies.getSecret ?? (() => process.env.N8N_SHARED_SECRET);
+  const getRepository =
+    dependencies.getRepository ?? createN8nCallbackRepository;
+  const getSecret =
+    dependencies.getSecret ??
+    (() => process.env.SNAPGAD_N8N_SHARED_SECRET);
   const nowMs = dependencies.nowMs ?? Date.now;
 
   return async function handleCopyResult(request: Request): Promise<Response> {
@@ -102,10 +95,6 @@ export function createCopyResultHandler(
 
     try {
       const repository = await getRepository();
-      if (!supportsCopyResultIngestion(repository)) {
-        return jsonError("INTEGRATION_NOT_CONFIGURED", 503);
-      }
-
       const result = await repository.ingestCopyResult(
         parsed.data as CopyResultCallback,
       );

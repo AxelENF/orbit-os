@@ -21,7 +21,8 @@ npm run lint
   and tests only. Nothing is uploaded to a remote service.
 - **Configured Supabase (later):** copy `.env.example` to `.env.local` and set
   `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and the
-  server-only `SUPABASE_SERVICE_ROLE_KEY`. The selector stays in demo mode
+  server-only `SUPABASE_SERVICE_ROLE_KEY`. Signed n8n callbacks additionally
+  require `SNAPGAD_N8N_SHARED_SECRET` on both servers. The selector stays in demo mode
   until all three are present. The service-role key is never imported into or
   exposed to the browser.
 
@@ -30,6 +31,11 @@ project is ready, review `supabase/migrations/0001_content_os.sql` and apply it
 with the Supabase CLI or SQL editor in the intended environment. The migration
 creates a private `content-assets` storage bucket and owner-only RLS policies.
 Live RLS/migration verification remains pending until staging credentials exist.
+
+The n8n callback route uses HMAC authentication and a service-role repository,
+not a browser session. Its database RPC derives `owner_id` from the locked
+content item and atomically records idempotency, both copy alternatives, a
+sanitized audit event, and the `GENERATING` to `DRAFT` transition.
 
 Audit events are immutable. Their related profile, content item, and publication
 target references use `RESTRICT`, so those records cannot be deleted while an

@@ -5,10 +5,14 @@ import { z } from "zod";
 
 import { contentBriefSchema } from "@/lib/content/contracts";
 import {
+  CopyResultConflictError,
   PUBLICATION_PLATFORMS,
   PUBLICATION_TARGET_STATUSES,
   type ContentItem,
   type ContentRepository,
+  type CopyResultCallback,
+  type CopyResultIngestion,
+  type CopyResultRepository,
   type PublicationTarget,
 } from "@/lib/content/repository";
 import { contentStateSchema } from "@/lib/content/state-machine";
@@ -33,6 +37,10 @@ const publicationTargetRowSchema = z.object({
   content_item_id: z.string().uuid(),
   platform: z.enum(PUBLICATION_PLATFORMS),
   status: z.enum(PUBLICATION_TARGET_STATUSES),
+});
+
+const copyResultIngestionSchema = z.object({
+  created: z.boolean(),
 });
 
 function toContentItem(row: unknown): ContentItem {
@@ -78,11 +86,55 @@ function toPublicationTargets(rows: unknown): PublicationTarget[] {
   }));
 }
 
-class SupabaseContentRepository implements ContentRepository {
+class SupabaseCopyResultRepository
+  implements Pick<CopyResultRepository, "ingestCopyResult">
+{
+  constructor(protected readonly client: SupabaseClient) {}
+
+  async ingestCopyResult(
+    input: CopyResultCallback,
+  ): Promise<CopyResultIngestion> {
+    const { data, error } = await this.client.rpc(
+      "ingest_copy_result_callback",
+      {
+        p_content_item_id: input.contentItemId,
+        p_idempotency_key: input.idempotencyKey,
+        p_visual_analysis: input.visualAnalysis,
+        p_drafts: input.drafts,
+        p_warnings: input.warnings,
+        p_provider: input.provider ?? null,
+        p_model: input.model ?? null,
+      },
+    );
+
+    if (error) {
+      if (
+        error.message === "COPY_RESULT_INVALID_STATE" ||
+        error.message === "COPY_RESULT_CONTENT_NOT_FOUND"
+      ) {
+        throw new CopyResultConflictError();
+      }
+      throw new Error("Unable to ingest the copy result.");
+    }
+
+    const result = copyResultIngestionSchema.safeParse(data);
+    if (!result.success) {
+      throw new Error("Supabase returned an invalid copy result ingestion.");
+    }
+    return result.data;
+  }
+}
+
+class SupabaseContentRepository
+  extends SupabaseCopyResultRepository
+  implements ContentRepository
+{
   constructor(
-    private readonly client: SupabaseClient,
+    client: SupabaseClient,
     private readonly ownerId: string,
-  ) {}
+  ) {
+    super(client);
+  }
 
   async createContentItem(input: unknown): Promise<ContentItem> {
     const brief = contentBriefSchema.parse(input);
@@ -131,6 +183,13 @@ class SupabaseContentRepository implements ContentRepository {
 export function createSupabaseRepository(
   client: SupabaseClient,
   ownerId: string,
-): ContentRepository {
+): ContentRepository & Pick<CopyResultRepository, "ingestCopyResult"> {
   return new SupabaseContentRepository(client, ownerId);
+}
+
+/** Service-role callback adapter; it never accepts owner identity from n8n. */
+export function createSupabaseCallbackRepository(
+  client: SupabaseClient,
+): Pick<CopyResultRepository, "ingestCopyResult"> {
+  return new SupabaseCopyResultRepository(client);
 }
