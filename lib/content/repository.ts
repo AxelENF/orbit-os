@@ -33,6 +33,59 @@ export type PublicationTarget = {
   status: PublicationTargetStatus;
 };
 
+export type CopyResultCallback = {
+  contentItemId: string;
+  idempotencyKey: string;
+  visualAnalysis: Record<string, unknown>;
+  drafts: Array<{
+    headline: string;
+    body: string;
+    cta: string;
+  }>;
+  warnings: string[];
+  provider?: string;
+  model?: string;
+};
+
+export type StoredCopyDraft = CopyResultCallback["drafts"][number] & {
+  id: string;
+  contentItemId: string;
+  visualAnalysis: Record<string, unknown>;
+  provider?: string;
+  model?: string;
+  createdAt: string;
+};
+
+export type ContentAuditEvent = {
+  id: string;
+  contentItemId: string;
+  type: string;
+  status: "info" | "success" | "warning";
+  message: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type CopyResultIngestion = {
+  created: boolean;
+};
+
+/** Persistence needed by signed n8n copy callbacks. */
+export interface CopyResultRepository {
+  getContentItem(contentItemId: string): Promise<ContentItem | null>;
+  beginCopyGeneration(contentItemId: string): Promise<ContentItem>;
+  ingestCopyResult(input: CopyResultCallback): Promise<CopyResultIngestion>;
+  listCopyDrafts(contentItemId: string): Promise<StoredCopyDraft[]>;
+  listAuditEvents(contentItemId: string): Promise<ContentAuditEvent[]>;
+}
+
+export class CopyResultConflictError extends Error {
+  constructor() {
+    super("The copy result cannot be applied to the current content state.");
+    this.name = "CopyResultConflictError";
+  }
+}
+
 /**
  * Persistence boundary for the portal. UI and routes depend on this contract,
  * never directly on a specific database client.
