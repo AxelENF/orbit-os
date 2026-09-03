@@ -60,3 +60,19 @@ where id = '<auth-user-uuid>';
 Automation idempotency is scoped to `(kind, idempotency_key)`: a copy or
 publish request and its callback can share one logical key, while a duplicate
 of the same kind is rejected.
+
+## n8n Content Engine V1
+
+The inactive export at [`n8n/SnapGad-Content-Engine-V1.json`](n8n/SnapGad-Content-Engine-V1.json)
+contains two signed webhook paths:
+
+- `POST /webhook/snapgad/content/copy` — OpenRouter vision/copy generation and
+  callback with two alternatives.
+- `POST /webhook/snapgad/content/publish` — approved, target-specific Meta
+  publication for Facebook or Instagram.
+
+Use the runbooks in [`docs/n8n/`](docs/n8n/) before importing. Keep the workflow
+inactive until Supabase migrations `0001`, `0002`, and `0003` are applied in a
+staging project, the portal callback URL is reachable, and one approved test
+asset has been verified. The export contains no credentials and has not been
+imported or activated in the connected n8n instance.
