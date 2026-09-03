@@ -86,4 +86,20 @@ describe("SnapGad Content Engine n8n export", () => {
       expect.stringContaining("Instagram — Firmar Callback"),
     );
   });
+
+  it("signs the JSON actually sent on success and error callbacks", async () => {
+    const path = fileURLToPath(
+      new URL("../../n8n/SnapGad-Content-Engine-V1.json", import.meta.url),
+    );
+    const raw = await readFile(path, "utf8");
+    const signerScripts = raw
+      .split(/\r?\n/)
+      .filter((line) => line.includes("callbackError") && line.includes("const stable"));
+
+    expect(signerScripts).toHaveLength(2);
+    for (const script of signerScripts) {
+      expect(script).toContain("filter((key) => value[key] !== undefined)");
+      expect(script).toContain("join(',') + '}'");
+    }
+  });
 });
