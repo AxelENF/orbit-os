@@ -7,6 +7,7 @@ type N8nNode = {
   name: string;
   type: string;
   parameters?: {
+    url?: string;
     path?: string;
     sendBody?: boolean;
     specifyBody?: string;
@@ -64,5 +65,25 @@ describe("SnapGad Content Engine n8n export", () => {
         expect(parameters.jsonBody, node.name).toEqual(expect.any(String));
       }
     }
+  });
+
+  it("keeps idempotency keys after callback HTTP nodes replace the current item", async () => {
+    const path = fileURLToPath(
+      new URL("../../n8n/SnapGad-Content-Engine-V1.json", import.meta.url),
+    );
+    const workflow = JSON.parse(await readFile(path, "utf8")) as {
+      nodes?: N8nNode[];
+    };
+    const byName = new Map((workflow.nodes ?? []).map((node) => [node.name, node]));
+
+    expect(byName.get("Copy — Registrar Callback")?.parameters?.url).toEqual(
+      expect.stringContaining("Copy — Firmar Callback al Portal"),
+    );
+    expect(byName.get("Facebook — Registrar Resultado")?.parameters?.url).toEqual(
+      expect.stringContaining("Facebook — Firmar Callback"),
+    );
+    expect(byName.get("Instagram — Registrar Resultado")?.parameters?.url).toEqual(
+      expect.stringContaining("Instagram — Firmar Callback"),
+    );
   });
 });

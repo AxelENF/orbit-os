@@ -262,7 +262,7 @@
     {
       "parameters": {
         "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.COPY_REQUEST&idempotency_key=eq.' + encodeURIComponent($json.idempotencyKey) }}",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.COPY_REQUEST&idempotency_key=eq.' + encodeURIComponent($('Copy — Firmar Callback al Portal').first().json.idempotencyKey) }}",
         "sendHeaders": true,
         "headerParameters": { "parameters": [
           { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
@@ -580,7 +580,7 @@
     {
       "parameters": {
         "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.PUBLISH_REQUEST&idempotency_key=eq.' + encodeURIComponent($json.idempotencyKey) }}",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.PUBLISH_REQUEST&idempotency_key=eq.' + encodeURIComponent($('Facebook — Firmar Callback').first().json.idempotencyKey) }}",
         "sendHeaders": true,
         "headerParameters": { "parameters": [
           { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
@@ -603,7 +603,7 @@
     {
       "parameters": {
         "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.PUBLISH_REQUEST&idempotency_key=eq.' + encodeURIComponent($json.idempotencyKey) }}",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.PUBLISH_REQUEST&idempotency_key=eq.' + encodeURIComponent($('Instagram — Firmar Callback').first().json.idempotencyKey) }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
