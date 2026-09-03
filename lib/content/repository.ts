@@ -2,7 +2,14 @@ import type { ContentBrief } from "@/lib/content/contracts";
 import type { ContentState } from "@/lib/content/state-machine";
 
 export const PUBLICATION_PLATFORMS = ["FACEBOOK", "INSTAGRAM"] as const;
-export const PUBLICATION_TARGET_STATUSES = ["PENDING_REVIEW", "APPROVED"] as const;
+export const PUBLICATION_TARGET_STATUSES = [
+  "PENDING_REVIEW",
+  "APPROVED",
+  "REJECTED",
+  "SCHEDULED",
+  "PUBLISHED",
+  "ERROR",
+] as const;
 export const AUTOMATION_RUN_KINDS = [
   "COPY_REQUEST",
   "COPY_CALLBACK",
@@ -31,6 +38,54 @@ export type PublicationTarget = {
   contentItemId: string;
   platform: PublicationPlatform;
   status: PublicationTargetStatus;
+  remotePostId?: string;
+  remoteUrl?: string;
+  publishedAt?: string;
+  lastError?: string;
+};
+
+export type PublishRequestPreparationInput = {
+  contentItemId: string;
+  publicationTargetId: string;
+  idempotencyKey: string;
+};
+
+export type PublishRequestPreparation = {
+  created: boolean;
+  status: "READY" | "DRY_RUN_QUEUED";
+  ownerId: string;
+  approvedAt: string;
+  target: PublicationTarget & { status: "APPROVED" };
+};
+
+type PublishResultIdentity = {
+  contentItemId: string;
+  publicationTargetId: string;
+  platform: PublicationPlatform;
+  idempotencyKey: string;
+};
+
+export type PublishResultCallback = PublishResultIdentity &
+  (
+    | {
+        remotePostId: string;
+        remoteUrl: string;
+        publishedAt: string;
+        error?: never;
+      }
+    | {
+        remotePostId?: never;
+        remoteUrl?: never;
+        publishedAt?: never;
+        error: {
+          code: string;
+          message: string;
+        };
+      }
+  );
+
+export type PublishResultIngestion = {
+  created: boolean;
 };
 
 export type CopyResultCallback = {
@@ -79,6 +134,19 @@ export interface CopyResultRepository {
   listAuditEvents(contentItemId: string): Promise<ContentAuditEvent[]>;
 }
 
+export interface PublishRequestRepository {
+  preparePublishRequest(
+    input: PublishRequestPreparationInput,
+  ): Promise<PublishRequestPreparation>;
+}
+
+/** Persistence needed by signed n8n publish callbacks. */
+export interface PublishResultRepository {
+  ingestPublishResult(
+    input: PublishResultCallback,
+  ): Promise<PublishResultIngestion>;
+}
+
 export class CopyResultConflictError extends Error {
   constructor() {
     super("The copy result cannot be applied to the current content state.");
@@ -86,11 +154,18 @@ export class CopyResultConflictError extends Error {
   }
 }
 
+export class PublishTargetConflictError extends Error {
+  constructor() {
+    super("The publication target is not approved for this operation.");
+    this.name = "PublishTargetConflictError";
+  }
+}
+
 /**
  * Persistence boundary for the portal. UI and routes depend on this contract,
  * never directly on a specific database client.
  */
-export interface ContentRepository {
+export interface ContentRepository extends PublishRequestRepository {
   createContentItem(input: unknown): Promise<ContentItem>;
   listPublicationTargets(contentItemId: string): Promise<PublicationTarget[]>;
 }

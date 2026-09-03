@@ -6,6 +6,7 @@ import { z } from "zod";
 import { contentBriefSchema } from "@/lib/content/contracts";
 import {
   CopyResultConflictError,
+  PublishTargetConflictError,
   PUBLICATION_PLATFORMS,
   PUBLICATION_TARGET_STATUSES,
   type ContentItem,
@@ -14,6 +15,11 @@ import {
   type CopyResultIngestion,
   type CopyResultRepository,
   type PublicationTarget,
+  type PublishRequestPreparation,
+  type PublishRequestPreparationInput,
+  type PublishResultCallback,
+  type PublishResultIngestion,
+  type PublishResultRepository,
 } from "@/lib/content/repository";
 import { contentStateSchema } from "@/lib/content/state-machine";
 
@@ -37,9 +43,18 @@ const publicationTargetRowSchema = z.object({
   content_item_id: z.string().uuid(),
   platform: z.enum(PUBLICATION_PLATFORMS),
   status: z.enum(PUBLICATION_TARGET_STATUSES),
+  remote_post_id: z.string().nullable().optional(),
+  remote_url: z.string().nullable().optional(),
+  published_at: z.string().datetime({ offset: true }).nullable().optional(),
+  last_error: z.string().nullable().optional(),
+  updated_at: z.string().datetime({ offset: true }).optional(),
 });
 
 const copyResultIngestionSchema = z.object({
+  created: z.boolean(),
+});
+
+const publishResultIngestionSchema = z.object({
   created: z.boolean(),
 });
 
@@ -83,11 +98,17 @@ function toPublicationTargets(rows: unknown): PublicationTarget[] {
     contentItemId: row.content_item_id,
     platform: row.platform,
     status: row.status,
+    ...(row.remote_post_id ? { remotePostId: row.remote_post_id } : {}),
+    ...(row.remote_url ? { remoteUrl: row.remote_url } : {}),
+    ...(row.published_at ? { publishedAt: row.published_at } : {}),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
   }));
 }
 
 class SupabaseCopyResultRepository
-  implements Pick<CopyResultRepository, "ingestCopyResult">
+  implements
+    Pick<CopyResultRepository, "ingestCopyResult">,
+    Pick<PublishResultRepository, "ingestPublishResult">
 {
   constructor(protected readonly client: SupabaseClient) {}
 
@@ -120,6 +141,44 @@ class SupabaseCopyResultRepository
     const result = copyResultIngestionSchema.safeParse(data);
     if (!result.success) {
       throw new Error("Supabase returned an invalid copy result ingestion.");
+    }
+    return result.data;
+  }
+
+  async ingestPublishResult(
+    input: PublishResultCallback,
+  ): Promise<PublishResultIngestion> {
+    const errorResult = input.error;
+    const { data, error } = await this.client.rpc(
+      "ingest_publish_result_callback",
+      {
+        p_content_item_id: input.contentItemId,
+        p_publication_target_id: input.publicationTargetId,
+        p_platform: input.platform,
+        p_idempotency_key: input.idempotencyKey,
+        p_remote_post_id: errorResult ? null : input.remotePostId,
+        p_remote_url: errorResult ? null : input.remoteUrl,
+        p_published_at: errorResult ? null : input.publishedAt,
+        p_error_code: errorResult?.code ?? null,
+        p_error_message: errorResult?.message ?? null,
+      },
+    );
+
+    if (error) {
+      if (
+        error.message === "PUBLISH_TARGET_NOT_APPROVED" ||
+        error.message === "PUBLISH_TARGET_NOT_FOUND" ||
+        error.message === "PUBLISH_TARGET_MISMATCH" ||
+        error.message === "PUBLISH_IDEMPOTENCY_KEY_REUSED"
+      ) {
+        throw new PublishTargetConflictError();
+      }
+      throw new Error("Unable to ingest the publish result.");
+    }
+
+    const result = publishResultIngestionSchema.safeParse(data);
+    if (!result.success) {
+      throw new Error("Supabase returned an invalid publish result ingestion.");
     }
     return result.data;
   }
@@ -166,7 +225,7 @@ class SupabaseContentRepository
   ): Promise<PublicationTarget[]> {
     const { data, error } = await this.client
       .from("publication_targets")
-      .select("id, content_item_id, platform, status")
+      .select("id, content_item_id, platform, status, remote_post_id, remote_url, published_at, last_error, updated_at")
       .eq("content_item_id", contentItemId)
       .eq("owner_id", this.ownerId)
       .order("platform");
@@ -177,19 +236,49 @@ class SupabaseContentRepository
 
     return toPublicationTargets(data);
   }
+
+  async preparePublishRequest(
+    input: PublishRequestPreparationInput,
+  ): Promise<PublishRequestPreparation> {
+    const { data, error } = await this.client
+      .from("publication_targets")
+      .select("id, content_item_id, platform, status, remote_post_id, remote_url, published_at, last_error, updated_at")
+      .eq("id", input.publicationTargetId)
+      .eq("content_item_id", input.contentItemId)
+      .eq("owner_id", this.ownerId)
+      .maybeSingle();
+
+    if (error || !data) throw new PublishTargetConflictError();
+    const target = toPublicationTargets([data])[0];
+    if (!target || target.status !== "APPROVED") {
+      throw new PublishTargetConflictError();
+    }
+
+    const updatedAt = publicationTargetRowSchema.parse(data).updated_at;
+    return {
+      created: true,
+      status: "READY",
+      ownerId: this.ownerId,
+      approvedAt: updatedAt ?? new Date().toISOString(),
+      target: { ...target, status: "APPROVED" },
+    };
+  }
 }
 
 /** Server-only adapter. Its service-role client is never imported by the browser. */
 export function createSupabaseRepository(
   client: SupabaseClient,
   ownerId: string,
-): ContentRepository & Pick<CopyResultRepository, "ingestCopyResult"> {
+): ContentRepository &
+  Pick<CopyResultRepository, "ingestCopyResult"> &
+  Pick<PublishResultRepository, "ingestPublishResult"> {
   return new SupabaseContentRepository(client, ownerId);
 }
 
 /** Service-role callback adapter; it never accepts owner identity from n8n. */
 export function createSupabaseCallbackRepository(
   client: SupabaseClient,
-): Pick<CopyResultRepository, "ingestCopyResult"> {
+): Pick<CopyResultRepository, "ingestCopyResult"> &
+  Pick<PublishResultRepository, "ingestPublishResult"> {
   return new SupabaseCopyResultRepository(client);
 }

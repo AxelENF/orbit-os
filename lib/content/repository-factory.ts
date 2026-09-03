@@ -1,6 +1,7 @@
 import type {
   ContentRepository,
   CopyResultRepository,
+  PublishResultRepository,
 } from "@/lib/content/repository";
 import { createDemoRepository } from "@/lib/demo/repository";
 import { hasSupabaseBrowserConfig } from "@/lib/supabase/client";
@@ -14,7 +15,9 @@ type CreateContentRepositoryOptions = {
 export type ContentRepositoryMode = "demo" | "supabase";
 
 let demoRepository:
-  | (ContentRepository & Pick<CopyResultRepository, "ingestCopyResult">)
+  | (ContentRepository &
+      Pick<CopyResultRepository, "ingestCopyResult"> &
+      Pick<PublishResultRepository, "ingestPublishResult">)
   | undefined;
 
 export function getContentRepositoryMode(
@@ -74,7 +77,10 @@ export async function createContentRepository(
  */
 export async function createN8nCallbackRepository(
   options: CreateContentRepositoryOptions = {},
-): Promise<Pick<CopyResultRepository, "ingestCopyResult">> {
+): Promise<
+  Pick<CopyResultRepository, "ingestCopyResult"> &
+    Pick<PublishResultRepository, "ingestPublishResult">
+> {
   const environment = options.environment ?? process.env;
 
   if (!hasSupabaseServiceRoleConfig(environment)) {

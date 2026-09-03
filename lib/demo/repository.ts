@@ -1,6 +1,7 @@
 import {
   PUBLICATION_PLATFORMS,
   CopyResultConflictError,
+  PublishTargetConflictError,
   type ContentAuditEvent,
   type CopyResultCallback,
   type CopyResultIngestion,
@@ -8,6 +9,12 @@ import {
   type ContentItem,
   type ContentRepository,
   type PublicationTarget,
+  type PublishRequestPreparation,
+  type PublishRequestPreparationInput,
+  type PublishRequestRepository,
+  type PublishResultCallback,
+  type PublishResultIngestion,
+  type PublishResultRepository,
   type StoredCopyDraft,
 } from "@/lib/content/repository";
 import { transitionContentState, type ContentState } from "@/lib/content/state-machine";
@@ -21,12 +28,20 @@ type DemoRepositoryOptions = {
   initialContentState?: "DRAFT" | "UPLOADED";
 };
 
-export class DemoContentRepository implements ContentRepository, CopyResultRepository {
+export class DemoContentRepository
+  implements
+    ContentRepository,
+    CopyResultRepository,
+    PublishRequestRepository,
+    PublishResultRepository
+{
   private readonly contentItems = new Map<string, ContentItem>();
   private readonly targetsByContentItem = new Map<string, PublicationTarget[]>();
   private readonly copyDraftsByContentItem = new Map<string, StoredCopyDraft[]>();
   private readonly auditEventsByContentItem = new Map<string, ContentAuditEvent[]>();
   private readonly callbackKeys = new Set<string>();
+  private readonly publishRequestTargetsByKey = new Map<string, string>();
+  private readonly publishCallbackTargetsByKey = new Map<string, string>();
 
   constructor(private readonly options: DemoRepositoryOptions = {}) {}
 
@@ -58,6 +73,143 @@ export class DemoContentRepository implements ContentRepository, CopyResultRepos
     contentItemId: string,
   ): Promise<PublicationTarget[]> {
     return [...(this.targetsByContentItem.get(contentItemId) ?? [])];
+  }
+
+  async approvePublicationTarget(
+    contentItemId: string,
+    publicationTargetId: string,
+  ): Promise<PublicationTarget> {
+    const targets = this.targetsByContentItem.get(contentItemId);
+    const target = targets?.find((candidate) => candidate.id === publicationTargetId);
+    if (!target) throw new PublishTargetConflictError();
+
+    const approved: PublicationTarget = { ...target, status: "APPROVED" };
+    this.targetsByContentItem.set(
+      contentItemId,
+      targets!.map((candidate) =>
+        candidate.id === publicationTargetId ? approved : candidate,
+      ),
+    );
+    return { ...approved };
+  }
+
+  async preparePublishRequest(
+    input: PublishRequestPreparationInput,
+  ): Promise<PublishRequestPreparation> {
+    const targets = this.targetsByContentItem.get(input.contentItemId);
+    const target = targets?.find(
+      (candidate) => candidate.id === input.publicationTargetId,
+    );
+    if (!target || target.status !== "APPROVED") {
+      throw new PublishTargetConflictError();
+    }
+
+    const requestKey = `PUBLISH_REQUEST:${input.idempotencyKey}`;
+    const priorTargetId = this.publishRequestTargetsByKey.get(requestKey);
+    if (priorTargetId && priorTargetId !== target.id) {
+      throw new PublishTargetConflictError();
+    }
+
+    const created = !priorTargetId;
+    if (created) {
+      this.publishRequestTargetsByKey.set(requestKey, target.id);
+      const event: ContentAuditEvent = {
+        id: createId(),
+        contentItemId: input.contentItemId,
+        type: "DRY_RUN_QUEUED",
+        status: "info",
+        message: "Approved target queued in demo mode; no network request was sent.",
+        metadata: {
+          platform: target.platform,
+          publicationTargetId: target.id,
+        },
+        createdAt: new Date().toISOString(),
+      };
+      this.auditEventsByContentItem.set(input.contentItemId, [
+        ...(this.auditEventsByContentItem.get(input.contentItemId) ?? []),
+        event,
+      ]);
+    }
+
+    return {
+      created,
+      status: "DRY_RUN_QUEUED",
+      ownerId: "00000000-0000-4000-8000-000000000000",
+      approvedAt: new Date().toISOString(),
+      target: { ...target, status: "APPROVED" },
+    };
+  }
+
+  async ingestPublishResult(
+    input: PublishResultCallback,
+  ): Promise<PublishResultIngestion> {
+    const callbackKey = `PUBLISH_CALLBACK:${input.idempotencyKey}`;
+    const priorTargetId = this.publishCallbackTargetsByKey.get(callbackKey);
+    if (priorTargetId) {
+      if (priorTargetId !== input.publicationTargetId) {
+        throw new PublishTargetConflictError();
+      }
+      return { created: false };
+    }
+
+    const targets = this.targetsByContentItem.get(input.contentItemId);
+    const target = targets?.find(
+      (candidate) => candidate.id === input.publicationTargetId,
+    );
+    if (
+      !target ||
+      target.platform !== input.platform ||
+      target.status !== "APPROVED"
+    ) {
+      throw new PublishTargetConflictError();
+    }
+
+    const callbackError = input.error;
+    const nextTarget: PublicationTarget =
+      callbackError
+        ? {
+            ...target,
+            status: "ERROR",
+            lastError: callbackError.message,
+          }
+        : {
+            ...target,
+            status: "PUBLISHED",
+            remotePostId: input.remotePostId,
+            remoteUrl: input.remoteUrl,
+            publishedAt: input.publishedAt,
+          };
+    this.targetsByContentItem.set(
+      input.contentItemId,
+      targets!.map((candidate) =>
+        candidate.id === input.publicationTargetId ? nextTarget : candidate,
+      ),
+    );
+    this.publishCallbackTargetsByKey.set(callbackKey, input.publicationTargetId);
+
+    const event: ContentAuditEvent = {
+      id: createId(),
+      contentItemId: input.contentItemId,
+      type: "PUBLISH_CALLBACK_RECEIVED",
+      status: callbackError ? "warning" : "success",
+      message:
+        callbackError
+          ? "Publish callback recorded a sanitized platform error."
+          : "Publish callback recorded a remote publication.",
+      metadata: {
+        platform: input.platform,
+        publicationTargetId: input.publicationTargetId,
+        outcome: callbackError ? "ERROR" : "PUBLISHED",
+        ...(callbackError ? { errorCode: callbackError.code } : {}),
+      },
+      createdAt: new Date().toISOString(),
+    };
+    this.auditEventsByContentItem.set(input.contentItemId, [
+      ...(this.auditEventsByContentItem.get(input.contentItemId) ?? []),
+      event,
+    ]);
+
+    return { created: true };
   }
 
   async beginCopyGeneration(contentItemId: string): Promise<ContentItem> {

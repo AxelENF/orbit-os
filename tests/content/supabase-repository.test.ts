@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createSupabaseRepository } from "@/lib/supabase/repository";
-import { CopyResultConflictError } from "@/lib/content/repository";
+import {
+  CopyResultConflictError,
+  PublishTargetConflictError,
+} from "@/lib/content/repository";
 
 const validBrief = {
   businessLine: "CONTROLAR",
@@ -140,5 +143,53 @@ describe("SupabaseContentRepository", () => {
     await expect(
       conflictRepository.ingestCopyResult(validCopyResult),
     ).rejects.toBeInstanceOf(CopyResultConflictError);
+  });
+
+  it("ingests a target-specific publish callback through one atomic RPC", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: { created: true }, error: null });
+    const repository = createSupabaseRepository({ rpc } as never, "owner-id");
+    const callback = {
+      contentItemId: createdRow.id,
+      publicationTargetId: "8ab76cc5-f59a-48ed-8bc8-186cc7007533",
+      platform: "FACEBOOK" as const,
+      idempotencyKey: "cced3e68-7206-4c2f-9848-6bf474882150",
+      remotePostId: "facebook-post-123",
+      remoteUrl: "https://www.facebook.com/facebook-post-123",
+      publishedAt: "2026-09-02T18:02:00.000Z",
+    };
+
+    await expect(repository.ingestPublishResult(callback)).resolves.toEqual({
+      created: true,
+    });
+    expect(rpc).toHaveBeenCalledWith("ingest_publish_result_callback", {
+      p_content_item_id: callback.contentItemId,
+      p_publication_target_id: callback.publicationTargetId,
+      p_platform: callback.platform,
+      p_idempotency_key: callback.idempotencyKey,
+      p_remote_post_id: callback.remotePostId,
+      p_remote_url: callback.remoteUrl,
+      p_published_at: callback.publishedAt,
+      p_error_code: null,
+      p_error_message: null,
+    });
+    expect(rpc.mock.calls[0]?.[1]).not.toHaveProperty("p_owner_id");
+  });
+
+  it("maps publish approval and target conflicts to a 409 boundary error", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: "PUBLISH_TARGET_NOT_APPROVED" },
+    });
+    const repository = createSupabaseRepository({ rpc } as never, "owner-id");
+
+    await expect(
+      repository.ingestPublishResult({
+        contentItemId: createdRow.id,
+        publicationTargetId: "8ab76cc5-f59a-48ed-8bc8-186cc7007533",
+        platform: "INSTAGRAM",
+        idempotencyKey: "cced3e68-7206-4c2f-9848-6bf474882150",
+        error: { code: "META_INSTAGRAM_ERROR", message: "Meta rejected it." },
+      }),
+    ).rejects.toBeInstanceOf(PublishTargetConflictError);
   });
 });
