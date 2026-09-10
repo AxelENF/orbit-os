@@ -20,7 +20,11 @@ diaria) — no se toca el bridge n8n existente.
 ## Alcance
 
 **Incluye:**
-- Trigger de enqueue del job `COPY` para el worker interno, desacoplado de n8n.
+- Trigger de enqueue del job `COPY` para el worker interno, desacoplado de
+  n8n. Nota: `repository.enqueueCopyJob` / `enqueue_copy_automation_job` ya
+  existen y ya se usan hoy en `POST /api/integrations/n8n/copy` — lo nuevo es
+  **sólo** el punto de disparo automático desde `POST /api/content`, no la
+  lógica de encolado en sí.
 - `worker/providers/copy-processor.ts`: processor real contra OpenRouter con
   visión, exactamente 2 alternativas de copy y 5-8 hashtags cada una.
 - Migración aditiva `0014`: columna `hashtags` en `copy_drafts`, tabla de
@@ -105,32 +109,63 @@ Revisión humana → Aprobación por destino (sin cambios)
    lectura por miembros de la organización, escritura sólo `service_role`.
 4. `organizations` gana `ai_monthly_budget_usd` (nullable, default `null` =
    sin tope, no rompe organizaciones existentes).
+5. `fail_copy_automation_job` (definida en `0013`): hoy sólo actualiza
+   `automation_jobs` — no toca `content_items` ni `audit_events`. Verificado
+   contra el código: si no se extiende, un fallo del worker deja el
+   `content_item` atascado en `GENERATING` para siempre (la transición
+   `GENERATING → ERROR` ya existe en `lib/content/state-machine.ts` pero nada
+   la dispara aquí) y no aparece ningún evento en `/history` (que lee
+   `audit_events` directamente). `create or replace function` (mismo nombre y
+   firma) para que, cuando el resultado sea `FAILED` o `DEAD_LETTER` (es
+   decir, ya no va a reintentar), además transicione el `content_item` de
+   `GENERATING` a `ERROR` e inserte una fila en `audit_events` con el error
+   saneado — mismo patrón atómico que ya usa `ingest_copy_result_callback`.
+   Cuando el resultado es `RETRY_WAIT`, no se toca `content_items` (el worker
+   va a reintentar).
 
 ## Guardrails de costo/calidad, en orden
 
 1. **Presupuesto:** antes de llamar al modelo, suma `ai_usage_events` del mes
    en curso para la organización; si supera `ai_monthly_budget_usd`, el job
-   falla con `retryable:false` (pasa a `FAILED`, no reintenta indefinidamente)
-   y queda un finding claro en `/history`.
-2. **Timeout duro** por llamada a OpenRouter (`AbortController`, ~45s).
+   falla como **no reintentable** (pasa a `FAILED`, ver más abajo) y queda un
+   finding claro en `/history` vía el `audit_events` que ahora inserta
+   `fail_copy_automation_job` (punto 5 de la migración).
+2. **Timeout duro** por llamada a OpenRouter (`AbortController`, ~45s). Un
+   timeout **sí es reintentable**.
 3. **Forma de la respuesta:** exactamente 2 drafts, `headline`/`body`/`cta`
    no vacíos, 5-8 hashtags por draft. Si el modelo no cumple el formato, falla
-   `retryable:true` (reintento con backoff, ya lo maneja `DurableJobRunner`).
+   como **reintentable** (backoff, ya lo maneja `DurableJobRunner`).
 4. **Claims:** cada draft (incluidos hashtags) se valida contra
    `allowedFacts`/`forbiddenClaims` con la lógica ya existente en
    `final-copy.ts`, extraída a una función compartida en vez de duplicarse.
+   Un claim prohibido falla como **no reintentable** (reintentar no cambia el
+   resultado: el modelo tendería a repetir el mismo problema con el mismo
+   brief).
 5. Sólo si todo pasa: se registra el costo real (tokens devueltos por
    OpenRouter) y se completa el job.
+
+**Cómo se comunica "reintentable" al runner (pieza que hoy no existe):**
+verificado contra `worker/durable-runner.ts:106`, sin configuración explícita
+`isRetryable` **todo** error se trata como reintentable — el guardrail de
+presupuesto, tal cual, terminaría reintentando hasta `DEAD_LETTER` en vez de
+ir directo a `FAILED`. `copy-processor.ts` lanza una clase de error dedicada
+(`CopyGuardrailError`, con un campo `retryable: boolean`) para los casos no
+reintentables (presupuesto, claim prohibido); cualquier otro error (red,
+timeout, forma inválida) queda reintentable por default. `worker/entrypoint.ts`
+pasa `isRetryable: (error) => !(error instanceof CopyGuardrailError) || error.retryable`
+al construir el `DurableJobRunner`.
 
 Nada de este flujo llama a Meta, publica, ni se salta la revisión humana —
 el resultado sigue siendo un borrador en estado `DRAFT`, igual que hoy.
 
 ## UI
 
-`/drafts` hace poll mientras `content.state === "GENERATING"` (el estado ya
-existe en el enum, sólo faltaba quien lo disparara y quien lo reflejara). El
-copy y los hashtags aparecen editables antes de enviar a revisión, igual que
-hoy con `headline`/`body`/`cta`.
+`/drafts` hace poll mientras `content.state === "GENERATING"`. El label
+`GENERATING: "Generando"` ya existe hoy en `statusLabels` (se ve en la carga
+inicial); lo que falta específicamente es el **refresco automático** — hoy la
+pantalla carga una vez y no se entera cuando el worker termina. El copy y los
+hashtags aparecen editables antes de enviar a revisión, igual que hoy con
+`headline`/`body`/`cta`.
 
 ## Testing
 
@@ -146,8 +181,11 @@ hoy con `headline`/`body`/`cta`.
 
 ## Variables de entorno nuevas
 
-- `OPENROUTER_API_KEY` (server-only, ya prevista en `.env.example` para n8n;
-  se reutiliza para el worker interno).
+- `OPENROUTER_API_KEY` (server-only). Verificado: **no existe hoy en
+  `.env.example`** — sólo aparece documentada para el entorno de despliegue
+  de n8n (`docs/n8n/content-copy-workflow.md`, un contenedor distinto a este
+  repo). Hay que agregarla a `.env.example` como parte de esta unidad, no
+  asumir que ya está.
 - `SNAPGAD_COPY_OPENROUTER_MODEL` (modelo con visión a usar).
 - `SNAPGAD_COPY_TIMEOUT_MS` (default 45000).
 
