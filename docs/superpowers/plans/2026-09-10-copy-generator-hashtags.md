@@ -2166,7 +2166,7 @@ En `submitFinalCopyForReview` (línea ~724-753), incluye `hashtags` en el checks
     });
 ```
 
-Busca el zod schema que valida la fila de `final_copy_versions` (cerca de la línea 78, junto a `checksum: z.string().min(1)` / `version: z.number().int().positive()`) y agrega `hashtags: z.array(z.string()).default([])`. Luego, en el `return`/mapeo al final de `submitFinalCopyForReview` que construye el objeto `FinalCopy` a partir de `data`, agrega `hashtags: data.hashtags` junto a `checksum`/`version` — mismo patrón.
+Busca el zod schema que valida la fila de `final_copy_versions` (cerca de la línea 78, junto a `checksum: z.string().min(1)` / `version: z.number().int().positive()`) y agrega `hashtags: z.array(z.string()).default([])`. `submitFinalCopyForReview` no arma el objeto `FinalCopy` inline — termina con `return toFinalCopy(data);` — así que el mapeo real va dentro de la función compartida `toFinalCopy()` (la misma que usa `getContentRecord`): agrégale `hashtags: data.hashtags` junto a `checksum`/`version`.
 
 **Ojo, esto es fácil de dejar a medias:** `getContentRecord` lee `final_copy_versions` en un `SELECT` **separado**, no reutiliza `submitFinalCopyForReview`. Busca ese otro `.select(...)` sobre `final_copy_versions` (contiene literalmente `"id, content_item_id, selected_copy_draft_id, headline, body, cta, checksum, version, created_at"`) y agrégale `hashtags`:
 
