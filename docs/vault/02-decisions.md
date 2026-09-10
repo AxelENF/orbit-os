@@ -40,7 +40,7 @@ La IA puede diagnosticar, escribir y recomendar. La publicación remota requiere
 **Fecha:** 2026-09-10
 **Estado:** Adoptada
 
-El nombre comercial de esta herramienta será **SnapGad Orbit**: el centro de operaciones de contenido y automatización de SnapGad. El slug previsto para GitHub es `snapgad-orbit`.
+El nombre comercial de esta herramienta será **Orbit OS by SnapGad**: el centro de operaciones de contenido y automatización de SnapGad. El repositorio oficial es `AxelENF/orbit-os` y su slug es `orbit-os`.
 
 El paquete interno conserva temporalmente `snapgad-content-os` para no romper imports, claves de almacenamiento local ni integraciones existentes. El renombrado interno se hará en una migración separada cuando exista un repositorio remoto nuevo y una estrategia explícita de compatibilidad.
 

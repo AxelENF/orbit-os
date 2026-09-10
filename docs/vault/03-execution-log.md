@@ -2,7 +2,7 @@
 
 ## 2026-09-10 — Preparación de publicación en GitHub y migraciones locales
 
-- Auditoría Git: rama actual `feat/content-os-mvp`, sin remoto `origin` y sin cambios publicados desde este entorno. El proyecto queda preparado para un repositorio nuevo con slug `snapgad-orbit` y nombre de producto SnapGad Orbit.
+- Auditoría Git: rama actual `feat/content-os-mvp`, con remoto `origin` apuntando a `https://github.com/AxelENF/orbit-os.git`. El proyecto queda preparado para el repositorio oficial `orbit-os` y nombre de producto Orbit OS by SnapGad.
 - Auditoría de base local: `npx supabase@2.117.0` responde, pero no existe `supabase/config.toml`, Postgres local ni daemon Docker activo. No se ejecutó `supabase db reset` ni se alteró ninguna base; la aplicación de migraciones queda pendiente de una instancia local/staging válida.
 - Se confirmó que no hay credenciales reales en el árbol de trabajo. El commit/push sólo debe incluir código, migraciones y vault; nunca `.env.local`, tokens ni claves de servicio.
 
