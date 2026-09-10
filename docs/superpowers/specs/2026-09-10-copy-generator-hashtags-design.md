@@ -47,7 +47,7 @@ diaria) — no se toca el bridge n8n existente.
 Intake (content-form) → POST /api/content
   → crea content_item + asset privado                          [ya existe]
   → NUEVO: enqueue automático de automation_job kind=COPY
-     provider = SNAPGAD_COPY_WORKER_PROVIDER (default "local")
+     provider queda en su default de columna ("local", 0013)
   → content_item pasa a GENERATING
 
 worker/entrypoint.ts (proceso persistente, npm run worker)
@@ -75,18 +75,30 @@ Revisión humana → Aprobación por destino (sin cambios)
   IA, con su warning explícito intacto).
 - `worker/providers/copy-processor.ts` (nuevo): implementa el contrato que
   `worker/entrypoint.ts` espera de `SNAPGAD_COPY_WORKER_MODULE` — exporta una
-  función default que recibe `SupabaseCopyJobPayload` y regresa
-  `{ visualAnalysis, drafts, warnings, provider: "openrouter", model }`,
-  la forma exacta que ya consume `complete_copy_automation_job`.
+  función default que recibe el **`DurableJob<SupabaseCopyJobPayload, Result>`
+  completo** (no sólo el payload: `job.organizationId` e `job.id` viven en el
+  nivel superior de esa envoltura; `contentItemId`/`storagePath`/`assetUrl`/
+  `brief` están anidados en `job.payload`, ver `worker/durable-runner.ts` y
+  `lib/automation/durable-job-contract.ts`). El guardrail de presupuesto usa
+  `job.organizationId`; el registro en `ai_usage_events` usa `job.id`. La
+  función regresa `{ visualAnalysis, drafts, warnings, provider: "openrouter",
+  model }`, la forma exacta que ya consume `complete_copy_automation_job`.
 
 ## Migración `0014` (aditiva)
 
 1. `copy_drafts`: agrega columna `hashtags jsonb not null default '[]'::jsonb`
-   con `check` de que sea un array de 0 a 8 strings no vacíos.
+   con `check` de que sea un array de 0 a 8 strings no vacíos. Este rango es
+   deliberadamente más laxo que el guardrail de aplicación (5-8): la base de
+   datos acepta cualquier forma razonable para no romper el contrato n8n
+   existente si se activa sin pasar por el processor nuevo; el rango 5-8 es
+   una regla del processor, no de la base.
 2. `ingest_copy_result_callback`: `create or replace function` (mismo nombre y
    firma) para leer `hashtags` opcional de cada entrada de `p_drafts`
    (default `[]` si el llamador no lo manda — no rompe el contrato n8n si
-   algún día se activa sin pasar por este cambio).
+   algún día se activa sin pasar por este cambio). La función valida la forma
+   de `hashtags` (array de strings no vacíos, máximo 8) igual que ya valida
+   headline/body/cta, devolviendo `COPY_RESULT_INVALID_DRAFTS` en vez de
+   dejar que un `check` de tabla produzca un error crudo de Postgres.
 3. Tabla nueva `ai_usage_events` (append-only, mismo espíritu que
    `audit_events`): `organization_id`, `job_id`, `provider`, `model`,
    `input_tokens`, `output_tokens`, `estimated_cost_usd`, `created_at`. RLS:
