@@ -1,5 +1,12 @@
 # Bitácora de ejecución
 
+## 2026-09-10 — Migraciones Supabase aplicadas y verificadas
+
+- `npx supabase@2.117.0 db push --db-url ...` aplicó `0012_automation_job_status_values.sql` y `0013_automation_job_lifecycle.sql`; `0001`–`0011` ya estaban aplicadas. El primer intento de `0013` se detuvo por el uso del enum nuevo en la misma transacción; se corrigió separando `0012` antes de reintentar.
+- `npx supabase@2.117.0 migration list --db-url ...` devuelve coincidencia exacta `0001`–`0013` entre local y remoto.
+- Consultas de verificación confirmaron 14 tablas de dominio, los siete estados de `automation_job_status`, las seis RPCs del worker y el bucket privado `content-assets`.
+- El MCP oficial quedó autenticado por OAuth contra el proyecto `zsljrjuebdgcyinexdlj` con scopes de base, storage y lectura de proyecto. La aplicación aún debe recibir sus variables públicas/service-role localmente para ejecutar el portal contra esta base.
+
 ## 2026-09-10 — Preparación de publicación en GitHub y migraciones locales
 
 - Auditoría Git: rama actual `feat/content-os-mvp`, con remoto `origin` apuntando a `https://github.com/AxelENF/orbit-os.git`. El proyecto queda preparado para el repositorio oficial `orbit-os` y nombre de producto Orbit OS by SnapGad.

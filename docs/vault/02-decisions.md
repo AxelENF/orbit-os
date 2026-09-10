@@ -44,11 +44,11 @@ El nombre comercial de esta herramienta será **Orbit OS by SnapGad**: el centro
 
 El paquete interno conserva temporalmente `snapgad-content-os` para no romper imports, claves de almacenamiento local ni integraciones existentes. El renombrado interno se hará en una migración separada cuando exista un repositorio remoto nuevo y una estrategia explícita de compatibilidad.
 
-## ADR-007 — Migraciones locales reproducibles sin inventar una base
+## ADR-007 — Migraciones reproducibles con Supabase CLI
 
 **Fecha:** 2026-09-10
-**Estado:** Preparada, pendiente de entorno
+**Estado:** Aplicada en Supabase remoto; pendiente de smoke test autenticado
 
-Las migraciones SQL permanecen en `supabase/migrations/` y se ejecutarán en orden con Supabase CLI contra una instancia local o staging real. En este equipo no hay `supabase/config.toml`, Postgres local ni daemon Docker activo; por tanto, esta sesión sólo puede verificar forma, orden y código, no afirmar una aplicación de esquema.
+Las migraciones SQL permanecen en `supabase/migrations/` y se ejecutan en orden con Supabase CLI. En esta fase se aplicaron contra el proyecto Supabase `zsljrjuebdgcyinexdlj`; `migration list` confirmó coincidencia exacta `0001`–`0013`, y se verificaron tablas, funciones, estados de job, RLS y el bucket privado `content-assets`.
 
-Cuando se entregue una URL/base válida, se ejecutará el comando revisado, se capturará `supabase migration list` y se validarán tablas, funciones, RLS y storage antes de conectar el worker.
+El entorno local sigue sin `supabase/config.toml`, Postgres local y daemon Docker. Antes de operar el portal contra esta base falta un smoke test con un usuario Auth real, membresía, asset privado y job durable; después se podrá conectar el worker con sus variables locales sin guardar secretos en git.

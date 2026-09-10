@@ -27,16 +27,18 @@ npm run lint
   a configuration error instead of silently using demo data. The service-role key is never imported into or
   exposed to the browser.
 
-The database schema has not been applied by this repository. When a Supabase
-project is ready, review `supabase/migrations/0001_content_os.sql` through
-`0013_automation_job_lifecycle.sql` and apply them in order with the Supabase
-CLI or SQL editor in the intended environment. The migrations create
+The database schema is now applied to the connected Supabase project
+`zsljrjuebdgcyinexdlj`. The migration history contains
+`supabase/migrations/0001_content_os.sql` through
+`0013_automation_job_lifecycle.sql` (including the enum-only `0012` step),
+applied in order with the Supabase CLI. The migrations create
 organization-scoped tables, a private `content-assets` storage bucket,
 membership RLS policies, AIAS profiles, and portal-owned durable copy jobs.
-Migration `0013` adds the staged worker lifecycle RPCs used by
-`SupabaseCopyWorkerStore`; it is not a claim that those RPCs have been applied
-or verified against a live project.
-Live RLS/migration verification remains pending until staging credentials exist.
+Migration `0013` adds the worker lifecycle RPCs used by
+`SupabaseCopyWorkerStore`. Migration history, critical tables, enum values,
+RPCs and the private bucket were verified by read-only queries after the push.
+End-to-end RLS behavior with a real Auth user and the application runtime still
+requires a separate staging smoke test.
 
 The n8n callback route uses HMAC authentication and a service-role repository,
 not a browser session. Its database RPC derives `owner_id` from the locked
@@ -77,11 +79,11 @@ contains one signed, copy-only worker path:
   portal before reading the private asset and completes that job through the
   signed callback.
 
-Use the runbooks in [`docs/n8n/`](docs/n8n/) before importing. Keep the workflow
-inactive until migrations `0001` through `0010` are applied in a staging
-project, the portal callback URL is reachable, and one test job has been
-verified. The export contains no credentials, has no direct Supabase access,
-and has not been imported or activated in the connected n8n instance.
+Use the runbooks in [`docs/n8n/`](docs/n8n/) before importing. The database
+migrations are applied, but keep the workflow inactive until the portal
+callback URL is reachable and one test job has been verified. The export
+contains no credentials, has no direct Supabase access, and has not been
+imported or activated in the connected n8n instance.
 
 The server exposes a signed request bridge at `/api/integrations/n8n/copy` and
 signed worker endpoints at `/api/integrations/n8n/copy/claim` and
@@ -114,8 +116,9 @@ drafts and audit events, and require the item to be in `REVIEW` before a target
 can be approved. Applying migration `0005` is required before using the
 approval route against Supabase, and migration `0006` is required for asset
 uploads. The new-creative form sends multipart assets to `POST /api/content`
-when public Supabase configuration is present; staging credentials are still
-required for end-to-end verification.
+when public Supabase configuration is present; application environment
+credentials and an authenticated user are still required for end-to-end
+verification.
 
 ## Campaign control plane
 

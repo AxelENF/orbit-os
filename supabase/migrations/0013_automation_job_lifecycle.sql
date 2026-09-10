@@ -7,13 +7,6 @@
 -- lib/automation/durable-job-contract.ts. No browser code or Meta publisher
 -- calls this migration directly.
 
--- 0010 created this enum with only the initial COPY states. Add the terminal
--- and retry states needed by the portable contract. No existing rows are
--- changed by these enum additions.
-alter type public.automation_job_status add value if not exists 'RETRY_WAIT';
-alter type public.automation_job_status add value if not exists 'CANCELLED';
-alter type public.automation_job_status add value if not exists 'DEAD_LETTER';
-
 alter table public.automation_jobs
   add column if not exists provider text not null default 'local',
   add column if not exists run_at timestamptz not null default now(),

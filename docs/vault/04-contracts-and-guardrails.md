@@ -23,7 +23,7 @@
 - Los trabajos largos no se ejecutan dentro de una petición web.
 - `SupabaseCopyWorkerStore` sólo expone al proceso worker claim/lease/mutaciones; no crea jobs ni acepta payloads de tenant desde el navegador.
 - El endpoint de health es interno, bearer-token gated y devuelve telemetría agregada sin briefs, assets o credenciales.
-- La migración `0013_automation_job_lifecycle.sql` es preparación de staging; el adapter no implica que Supabase remoto ya esté aplicado.
+- Las migraciones `0012_automation_job_status_values.sql` y `0013_automation_job_lifecycle.sql` están aplicadas al proyecto Supabase `zsljrjuebdgcyinexdlj`; el adapter no sustituye la validación end-to-end de RLS con usuarios Auth.
 - `npm run worker` exige un módulo de processor explícito; sin ese módulo o sin service-role termina antes de reclamar trabajo.
 - El runner renueva leases durante operaciones largas y apaga el polling con `SIGTERM`/`SIGINT`; los errores de provider se persisten con el contrato de retry.
 

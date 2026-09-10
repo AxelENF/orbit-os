@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "b53bd974081ac8f916b0ab905ef75f19325bb1bd",
-    "indexed_at": "2026-09-10T08:18:03Z",
+    "commit": "1259e47b8e69b1efc6a61e7372efca3e310f7a49",
+    "indexed_at": "2026-09-10T09:22:55Z",
     "project": "C-Users-AxelENF-Documents-Codex-2026-08-27-pode-snapgad-content-os",
-    "nodes": 1684,
-    "edges": 5192,
-    "original_size": 6225920,
-    "compressed_size": 927712,
+    "nodes": 1692,
+    "edges": 5200,
+    "original_size": 6291456,
+    "compressed_size": 927617,
     "compression_level": 9
 }
