@@ -72,8 +72,11 @@ Revisión humana → Aprobación por destino (sin cambios)
 ## Contratos
 
 - `lib/content/final-copy.ts`: `FinalCopyInput` gana `hashtags: string[]`;
-  `validateFinalCopy` corre la misma validación de claims prohibidos sobre
-  los hashtags que ya corre sobre headline/body/cta.
+  `validateFinalCopy` corre sobre los hashtags **exactamente la misma
+  validación completa** que ya corre sobre headline/body/cta — grounding en
+  `allowedFacts` vía `unsupportedClaimPattern` y rechazo de `forbiddenClaims`,
+  no sólo el segundo chequeo. Un hashtag como `#50porciento` o `#GarantizadoHoy`
+  debe caer bajo el mismo criterio que si esas palabras estuvieran en el body.
 - `lib/demo/draft-store.ts`: `DemoCopyOption` gana `hashtags: string[]` para
   mantener paridad visual con producción (sigue siendo plantilla local, sin
   IA, con su warning explícito intacto).
@@ -141,8 +144,14 @@ Revisión humana → Aprobación por destino (sin cambios)
    Un claim prohibido falla como **no reintentable** (reintentar no cambia el
    resultado: el modelo tendería a repetir el mismo problema con el mismo
    brief).
-5. Sólo si todo pasa: se registra el costo real (tokens devueltos por
-   OpenRouter) y se completa el job.
+5. El costo real (tokens devueltos por OpenRouter) se registra en
+   `ai_usage_events` **inmediatamente al recibir la respuesta del modelo**,
+   antes de correr las validaciones de forma (3) y claims (4) — no sólo
+   cuando el job termina en éxito. Si no fuera así, un brief que dispare
+   repetidamente el guardrail de claims incurriría gasto real de OpenRouter
+   sin que ese gasto quedara nunca contabilizado contra
+   `ai_monthly_budget_usd`, dejando el guardrail 1 sin efecto. El job sólo se
+   completa (`complete_copy_automation_job`) si además pasan 3 y 4.
 
 **Cómo se comunica "reintentable" al runner (pieza que hoy no existe):**
 verificado contra `worker/durable-runner.ts:106`, sin configuración explícita
@@ -160,7 +169,8 @@ el resultado sigue siendo un borrador en estado `DRAFT`, igual que hoy.
 
 ## UI
 
-`/drafts` hace poll mientras `content.state === "GENERATING"`. El label
+`/drafts` hace poll cada **4 segundos** mientras `content.state === "GENERATING"`,
+y se detiene en cuanto el estado deja de ser `GENERATING` (éxito o error). El label
 `GENERATING: "Generando"` ya existe hoy en `statusLabels` (se ve en la carga
 inicial); lo que falta específicamente es el **refresco automático** — hoy la
 pantalla carga una vez y no se entera cuando el worker termina. El copy y los
@@ -178,6 +188,10 @@ hashtags aparecen editables antes de enviar a revisión, igual que hoy con
   anteriores, que se revisan como `parse_partial`).
 - Regresión de `ingest_copy_result_callback` con y sin `hashtags` en el
   payload, para confirmar que no rompe el contrato n8n existente.
+- Regresión SQL de `fail_copy_automation_job` extendida: un fallo que resulta
+  en `FAILED` o `DEAD_LETTER` transiciona `content_items` a `ERROR` e inserta
+  el `audit_events` correspondiente; un fallo que resulta en `RETRY_WAIT` deja
+  `content_items` intacto en `GENERATING`.
 
 ## Variables de entorno nuevas
 
