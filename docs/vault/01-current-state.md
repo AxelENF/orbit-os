@@ -37,7 +37,7 @@ SnapGad Content OS tiene una base local sólida para campañas, borradores, copy
 
 - Crear organización y completar el onboarding de perfil AIAS en staging con usuarios Supabase reales.
 - Integrar la cookie activa en los handlers de contenido restantes y validar el cambio de organización contra cada ruta mutante.
-- Worker interno persistente.
+- Operar el worker interno persistente con un processor de copy explícito y smoke test durable.
 - Smoke test de store durable/RPC con un usuario Auth, un asset privado y un job real.
 - Retries, dead-letter y recuperación operativa completa.
 - OAuth Meta por organización.
