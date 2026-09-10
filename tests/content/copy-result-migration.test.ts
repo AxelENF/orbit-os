@@ -17,6 +17,8 @@ describe("copy result callback migration", () => {
     expect(sql).toMatch(/security definer/i);
     expect(sql).toMatch(/select owner_id, state[\s\S]*for update/i);
     expect(sql).toMatch(/kind[\s\S]*'COPY_CALLBACK'/i);
+    expect(sql).toMatch(/kind\s*=\s*'COPY_REQUEST'/i);
+    expect(sql).toMatch(/COPY_REQUEST_NOT_FOUND/i);
     expect(sql).toMatch(/on conflict \(kind, idempotency_key\) do nothing/i);
     expect(sql).toMatch(/jsonb_array_length\(p_drafts\)\s*<>\s*2/i);
     expect(sql).toMatch(/jsonb_typeof\(p_visual_analysis\)\s+is distinct from\s+'object'/i);

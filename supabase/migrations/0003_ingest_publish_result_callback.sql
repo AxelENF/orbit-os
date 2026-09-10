@@ -20,6 +20,7 @@ declare
   callback_run_id uuid;
   content_owner_id uuid;
   current_status public.publication_status;
+  request_target_id uuid;
   prior_target_id uuid;
   callback_succeeded boolean;
 begin
@@ -76,6 +77,22 @@ begin
 
   if current_status <> 'APPROVED' then
     raise exception using errcode = 'P0001', message = 'PUBLISH_TARGET_NOT_APPROVED';
+  end if;
+
+  -- A callback is accepted only for a request that n8n logged first. This
+  -- prevents a leaked callback secret from mutating an approved target without
+  -- a corresponding outbound publish operation.
+  select publication_target_id
+  into request_target_id
+  from public.automation_runs
+  where kind = 'PUBLISH_REQUEST'
+    and idempotency_key = p_idempotency_key;
+
+  if not found then
+    raise exception using errcode = 'P0001', message = 'PUBLISH_REQUEST_NOT_FOUND';
+  end if;
+  if request_target_id <> p_publication_target_id then
+    raise exception using errcode = 'P0001', message = 'PUBLISH_IDEMPOTENCY_KEY_REUSED';
   end if;
 
   insert into public.automation_runs (

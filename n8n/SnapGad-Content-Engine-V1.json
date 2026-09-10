@@ -1,5 +1,5 @@
 {
-  "name": "SnapGad — Content Engine V1",
+  "name": "SnapGad — Copy Worker V1",
   "active": false,
   "settings": {
     "executionOrder": "v1",
@@ -7,10 +7,9 @@
     "callerPolicy": "workflowsFromSameOwner",
     "errorWorkflow": ""
   },
-  "versionId": "8e4ad8e2-9d62-4b77-b9df-6ec44a2af801",
   "meta": {
     "templateCredsSetupCompleted": false,
-    "description": "SnapGad Content OS bridge. Inactive by design; configure environment variables and test in staging before activation. Canva remains the final human branding step."
+    "description": "Inactive copy-only worker. The portal owns claims, idempotency, state transitions and completion records."
   },
   "pinData": {},
   "nodes": [
@@ -21,7 +20,7 @@
         "responseMode": "responseNode",
         "options": {}
       },
-      "id": "sg-copy-webhook",
+      "id": "copy-webhook",
       "name": "Copy Job — Portal Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
@@ -30,660 +29,123 @@
     },
     {
       "parameters": {
-        "jsCode": "const crypto = require('crypto');\nconst input = $input.first().json || {};\nconst body = input.body && typeof input.body === 'object' ? input.body : input;\nconst headers = Object.fromEntries(Object.entries(input.headers || {}).map(([k, v]) => [String(k).toLowerCase(), String(v)]));\nconst secret = String($env.SNAPGAD_N8N_SHARED_SECRET || '');\nconst timestamp = headers['x-snapgad-timestamp'];\nconst signature = headers['x-snapgad-signature'];\nconst fail = (message, code) => [{ json: { valid: false, httpStatus: code, error: { code: 'INVALID_COPY_REQUEST', message } } }];\nconst stable = (value) => {\n  if (Array.isArray(value)) return '[' + value.map(stable).join(',') + ']';\n  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + stable(value[key])).join(',') + '}';\n  return JSON.stringify(value);\n};\nif (!secret || !timestamp || !signature) return fail('Faltan encabezados de firma.', 401);\nconst age = Math.abs(Date.now() - Number(timestamp) * 1000);\nif (!Number.isFinite(age) || age > 300000) return fail('La firma esta vencida.', 401);\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(String(timestamp) + '.' + stable(body)).digest('hex');\nconst a = Buffer.from(signature); const b = Buffer.from(expected);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return fail('Firma invalida.', 401);\nconst required = ['contentItemId', 'ownerId', 'assetUrl', 'idempotencyKey', 'brief'];\nif (required.some((key) => !body[key])) return fail('Faltan campos obligatorios.', 400);\nif (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(body.idempotencyKey))) return fail('idempotencyKey debe ser UUID.', 400);\nif (!/^https:\\/\\/[^\\s]+$/i.test(String(body.assetUrl))) return fail('assetUrl debe ser HTTPS.', 400);\nif (typeof body.brief !== 'object' || !body.brief.service || !body.brief.niche || !body.brief.objective || !body.brief.cta || !body.brief.humanDescription || !Array.isArray(body.brief.allowedFacts) || body.brief.allowedFacts.length < 1) return fail('brief incompleto.', 400);\nreturn [{ json: { valid: true, httpStatus: 202, jobType: 'COPY_REQUEST', receivedAt: new Date().toISOString(), contentItemId: String(body.contentItemId), ownerId: String(body.ownerId), assetUrl: String(body.assetUrl), idempotencyKey: String(body.idempotencyKey), brief: body.brief } }];"
+        "jsCode": "const crypto = require('crypto');\nconst input = $input.first().json || {};\nconst body = input.body && typeof input.body === 'object' ? input.body : input;\nconst headers = Object.fromEntries(Object.entries(input.headers || {}).map(([key, value]) => [String(key).toLowerCase(), String(value)]));\nconst stable = (value) => Array.isArray(value) ? '[' + value.map(stable).join(',') + ']' : value && typeof value === 'object' ? '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + stable(value[key])).join(',') + '}' : JSON.stringify(value);\nconst timestamp = headers['x-snapgad-timestamp'];\nconst signature = headers['x-snapgad-signature'];\nconst secret = String($env.SNAPGAD_N8N_SHARED_SECRET || '');\nconst fail = (message, status) => [{ json: { valid: false, status, error: message } }];\nif (!secret || !timestamp || !signature) return fail('Firma requerida.', 401);\nif (Math.abs(Date.now() - Number(timestamp) * 1000) > 300000) return fail('Firma vencida.', 401);\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(String(timestamp) + '.' + stable(body)).digest('hex');\nconst a = Buffer.from(signature); const b = Buffer.from(expected);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return fail('Firma inválida.', 401);\nif (!body.jobId || !body.idempotencyKey) return fail('jobId e idempotencyKey son requeridos.', 400);\nreturn [{ json: { valid: true, jobId: String(body.jobId), idempotencyKey: String(body.idempotencyKey) } }];"
       },
-      "id": "sg-copy-validate",
-      "name": "Copy — Verificar Firma y Schema",
+      "id": "copy-verify",
+      "name": "Copy — Verificar Inicio Firmado",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [240, 0]
     },
     {
       "parameters": {
-        "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
-          "combinator": "and",
-          "conditions": [{ "id": "copy-valid", "leftValue": "={{ $json.valid }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }]
-        },
-        "options": {}
+        "jsCode": "const crypto = require('crypto');\nconst input = $input.first().json;\nconst body = { jobId: input.jobId, idempotencyKey: input.idempotencyKey };\nconst stable = (value) => Array.isArray(value) ? '[' + value.map(stable).join(',') + ']' : value && typeof value === 'object' ? '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + stable(value[key])).join(',') + '}' : JSON.stringify(value);\nconst timestamp = String(Math.floor(Date.now() / 1000));\nconst signature = 'sha256=' + crypto.createHmac('sha256', String($env.SNAPGAD_N8N_SHARED_SECRET || '')).update(timestamp + '.' + stable(body)).digest('hex');\nreturn [{ json: { ...input, claimBody: body, claimTimestamp: timestamp, claimSignature: signature } }];"
       },
-      "id": "sg-copy-valid-if",
-      "name": "Copy — ¿Solicitud válida?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
+      "id": "copy-sign-claim",
+      "name": "Copy — Firmar Claim al Portal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [480, 0]
     },
     {
       "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: false, error: $json.error }) }}",
-        "options": { "responseCode": "={{ $json.httpStatus || 400 }}" }
-      },
-      "id": "sg-copy-invalid-response",
-      "name": "Copy — Rechazar Solicitud",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.4,
-      "position": [720, -180]
-    },
-    {
-      "parameters": {
-        "method": "GET",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?select=id,status,response_payload&kind=eq.COPY_REQUEST&idempotency_key=eq.' + encodeURIComponent($json.idempotencyKey) }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}" }
-        ] },
-        "options": { "response": { "response": { "responseFormat": "json", "neverError": true } } }
-      },
-      "id": "sg-copy-idempotency-get",
-      "name": "Copy — Buscar Idempotencia",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [720, 60],
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "jsCode": "const original = $('Copy — Verificar Firma y Schema').first().json;\nconst rows = $input.all().flatMap((item) => Array.isArray(item.json) ? item.json : [item.json]).filter((row) => row && (row.id || row.status));\nreturn [{ json: { ...original, duplicate: rows.length > 0, priorRun: rows[0] || null } }];"
-      },
-      "id": "sg-copy-idempotency-decision",
-      "name": "Copy — Resolver Idempotencia",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [960, 60]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
-          "combinator": "and",
-          "conditions": [{ "id": "copy-duplicate", "leftValue": "={{ $json.duplicate }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }]
-        },
-        "options": {}
-      },
-      "id": "sg-copy-duplicate-if",
-      "name": "Copy — ¿Ya procesado?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [1200, 60]
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: true, duplicate: true, idempotencyKey: $json.idempotencyKey, status: $json.priorRun?.status || 'RECEIVED' }) }}",
-        "options": { "responseCode": 200 }
-      },
-      "id": "sg-copy-duplicate-response",
-      "name": "Copy — Responder Reintento",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.4,
-      "position": [1440, -100]
-    },
-    {
-      "parameters": {
         "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs' }}",
+        "url": "={{ $env.SNAPGAD_PORTAL_BASE_URL + '/api/integrations/n8n/copy/claim' }}",
         "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Content-Type", "value": "application/json" },
-          { "name": "Prefer", "value": "resolution=ignore-duplicates,return=minimal" }
-        ] },
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-SnapGad-Timestamp", "value": "={{ $json.claimTimestamp }}" },
+            { "name": "X-SnapGad-Signature", "value": "={{ $json.claimSignature }}" }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ owner_id: $json.ownerId, content_item_id: $json.contentItemId, kind: 'COPY_REQUEST', idempotency_key: $json.idempotencyKey, status: 'RECEIVED', request_payload: { contentItemId: $json.contentItemId, assetUrl: $json.assetUrl, brief: $json.brief } }) }}",
-        "options": {}
+        "jsonBody": "={{ JSON.stringify($json.claimBody) }}",
+        "options": { "response": { "response": { "responseFormat": "json", "fullResponse": true } } }
       },
-      "id": "sg-copy-log-request",
-      "name": "Copy — Registrar Solicitud",
+      "id": "copy-claim",
+      "name": "Copy — Reclamar Trabajo del Portal",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1440, 180],
-      "onError": "continueRegularOutput"
+      "position": [720, 0]
     },
     {
       "parameters": {
         "method": "POST",
         "url": "https://openrouter.ai/api/v1/chat/completions",
         "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "Authorization", "value": "={{ 'Bearer ' + $env.OPENROUTER_API_KEY }}" },
-          { "name": "Content-Type", "value": "application/json" },
-          { "name": "HTTP-Referer", "value": "={{ $env.SNAPGAD_PORTAL_URL }}" },
-          { "name": "X-Title", "value": "SnapGad Content Engine" }
-        ] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.OPENROUTER_VISION_MODEL || 'google/gemini-2.0-flash-001', temperature: 0.35, max_tokens: 1400, messages: [{ role: 'system', content: 'Eres el editor de marketing B2B de SnapGad Technology para Mexico. Analiza primero lo visible en la imagen y luego redacta. No inventes precios, resultados, clientes, testimonios, urgencia ni caracteristicas no incluidas en los hechos permitidos. Un solo dolor operativo, consecuencia, mecanismo visible y CTA. Tono premium, directo, claro y mexicano; evita humo y listas genericas. Devuelve SOLO JSON valido con visualAnalysis, drafts (exactamente 2 alternativas) y warnings.' }, { role: 'user', content: [{ type: 'text', text: 'Brief: ' + JSON.stringify($('Copy — Verificar Firma y Schema').first().json.brief) + '\\nHechos permitidos: ' + JSON.stringify($('Copy — Verificar Firma y Schema').first().json.brief.allowedFacts) + '\\nGenera JSON con: visualAnalysis {scene, visibleText, proof, risks}, drafts [{headline,body,cta}], warnings []. Cada body debe poder publicarse en FB/IG y cerrar hacia WhatsApp.' }, { type: 'image_url', image_url: { url: $('Copy — Verificar Firma y Schema').first().json.assetUrl } }] }], response_format: { type: 'json_object' } }) }}",
-        "options": { "response": { "response": { "responseFormat": "json", "neverError": true } } }
-      },
-      "id": "sg-copy-openrouter",
-      "name": "Copy — OpenRouter Visión + Copy",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1680, 180],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "jsCode": "const response = $input.first().json || {};\nconst original = $('Copy — Verificar Firma y Schema').first().json;\nconst raw = response.body?.choices?.[0]?.message?.content ?? response.choices?.[0]?.message?.content ?? '';\nconst text = typeof raw === 'string' ? raw.trim().replace(/^```json\\s*/i, '').replace(/```$/i, '').trim() : JSON.stringify(raw);\nlet parsed;\ntry { parsed = JSON.parse(text); } catch { parsed = null; }\nconst drafts = Array.isArray(parsed?.drafts) ? parsed.drafts.filter((draft) => draft && draft.headline && draft.body && draft.cta).slice(0, 2) : [];\nconst ok = Boolean(parsed?.visualAnalysis && drafts.length === 2);\nreturn [{ json: { ...original, aiOk: ok, aiStatus: response.statusCode || 200, visualAnalysis: parsed?.visualAnalysis || {}, drafts, warnings: Array.isArray(parsed?.warnings) ? parsed.warnings : ['La IA no devolvio un JSON utilizable.'], provider: 'openrouter', model: $env.OPENROUTER_VISION_MODEL || 'google/gemini-2.0-flash-001', rawError: ok ? null : 'Respuesta de OpenRouter incompleta o invalida.' } }];"
-      },
-      "id": "sg-copy-parse",
-      "name": "Copy — Validar Respuesta IA",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1920, 180]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
-          "combinator": "and",
-          "conditions": [{ "id": "copy-ai-ok", "leftValue": "={{ $json.aiOk }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }]
-        },
-        "options": {}
-      },
-      "id": "sg-copy-ai-if",
-      "name": "Copy — ¿IA válida?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [2160, 180]
-    },
-    {
-      "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.COPY_REQUEST&idempotency_key=eq.' + encodeURIComponent($json.idempotencyKey) }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Content-Type", "value": "application/json" },
-          { "name": "Prefer", "value": "return=minimal" }
-        ] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ status: 'ERROR', sanitized_error: $json.rawError, completed_at: new Date().toISOString() }) }}",
-        "options": {}
-      },
-      "id": "sg-copy-log-error",
-      "name": "Copy — Registrar Error IA",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2400, 20],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: false, status: 'ERROR', idempotencyKey: $json.idempotencyKey, error: { code: 'AI_RESPONSE_INVALID', message: $json.rawError } }) }}",
-        "options": { "responseCode": 502 }
-      },
-      "id": "sg-copy-error-response",
-      "name": "Copy — Responder Error IA",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.4,
-      "position": [2640, 20]
-    },
-    {
-      "parameters": {
-        "jsCode": "const crypto = require('crypto');\nconst input = $input.first().json;\nconst callback = { contentItemId: input.contentItemId, idempotencyKey: input.idempotencyKey, visualAnalysis: input.visualAnalysis, drafts: input.drafts, warnings: input.warnings, provider: input.provider, model: input.model };\nconst stable = (value) => { if (Array.isArray(value)) return '[' + value.map(stable).join(',') + ']'; if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + stable(value[key])).join(',') + '}'; return JSON.stringify(value); };\nconst timestamp = String(Math.floor(Date.now() / 1000));\nconst signature = 'sha256=' + crypto.createHmac('sha256', String($env.SNAPGAD_N8N_SHARED_SECRET || '')).update(timestamp + '.' + stable(callback)).digest('hex');\nreturn [{ json: { ...input, callbackBody: callback, callbackTimestamp: timestamp, callbackSignature: signature } }];"
-      },
-      "id": "sg-copy-build-callback",
-      "name": "Copy — Firmar Callback al Portal",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2400, 260]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SNAPGAD_PORTAL_URL + '/api/integrations/n8n/copy-result' }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "Content-Type", "value": "application/json" },
-          { "name": "X-SnapGad-Timestamp", "value": "={{ $json.callbackTimestamp }}" },
-          { "name": "X-SnapGad-Signature", "value": "={{ $json.callbackSignature }}" }
-        ] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.callbackBody) }}",
-        "options": { "response": { "response": { "responseFormat": "json", "neverError": true } } }
-      },
-      "id": "sg-copy-callback",
-      "name": "Copy — Callback Portal",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2640, 260],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.COPY_REQUEST&idempotency_key=eq.' + encodeURIComponent($('Copy — Firmar Callback al Portal').first().json.idempotencyKey) }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Content-Type", "value": "application/json" },
-          { "name": "Prefer", "value": "return=minimal" }
-        ] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ status: 'CALLBACK_SENT', response_payload: $('Copy — Firmar Callback al Portal').first().json.callbackBody, completed_at: new Date().toISOString() }) }}",
-        "options": {}
-      },
-      "id": "sg-copy-log-callback",
-      "name": "Copy — Registrar Callback",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2880, 260],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: true, status: 'DRAFT_SENT_TO_PORTAL', contentItemId: $('Copy — Firmar Callback al Portal').first().json.contentItemId, idempotencyKey: $('Copy — Firmar Callback al Portal').first().json.idempotencyKey }) }}",
-        "options": { "responseCode": 202 }
-      },
-      "id": "sg-copy-response",
-      "name": "Copy — Responder Aceptado",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.4,
-      "position": [3120, 260]
-    },
-    {
-      "parameters": {
-        "httpMethod": "POST",
-        "path": "snapgad/content/publish",
-        "responseMode": "responseNode",
-        "options": {}
-      },
-      "id": "sg-publish-webhook",
-      "name": "Publish Job — Portal Webhook",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2.1,
-      "position": [0, 760],
-      "webhookId": "snapgad-content-publish-v1"
-    },
-    {
-      "parameters": {
-        "jsCode": "const crypto = require('crypto');\nconst input = $input.first().json || {};\nconst body = input.body && typeof input.body === 'object' ? input.body : input;\nconst headers = Object.fromEntries(Object.entries(input.headers || {}).map(([k, v]) => [String(k).toLowerCase(), String(v)]));\nconst secret = String($env.SNAPGAD_N8N_SHARED_SECRET || '');\nconst timestamp = headers['x-snapgad-timestamp'];\nconst signature = headers['x-snapgad-signature'];\nconst fail = (message, code) => [{ json: { valid: false, httpStatus: code, error: { code: code === 409 ? 'NOT_APPROVED' : 'INVALID_PUBLISH_REQUEST', message } } }];\nconst stable = (value) => { if (Array.isArray(value)) return '[' + value.map(stable).join(',') + ']'; if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + stable(value[key])).join(',') + '}'; return JSON.stringify(value); };\nif (!secret || !timestamp || !signature) return fail('Faltan encabezados de firma.', 401);\nconst age = Math.abs(Date.now() - Number(timestamp) * 1000);\nif (!Number.isFinite(age) || age > 300000) return fail('La firma esta vencida.', 401);\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(String(timestamp) + '.' + stable(body)).digest('hex');\nconst a = Buffer.from(signature); const b = Buffer.from(expected);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return fail('Firma invalida.', 401);\nconst required = ['contentItemId', 'publicationTargetId', 'ownerId', 'platform', 'assetUrl', 'idempotencyKey', 'copy', 'approvalState'];\nif (required.some((key) => !body[key])) return fail('Faltan campos obligatorios.', 400);\nif (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(body.idempotencyKey))) return fail('idempotencyKey debe ser UUID.', 400);\nconst platform = String(body.platform).toUpperCase();\nif (!['FACEBOOK', 'INSTAGRAM'].includes(platform)) return fail('platform debe ser FACEBOOK o INSTAGRAM.', 400);\nif (String(body.approvalState).toUpperCase() !== 'APPROVED') return fail('El portal no marco este target como aprobado.', 409);\nif (!/^https:\\/\\/[^\\s]+$/i.test(String(body.assetUrl))) return fail('assetUrl debe ser HTTPS y accesible para Meta.', 400);\nif (!body.copy.body || !body.copy.cta) return fail('copy.body y copy.cta son obligatorios.', 400);\nconst caption = [body.copy.headline, body.copy.body, body.copy.cta].filter(Boolean).join('\\n\\n').trim();\nreturn [{ json: { valid: true, httpStatus: 202, jobType: 'PUBLISH_REQUEST', contentItemId: String(body.contentItemId), publicationTargetId: String(body.publicationTargetId), ownerId: String(body.ownerId), platform, assetUrl: String(body.assetUrl), idempotencyKey: String(body.idempotencyKey), approvalState: 'APPROVED', approvedAt: body.approvedAt || new Date().toISOString(), approvedBy: body.approvedBy || 'portal-owner', copy: body.copy, caption } }];"
-      },
-      "id": "sg-publish-validate",
-      "name": "Publish — Verificar Firma, Aprobación y Schema",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [240, 760]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
-          "combinator": "and",
-          "conditions": [{ "id": "publish-valid", "leftValue": "={{ $json.valid }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }]
-        },
-        "options": {}
-      },
-      "id": "sg-publish-valid-if",
-      "name": "Publish — ¿Solicitud válida?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [480, 760]
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: false, error: $json.error }) }}",
-        "options": { "responseCode": "={{ $json.httpStatus || 400 }}" }
-      },
-      "id": "sg-publish-invalid-response",
-      "name": "Publish — Rechazar Solicitud",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.4,
-      "position": [720, 600]
-    },
-    {
-      "parameters": {
-        "method": "GET",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?select=id,status,response_payload&kind=eq.PUBLISH_REQUEST&idempotency_key=eq.' + encodeURIComponent($json.idempotencyKey) }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}" }
-        ] },
-        "options": { "response": { "response": { "responseFormat": "json", "neverError": true } } }
-      },
-      "id": "sg-publish-idempotency-get",
-      "name": "Publish — Buscar Idempotencia",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [720, 820],
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "jsCode": "const original = $('Publish — Verificar Firma, Aprobación y Schema').first().json;\nconst rows = $input.all().flatMap((item) => Array.isArray(item.json) ? item.json : [item.json]).filter((row) => row && (row.id || row.status));\nreturn [{ json: { ...original, duplicate: rows.length > 0, priorRun: rows[0] || null } }];"
-      },
-      "id": "sg-publish-idempotency-decision",
-      "name": "Publish — Resolver Idempotencia",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [960, 820]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
-          "combinator": "and",
-          "conditions": [{ "id": "publish-duplicate", "leftValue": "={{ $json.duplicate }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }]
-        },
-        "options": {}
-      },
-      "id": "sg-publish-duplicate-if",
-      "name": "Publish — ¿Ya procesado?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [1200, 820]
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: true, duplicate: true, platform: $json.platform, idempotencyKey: $json.idempotencyKey, status: $json.priorRun?.status || 'RECEIVED' }) }}",
-        "options": { "responseCode": 200 }
-      },
-      "id": "sg-publish-duplicate-response",
-      "name": "Publish — Responder Reintento",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.4,
-      "position": [1440, 680]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs' }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Content-Type", "value": "application/json" },
-          { "name": "Prefer", "value": "resolution=ignore-duplicates,return=minimal" }
-        ] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ owner_id: $json.ownerId, content_item_id: $json.contentItemId, publication_target_id: $json.publicationTargetId, kind: 'PUBLISH_REQUEST', idempotency_key: $json.idempotencyKey, status: 'RECEIVED', request_payload: { platform: $json.platform, publicationTargetId: $json.publicationTargetId, assetUrl: $json.assetUrl, caption: $json.caption } }) }}",
-        "options": {}
-      },
-      "id": "sg-publish-log-request",
-      "name": "Publish — Registrar Solicitud",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1440, 900],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
-          "combinator": "and",
-          "conditions": [{ "id": "is-facebook", "leftValue": "={{ $('Publish — Verificar Firma, Aprobación y Schema').first().json.platform }}", "rightValue": "FACEBOOK", "operator": { "type": "string", "operation": "equals" } }]
-        },
-        "options": {}
-      },
-      "id": "sg-publish-platform-if",
-      "name": "Publish — ¿Facebook?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [1680, 900]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v' + ($env.META_GRAPH_VERSION || '23.0') + '/' + $env.META_PAGE_ID + '/photos' }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "={{ 'Bearer ' + $env.META_PAGE_ACCESS_TOKEN }}" }] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ url: $('Publish — Verificar Firma, Aprobación y Schema').first().json.assetUrl, caption: $('Publish — Verificar Firma, Aprobación y Schema').first().json.caption, published: true }) }}",
-        "options": { "response": { "response": { "responseFormat": "json", "neverError": true } } }
-      },
-      "id": "sg-meta-facebook-photo",
-      "name": "Meta — Publicar Foto Facebook",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1920, 800],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "jsCode": "const response = $input.first().json || {};\nconst original = $('Publish — Verificar Firma, Aprobación y Schema').first().json;\nconst id = response.id || response.body?.id || null;\nconst errorMessage = response.error?.message || response.body?.error?.message || (id ? null : 'Meta no devolvio remotePostId.');\nreturn [{ json: { ...original, remotePostId: id, remoteUrl: id ? 'https://www.facebook.com/' + id : null, publishedAt: id ? new Date().toISOString() : null, callbackError: errorMessage ? { code: 'META_FACEBOOK_ERROR', message: String(errorMessage).slice(0, 500) } : null } }];"
-      },
-      "id": "sg-build-facebook-callback",
-      "name": "Facebook — Preparar Callback",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2160, 800]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v' + ($env.META_GRAPH_VERSION || '23.0') + '/' + $env.META_IG_USER_ID + '/media' }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "={{ 'Bearer ' + $env.META_PAGE_ACCESS_TOKEN }}" }] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ image_url: $('Publish — Verificar Firma, Aprobación y Schema').first().json.assetUrl, caption: $('Publish — Verificar Firma, Aprobación y Schema').first().json.caption }) }}",
-        "options": { "response": { "response": { "responseFormat": "json", "neverError": true } } }
-      },
-      "id": "sg-meta-instagram-container",
-      "name": "Meta — Crear Contenedor Instagram",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1920, 1020],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v' + ($env.META_GRAPH_VERSION || '23.0') + '/' + $env.META_IG_USER_ID + '/media_publish' }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "={{ 'Bearer ' + $env.META_PAGE_ACCESS_TOKEN }}" }] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ creation_id: $('Meta — Crear Contenedor Instagram').first().json.id || $('Meta — Crear Contenedor Instagram').first().json.body?.id }) }}",
-        "options": { "response": { "response": { "responseFormat": "json", "neverError": true } } }
-      },
-      "id": "sg-meta-instagram-publish",
-      "name": "Meta — Publicar Contenedor Instagram",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2160, 1020],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "jsCode": "const response = $input.first().json || {};\nconst original = $('Publish — Verificar Firma, Aprobación y Schema').first().json;\nconst id = response.id || response.body?.id || null;\nconst create = $('Meta — Crear Contenedor Instagram').first().json || {};\nconst createError = create.error?.message || create.body?.error?.message || null;\nconst errorMessage = response.error?.message || response.body?.error?.message || createError || (id ? null : 'Instagram no devolvio remotePostId.');\nreturn [{ json: { ...original, remotePostId: id, remoteUrl: id ? 'https://www.instagram.com/p/' + id : null, publishedAt: id ? new Date().toISOString() : null, callbackError: errorMessage ? { code: 'META_INSTAGRAM_ERROR', message: String(errorMessage).slice(0, 500) } : null } }];"
-      },
-      "id": "sg-build-instagram-callback",
-      "name": "Instagram — Preparar Callback",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2400, 1020]
-    },
-    {
-      "parameters": {
-        "jsCode": "const crypto = require('crypto');\nconst input = $input.first().json;\nconst callback = { contentItemId: input.contentItemId, publicationTargetId: input.publicationTargetId, platform: input.platform, idempotencyKey: input.idempotencyKey, remotePostId: input.remotePostId || undefined, remoteUrl: input.remoteUrl || undefined, publishedAt: input.publishedAt || undefined, error: input.callbackError || undefined };\nconst stable = (value) => { if (Array.isArray(value)) return '[' + value.map(stable).join(',') + ']'; if (value && typeof value === 'object') return '{' + Object.keys(value).filter((key) => value[key] !== undefined).sort().map((key) => JSON.stringify(key) + ':' + stable(value[key])).join(',') + '}'; return JSON.stringify(value); };\nconst timestamp = String(Math.floor(Date.now() / 1000));\nconst signature = 'sha256=' + crypto.createHmac('sha256', String($env.SNAPGAD_N8N_SHARED_SECRET || '')).update(timestamp + '.' + stable(callback)).digest('hex');\nreturn [{ json: { ...input, callbackBody: callback, callbackTimestamp: timestamp, callbackSignature: signature } }];"
-      },
-      "id": "sg-build-facebook-signed",
-      "name": "Facebook — Firmar Callback",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2400, 800]
-    },
-    {
-      "parameters": {
-        "jsCode": "const crypto = require('crypto');\nconst input = $input.first().json;\nconst callback = { contentItemId: input.contentItemId, publicationTargetId: input.publicationTargetId, platform: input.platform, idempotencyKey: input.idempotencyKey, remotePostId: input.remotePostId || undefined, remoteUrl: input.remoteUrl || undefined, publishedAt: input.publishedAt || undefined, error: input.callbackError || undefined };\nconst stable = (value) => { if (Array.isArray(value)) return '[' + value.map(stable).join(',') + ']'; if (value && typeof value === 'object') return '{' + Object.keys(value).filter((key) => value[key] !== undefined).sort().map((key) => JSON.stringify(key) + ':' + stable(value[key])).join(',') + '}'; return JSON.stringify(value); };\nconst timestamp = String(Math.floor(Date.now() / 1000));\nconst signature = 'sha256=' + crypto.createHmac('sha256', String($env.SNAPGAD_N8N_SHARED_SECRET || '')).update(timestamp + '.' + stable(callback)).digest('hex');\nreturn [{ json: { ...input, callbackBody: callback, callbackTimestamp: timestamp, callbackSignature: signature } }];"
-      },
-      "id": "sg-build-instagram-signed",
-      "name": "Instagram — Firmar Callback",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2640, 1020]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SNAPGAD_PORTAL_URL + '/api/integrations/n8n/publish-result' }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "Content-Type", "value": "application/json" },
-          { "name": "X-SnapGad-Timestamp", "value": "={{ $json.callbackTimestamp }}" },
-          { "name": "X-SnapGad-Signature", "value": "={{ $json.callbackSignature }}" }
-        ] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.callbackBody) }}",
-        "options": { "response": { "response": { "responseFormat": "json", "neverError": true } } }
-      },
-      "id": "sg-publish-facebook-callback",
-      "name": "Facebook — Callback Portal",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2640, 800],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.SNAPGAD_PORTAL_URL + '/api/integrations/n8n/publish-result' }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "Content-Type", "value": "application/json" },
-          { "name": "X-SnapGad-Timestamp", "value": "={{ $json.callbackTimestamp }}" },
-          { "name": "X-SnapGad-Signature", "value": "={{ $json.callbackSignature }}" }
-        ] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.callbackBody) }}",
-        "options": { "response": { "response": { "responseFormat": "json", "neverError": true } } }
-      },
-      "id": "sg-publish-instagram-callback",
-      "name": "Instagram — Callback Portal",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2880, 1020],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.PUBLISH_REQUEST&idempotency_key=eq.' + encodeURIComponent($('Facebook — Firmar Callback').first().json.idempotencyKey) }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [
-          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-          { "name": "Content-Type", "value": "application/json" },
-          { "name": "Prefer", "value": "return=minimal" }
-        ] },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ status: $('Facebook — Preparar Callback').first().json.callbackError ? 'ERROR' : 'CALLBACK_SENT', response_payload: $('Facebook — Firmar Callback').first().json.callbackBody, sanitized_error: $('Facebook — Preparar Callback').first().json.callbackError?.message || null, completed_at: new Date().toISOString() }) }}",
-        "options": {}
-      },
-      "id": "sg-log-facebook-callback",
-      "name": "Facebook — Registrar Resultado",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2880, 800],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL + '/rest/v1/automation_runs?kind=eq.PUBLISH_REQUEST&idempotency_key=eq.' + encodeURIComponent($('Instagram — Firmar Callback').first().json.idempotencyKey) }}",
-        "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}" },
-            { "name": "Content-Type", "value": "application/json" },
-            { "name": "Prefer", "value": "return=minimal" }
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.OPENROUTER_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ status: $('Instagram — Preparar Callback').first().json.callbackError ? 'ERROR' : 'CALLBACK_SENT', response_payload: $('Instagram — Firmar Callback').first().json.callbackBody, sanitized_error: $('Instagram — Preparar Callback').first().json.callbackError?.message || null, completed_at: new Date().toISOString() }) }}",
-        "options": {}
+        "jsonBody": "={{ (() => { const job = $json.body?.job ?? $json.job; return JSON.stringify({ model: $env.OPENROUTER_VISION_MODEL, messages: [{ role: 'system', content: 'Analiza el creativo y redacta dos alternativas factuales. No inventes precios, resultados, urgencia ni testimonios. Devuelve JSON con visualAnalysis, drafts y warnings.' }, { role: 'user', content: [{ type: 'text', text: JSON.stringify(job.brief) }, { type: 'image_url', image_url: { url: job.assetUrl } }] }], response_format: { type: 'json_object' } }); })() }}",
+        "options": { "response": { "response": { "responseFormat": "json" } } }
       },
-      "id": "sg-log-instagram-callback",
-      "name": "Instagram — Registrar Resultado",
+      "id": "copy-provider",
+      "name": "Copy — Generar Análisis y Borradores",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [3120, 1020],
-      "onError": "continueRegularOutput"
+      "position": [960, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst claim = $('Copy — Reclamar Trabajo del Portal').first().json;\nconst job = claim.body?.job ?? claim.job;\nconst provider = $input.first().json;\nconst raw = provider.choices?.[0]?.message?.content ?? provider.body?.choices?.[0]?.message?.content ?? '{}';\nlet result; try { result = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { throw new Error('COPY_PROVIDER_INVALID_JSON'); }\nif (!job || !result?.visualAnalysis || !Array.isArray(result.drafts) || result.drafts.length !== 2) throw new Error('COPY_PROVIDER_INVALID_RESULT');\nconst body = { jobId: job.id, idempotencyKey: job.idempotencyKey, leaseToken: job.leaseToken, result: { visualAnalysis: result.visualAnalysis, drafts: result.drafts, warnings: Array.isArray(result.warnings) ? result.warnings : [], provider: 'openrouter', model: String($env.OPENROUTER_VISION_MODEL || '') } };\nconst stable = (value) => Array.isArray(value) ? '[' + value.map(stable).join(',') + ']' : value && typeof value === 'object' ? '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + stable(value[key])).join(',') + '}' : JSON.stringify(value);\nconst timestamp = String(Math.floor(Date.now() / 1000));\nconst signature = 'sha256=' + crypto.createHmac('sha256', String($env.SNAPGAD_N8N_SHARED_SECRET || '')).update(timestamp + '.' + stable(body)).digest('hex');\nreturn [{ json: { completeBody: body, completeTimestamp: timestamp, completeSignature: signature } }];"
+      },
+      "id": "copy-sign-complete",
+      "name": "Copy — Firmar Complete al Portal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SNAPGAD_PORTAL_BASE_URL + '/api/integrations/n8n/copy/complete' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-SnapGad-Timestamp", "value": "={{ $json.completeTimestamp }}" },
+            { "name": "X-SnapGad-Signature", "value": "={{ $json.completeSignature }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.completeBody) }}",
+        "options": { "response": { "response": { "responseFormat": "json", "fullResponse": true } } }
+      },
+      "id": "copy-complete",
+      "name": "Copy — Completar Trabajo en Portal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 0]
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: !$('Facebook — Preparar Callback').first().json.callbackError, status: $('Facebook — Preparar Callback').first().json.callbackError ? 'ERROR' : 'PUBLISHED', platform: 'FACEBOOK', remotePostId: $('Facebook — Preparar Callback').first().json.remotePostId, contentItemId: $('Facebook — Preparar Callback').first().json.contentItemId, idempotencyKey: $('Facebook — Preparar Callback').first().json.idempotencyKey }) }}",
-        "options": { "responseCode": "={{ $('Facebook — Preparar Callback').first().json.callbackError ? 502 : 202 }}" }
+        "responseBody": "={{ JSON.stringify({ ok: true, status: 'COMPLETED' }) }}",
+        "options": { "responseCode": 202 }
       },
-      "id": "sg-publish-facebook-response",
-      "name": "Facebook — Responder Resultado",
+      "id": "copy-response",
+      "name": "Copy — Responder Aceptado",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
-      "position": [3120, 800]
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: !$('Instagram — Preparar Callback').first().json.callbackError, status: $('Instagram — Preparar Callback').first().json.callbackError ? 'ERROR' : 'PUBLISHED', platform: 'INSTAGRAM', remotePostId: $('Instagram — Preparar Callback').first().json.remotePostId, contentItemId: $('Instagram — Preparar Callback').first().json.contentItemId, idempotencyKey: $('Instagram — Preparar Callback').first().json.idempotencyKey }) }}",
-        "options": { "responseCode": "={{ $('Instagram — Preparar Callback').first().json.callbackError ? 502 : 202 }}" }
-      },
-      "id": "sg-publish-instagram-response",
-      "name": "Instagram — Responder Resultado",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.4,
-      "position": [3360, 1020]
+      "position": [1680, 0]
     }
   ],
   "connections": {
-    "Copy Job — Portal Webhook": { "main": [[{ "node": "Copy — Verificar Firma y Schema", "type": "main", "index": 0 }]] },
-    "Copy — Verificar Firma y Schema": { "main": [[{ "node": "Copy — ¿Solicitud válida?", "type": "main", "index": 0 }]] },
-    "Copy — ¿Solicitud válida?": { "main": [[{ "node": "Copy — Buscar Idempotencia", "type": "main", "index": 0 }], [{ "node": "Copy — Rechazar Solicitud", "type": "main", "index": 0 }]] },
-    "Copy — Buscar Idempotencia": { "main": [[{ "node": "Copy — Resolver Idempotencia", "type": "main", "index": 0 }]] },
-    "Copy — Resolver Idempotencia": { "main": [[{ "node": "Copy — ¿Ya procesado?", "type": "main", "index": 0 }]] },
-    "Copy — ¿Ya procesado?": { "main": [[{ "node": "Copy — Responder Reintento", "type": "main", "index": 0 }], [{ "node": "Copy — Registrar Solicitud", "type": "main", "index": 0 }]] },
-    "Copy — Registrar Solicitud": { "main": [[{ "node": "Copy — OpenRouter Visión + Copy", "type": "main", "index": 0 }]] },
-    "Copy — OpenRouter Visión + Copy": { "main": [[{ "node": "Copy — Validar Respuesta IA", "type": "main", "index": 0 }]] },
-    "Copy — Validar Respuesta IA": { "main": [[{ "node": "Copy — ¿IA válida?", "type": "main", "index": 0 }]] },
-    "Copy — ¿IA válida?": { "main": [[{ "node": "Copy — Firmar Callback al Portal", "type": "main", "index": 0 }], [{ "node": "Copy — Registrar Error IA", "type": "main", "index": 0 }]] },
-    "Copy — Registrar Error IA": { "main": [[{ "node": "Copy — Responder Error IA", "type": "main", "index": 0 }]] },
-    "Copy — Firmar Callback al Portal": { "main": [[{ "node": "Copy — Callback Portal", "type": "main", "index": 0 }]] },
-    "Copy — Callback Portal": { "main": [[{ "node": "Copy — Registrar Callback", "type": "main", "index": 0 }]] },
-    "Copy — Registrar Callback": { "main": [[{ "node": "Copy — Responder Aceptado", "type": "main", "index": 0 }]] },
-    "Publish Job — Portal Webhook": { "main": [[{ "node": "Publish — Verificar Firma, Aprobación y Schema", "type": "main", "index": 0 }]] },
-    "Publish — Verificar Firma, Aprobación y Schema": { "main": [[{ "node": "Publish — ¿Solicitud válida?", "type": "main", "index": 0 }]] },
-    "Publish — ¿Solicitud válida?": { "main": [[{ "node": "Publish — Buscar Idempotencia", "type": "main", "index": 0 }], [{ "node": "Publish — Rechazar Solicitud", "type": "main", "index": 0 }]] },
-    "Publish — Buscar Idempotencia": { "main": [[{ "node": "Publish — Resolver Idempotencia", "type": "main", "index": 0 }]] },
-    "Publish — Resolver Idempotencia": { "main": [[{ "node": "Publish — ¿Ya procesado?", "type": "main", "index": 0 }]] },
-    "Publish — ¿Ya procesado?": { "main": [[{ "node": "Publish — Responder Reintento", "type": "main", "index": 0 }], [{ "node": "Publish — Registrar Solicitud", "type": "main", "index": 0 }]] },
-    "Publish — Registrar Solicitud": { "main": [[{ "node": "Publish — ¿Facebook?", "type": "main", "index": 0 }]] },
-    "Publish — ¿Facebook?": { "main": [[{ "node": "Meta — Publicar Foto Facebook", "type": "main", "index": 0 }], [{ "node": "Meta — Crear Contenedor Instagram", "type": "main", "index": 0 }]] },
-    "Meta — Publicar Foto Facebook": { "main": [[{ "node": "Facebook — Preparar Callback", "type": "main", "index": 0 }]] },
-    "Facebook — Preparar Callback": { "main": [[{ "node": "Facebook — Firmar Callback", "type": "main", "index": 0 }]] },
-    "Facebook — Firmar Callback": { "main": [[{ "node": "Facebook — Callback Portal", "type": "main", "index": 0 }]] },
-    "Facebook — Callback Portal": { "main": [[{ "node": "Facebook — Registrar Resultado", "type": "main", "index": 0 }]] },
-    "Facebook — Registrar Resultado": { "main": [[{ "node": "Facebook — Responder Resultado", "type": "main", "index": 0 }]] },
-    "Meta — Crear Contenedor Instagram": { "main": [[{ "node": "Meta — Publicar Contenedor Instagram", "type": "main", "index": 0 }]] },
-    "Meta — Publicar Contenedor Instagram": { "main": [[{ "node": "Instagram — Preparar Callback", "type": "main", "index": 0 }]] },
-    "Instagram — Preparar Callback": { "main": [[{ "node": "Instagram — Firmar Callback", "type": "main", "index": 0 }]] },
-    "Instagram — Firmar Callback": { "main": [[{ "node": "Instagram — Callback Portal", "type": "main", "index": 0 }]] },
-    "Instagram — Callback Portal": { "main": [[{ "node": "Instagram — Registrar Resultado", "type": "main", "index": 0 }]] },
-    "Instagram — Registrar Resultado": { "main": [[{ "node": "Instagram — Responder Resultado", "type": "main", "index": 0 }]] }
+    "Copy Job — Portal Webhook": { "main": [[{ "node": "Copy — Verificar Inicio Firmado", "type": "main", "index": 0 }]] },
+    "Copy — Verificar Inicio Firmado": { "main": [[{ "node": "Copy — Firmar Claim al Portal", "type": "main", "index": 0 }]] },
+    "Copy — Firmar Claim al Portal": { "main": [[{ "node": "Copy — Reclamar Trabajo del Portal", "type": "main", "index": 0 }]] },
+    "Copy — Reclamar Trabajo del Portal": { "main": [[{ "node": "Copy — Generar Análisis y Borradores", "type": "main", "index": 0 }]] },
+    "Copy — Generar Análisis y Borradores": { "main": [[{ "node": "Copy — Firmar Complete al Portal", "type": "main", "index": 0 }]] },
+    "Copy — Firmar Complete al Portal": { "main": [[{ "node": "Copy — Completar Trabajo en Portal", "type": "main", "index": 0 }]] },
+    "Copy — Completar Trabajo en Portal": { "main": [[{ "node": "Copy — Responder Aceptado", "type": "main", "index": 0 }]] }
   },
   "tags": []
 }

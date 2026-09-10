@@ -9,6 +9,7 @@ const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 type AssetDropzoneProps = {
   value: File | null;
   onChange: (file: File | null) => void;
+  isProductionMode?: boolean;
 };
 
 function isAcceptedImage(file: File): boolean {
@@ -20,7 +21,7 @@ function isAcceptedImage(file: File): boolean {
   );
 }
 
-export function AssetDropzone({ value, onChange }: AssetDropzoneProps) {
+export function AssetDropzone({ value, onChange, isProductionMode = false }: AssetDropzoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputId = useId();
@@ -103,7 +104,7 @@ export function AssetDropzone({ value, onChange }: AssetDropzoneProps) {
               {value.name}
             </span>
             <span className="mt-1 text-xs text-slate-400">
-              Listo para guardar · el archivo sigue en este navegador
+              {isProductionMode ? "Listo para subir a Storage privado" : "Listo para guardar · el archivo sigue en este navegador"}
             </span>
             <span className="mt-4 text-xs font-semibold text-orange-200 group-hover:text-orange-100">
               Elegir otro archivo
@@ -128,7 +129,7 @@ export function AssetDropzone({ value, onChange }: AssetDropzoneProps) {
         <span>
           Recomendado: <strong className="font-semibold text-slate-300">1080 × 1350 px</strong> · formato 4:5
         </span>
-        <span>Validamos tipo de archivo, no dimensiones.</span>
+        <span>{isProductionMode ? "Validamos tipo, dimensiones y proporción en servidor." : "Validamos tipo de archivo, no dimensiones."}</span>
       </div>
 
       {error ? (

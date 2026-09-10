@@ -12,20 +12,23 @@ import {
   SERVICES,
 } from "@/lib/content/constants";
 import {
-  contentBriefSchema,
-  type ContentBrief,
-} from "@/lib/content/contracts";
+  campaignBriefSchema,
+  type CampaignBrief,
+  type CampaignDestination,
+  type CampaignFunnelStage,
+} from "@/lib/content/campaign";
 import type { ContentRepository } from "@/lib/content/repository";
 import { persistDemoAsset } from "@/lib/demo/browser-assets";
 import { persistDemoDraft } from "@/lib/demo/draft-store";
 import { createDemoRepository } from "@/lib/demo/repository";
+import { hasSupabaseBrowserConfig } from "@/lib/supabase/client";
 
-type FormState = Omit<ContentBrief, "allowedFacts"> & {
+type FormState = Omit<CampaignBrief, "allowedFacts"> & {
   allowedFactsText: string;
 };
 
 type ContentFormProps = {
-  onSubmit?: (brief: ContentBrief, file: File) => void | Promise<void>;
+  onSubmit?: (brief: CampaignBrief, file: File) => void | Promise<void>;
   repository?: Pick<ContentRepository, "createContentItem">;
 };
 
@@ -78,6 +81,12 @@ const initialState: FormState = {
   cta: "",
   humanDescription: "",
   allowedFactsText: "",
+  forbiddenClaims: [],
+  campaignName: "",
+  offer: "",
+  funnelStage: "captacion",
+  destination: "whatsapp",
+  destinationValue: "",
 };
 
 function splitAllowedFacts(value: string): string[] {
@@ -88,7 +97,7 @@ function splitAllowedFacts(value: string): string[] {
 }
 
 function inputClasses(): string {
-  return "mt-2 w-full rounded-xl border border-slate-700 bg-[#0c1427] px-4 py-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-cyan-300/80 focus:ring-2 focus:ring-cyan-300/20";
+  return "mt-2 w-full rounded-xl border border-white/10 bg-[#091735] px-4 py-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-[#A8C7FF]/80 focus:ring-2 focus:ring-[#A8C7FF]/20";
 }
 
 export function ContentForm({ onSubmit, repository }: ContentFormProps) {
@@ -100,10 +109,11 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
   const [success, setSuccess] = useState(false);
   const [createdItemId, setCreatedItemId] = useState<string | null>(null);
   const [demoRepository] = useState(() => createDemoRepository());
+  const isProductionMode = hasSupabaseBrowserConfig();
 
   const parsedBrief = useMemo(
     () =>
-      contentBriefSchema.safeParse({
+      campaignBriefSchema.safeParse({
         businessLine: state.businessLine,
         service: state.service,
         niche: state.niche,
@@ -113,6 +123,11 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
         cta: state.cta,
         humanDescription: state.humanDescription,
         allowedFacts: splitAllowedFacts(state.allowedFactsText),
+        campaignName: state.campaignName,
+        offer: state.offer,
+        funnelStage: state.funnelStage,
+        destination: state.destination,
+        destinationValue: state.destinationValue,
       }),
     [state],
   );
@@ -141,6 +156,21 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
       let createdItemIdForLink: string | null = null;
       if (onSubmit) {
         await onSubmit(parsedBrief.data, asset);
+      } else if (isProductionMode) {
+        const formData = new FormData();
+        formData.set("brief", JSON.stringify(parsedBrief.data));
+        formData.set("asset", asset, asset.name);
+        const response = await fetch("/api/content", {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(payload?.error ?? "CONTENT_CREATE_FAILED");
+        }
+        const payload = (await response.json()) as { content?: { id?: string } };
+        createdItemIdForLink = payload.content?.id ?? null;
       } else {
         const createdItem = await (repository ?? demoRepository).createContentItem(parsedBrief.data);
         createdItemIdForLink = createdItem.id;
@@ -153,7 +183,9 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
       setSuccess(true);
     } catch {
       setSubmitError(
-        "No se pudo guardar el borrador local. Revisa los datos e inténtalo de nuevo.",
+        isProductionMode
+          ? "No se pudo guardar el creativo en Supabase. Revisa tu sesión, el formato 4:5 y vuelve a intentarlo."
+          : "No se pudo guardar el borrador local. Revisa los datos e inténtalo de nuevo.",
       );
     } finally {
       setIsSubmitting(false);
@@ -162,10 +194,10 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
 
   return (
     <form className="space-y-6" onSubmit={handleSubmit} noValidate>
-      <section className="rounded-3xl border border-slate-800 bg-[#0b1325]/90 p-5 shadow-2xl shadow-black/10 sm:p-7">
-        <div className="mb-6 flex flex-col gap-2 border-b border-slate-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
+      <section className="rounded-3xl border border-white/[0.08] bg-[#091735] p-5 shadow-2xl shadow-black/10 sm:p-7">
+        <div className="mb-6 flex flex-col gap-2 border-b border-white/10 pb-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <p className="font-mono text-[0.68rem] uppercase tracking-[0.2em] text-cyan-200/80">
+            <p className="font-mono text-[0.68rem] uppercase tracking-[0.2em] text-[#A8C7FF]/80">
               Contexto comercial
             </p>
             <h2 className="mt-2 text-xl font-semibold tracking-tight text-white">
@@ -234,7 +266,7 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
             </p>
             <div className={`${inputClasses()} flex items-center justify-between text-slate-300`} aria-label="Formato">
               <span>Feed 4:5</span>
-              <span className="font-mono text-[0.68rem] uppercase tracking-[0.16em] text-cyan-200/80">
+              <span className="font-mono text-[0.68rem] uppercase tracking-[0.16em] text-[#A8C7FF]/80">
                 1080 × 1350
               </span>
             </div>
@@ -242,9 +274,71 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
         </div>
       </section>
 
-      <section className="grid gap-6 rounded-3xl border border-slate-800 bg-[#0b1325]/90 p-5 shadow-2xl shadow-black/10 sm:p-7 lg:grid-cols-[1.05fr_0.95fr]">
+      <section className="rounded-3xl border border-white/[0.08] bg-[#091735] p-5 shadow-2xl shadow-black/10 sm:p-7">
+        <div className="mb-6 border-b border-white/10 pb-5">
+          <p className="font-mono text-[0.68rem] uppercase tracking-[0.2em] text-[#A8C7FF]/80">
+            Funnel y atribución
+          </p>
+          <h2 className="mt-2 text-xl font-semibold tracking-tight text-white">
+            Define qué se ofrece y a dónde llega el lead
+          </h2>
+          <p className="mt-2 max-w-2xl text-xs leading-5 text-slate-500">
+            Este contexto acompaña al creativo, evita posts genéricos y permite rastrear conversación, demo y venta.
+          </p>
+        </div>
+        <div className="grid gap-5 md:grid-cols-2">
+          <TextField
+            id="campaign-name"
+            label="Nombre de campaña"
+            value={state.campaignName}
+            onChange={(value) => updateField("campaignName", value)}
+            placeholder="Ej. Agenda clínica septiembre"
+          />
+          <TextField
+            id="offer"
+            label="Oferta concreta"
+            value={state.offer}
+            onChange={(value) => updateField("offer", value)}
+            placeholder="Ej. Automatización de agenda por WhatsApp"
+          />
+          <SelectField
+            id="funnel-stage"
+            label="Etapa del funnel"
+            value={state.funnelStage}
+            onChange={(value) => updateField("funnelStage", value as CampaignFunnelStage)}
+            options={[
+              { value: "descubrimiento", label: "Descubrimiento" },
+              { value: "consideracion", label: "Consideración" },
+              { value: "captacion", label: "Captación" },
+              { value: "reactivacion", label: "Reactivación" },
+            ]}
+          />
+          <SelectField
+            id="destination"
+            label="Destino"
+            value={state.destination}
+            onChange={(value) => updateField("destination", value as CampaignDestination)}
+            options={[
+              { value: "whatsapp", label: "WhatsApp" },
+              { value: "landing_page", label: "Landing page" },
+              { value: "lead_form", label: "Formulario de Meta" },
+            ]}
+          />
+          <div className="md:col-span-2">
+            <TextField
+              id="destination-value"
+              label="URL de destino"
+              value={state.destinationValue}
+              onChange={(value) => updateField("destinationValue", value)}
+              placeholder="https://wa.me/521..."
+            />
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-6 rounded-3xl border border-white/[0.08] bg-[#091735] p-5 shadow-2xl shadow-black/10 sm:p-7 lg:grid-cols-[1.05fr_0.95fr]">
         <div className="space-y-6">
-          <AssetDropzone value={asset} onChange={(file) => {
+          <AssetDropzone isProductionMode={isProductionMode} value={asset} onChange={(file) => {
             setAsset(file);
             setSuccess(false);
             setSubmitError(null);
@@ -321,11 +415,13 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
         <div className="flex items-start gap-3">
           <span className="mt-0.5 text-orange-200" aria-hidden="true">◎</span>
           <p className="max-w-2xl text-xs leading-5 text-slate-300">
-            El creativo debe llegar terminado desde Canva. Este flujo genera borradores de texto; no genera ni edita imágenes con IA.
+            {isProductionMode
+              ? "El export final de Canva se subirá a Storage privado. Este flujo genera borradores de texto; no genera ni edita imágenes con IA."
+              : "El creativo debe llegar terminado desde Canva. Este flujo genera borradores de texto; no genera ni edita imágenes con IA."}
           </p>
         </div>
         <button
-          className="inline-flex min-h-12 shrink-0 items-center justify-center rounded-xl bg-orange-300 px-5 text-sm font-bold text-[#17110a] shadow-lg shadow-orange-300/10 transition hover:bg-orange-200 focus:outline-none focus:ring-2 focus:ring-orange-200 focus:ring-offset-2 focus:ring-offset-[#0a1020] disabled:cursor-not-allowed disabled:opacity-40"
+          className="inline-flex min-h-12 shrink-0 items-center justify-center rounded-xl bg-[#FF4D00] px-5 text-sm font-bold text-white shadow-lg shadow-[#FF4D00]/15 transition hover:bg-[#ff6a2f] focus:outline-none focus:ring-2 focus:ring-[#FF8B68] focus:ring-offset-2 focus:ring-offset-[#07112E] disabled:cursor-not-allowed disabled:opacity-40"
           type="submit"
           disabled={!isComplete || isSubmitting || success}
           aria-busy={isSubmitting}
@@ -336,7 +432,7 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
 
       {hasAttemptedSubmit && !isComplete ? (
         <p className="text-sm text-orange-200" role="alert">
-          Completa el creativo, la CTA, la descripción humana y al menos un hecho permitido para continuar.
+          Completa el creativo, la oferta, el destino, la CTA, la descripción humana y al menos un hecho permitido para continuar.
         </p>
       ) : null}
 
@@ -348,17 +444,19 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
 
       {success ? (
         <div className="rounded-2xl border border-cyan-200/25 bg-cyan-200/[0.06] p-5" role="status" aria-live="polite">
-          <p className="font-mono text-[0.68rem] uppercase tracking-[0.2em] text-cyan-200">
-            Borrador guardado en modo local
+          <p className="font-mono text-[0.68rem] uppercase tracking-[0.2em] text-[#A8C7FF]">
+            {isProductionMode ? "Creativo guardado en Supabase" : "Borrador guardado en modo local"}
           </p>
           <p className="mt-2 text-sm font-semibold text-white">
             Siguiente paso: revisar los borradores antes de publicar.
           </p>
           <p className="mt-1 text-xs leading-5 text-slate-400">
-            No se envió ninguna solicitud a servicios externos.
+            {isProductionMode
+              ? "El asset quedó privado y listo para solicitar análisis a n8n."
+              : "No se envió ninguna solicitud a servicios externos."}
           </p>
           <a
-            className="mt-4 inline-flex rounded-lg border border-cyan-200/25 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-200/10"
+            className="mt-4 inline-flex rounded-lg border border-[#A8C7FF]/25 px-3 py-2 text-xs font-semibold text-[#A8C7FF] transition hover:bg-[#A8C7FF]/10"
             href={createdItemId ? `/drafts/${createdItemId}` : "/drafts"}
           >
             Revisar borradores →
@@ -397,6 +495,32 @@ function SelectField({ id, label, value, options, onChange }: SelectFieldProps) 
           </option>
         ))}
       </select>
+    </div>
+  );
+}
+
+type TextFieldProps = {
+  id: string;
+  label: string;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+};
+
+function TextField({ id, label, value, placeholder, onChange }: TextFieldProps) {
+  return (
+    <div>
+      <label className="text-sm font-semibold text-slate-100" htmlFor={id}>
+        {label}
+      </label>
+      <input
+        className={inputClasses()}
+        id={id}
+        required
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
     </div>
   );
 }

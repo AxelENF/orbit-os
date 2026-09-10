@@ -5,6 +5,7 @@ import {
   copyResultSchema,
 } from "@/app/api/integrations/n8n/copy-result/route";
 import { createDemoRepository } from "@/lib/demo/repository";
+import { requestN8nCopy } from "@/lib/integrations/n8n-client";
 import { signN8nPayload } from "@/lib/integrations/n8n-signature";
 
 const SECRET = "a-test-secret-that-never-leaves-this-process";
@@ -117,7 +118,10 @@ describe("POST /api/integrations/n8n/copy-result", () => {
   it("reads the shared secret name used by the n8n workflow", async () => {
     vi.stubEnv("SNAPGAD_N8N_SHARED_SECRET", SECRET);
     const item = await repository.createContentItem(validBrief);
-    await repository.beginCopyGeneration(item.id);
+    await repository.prepareCopyRequest({
+      contentItemId: item.id,
+      idempotencyKey: validCallback().idempotencyKey,
+    });
     const environmentHandler = createCopyResultHandler({
       getRepository: async () => repository,
       nowMs: () => NOW_MS,
@@ -152,8 +156,11 @@ describe("POST /api/integrations/n8n/copy-result", () => {
 
   it("persists drafts and a sanitized audit event once, then transitions GENERATING to DRAFT", async () => {
     const item = await repository.createContentItem(validBrief);
-    await repository.beginCopyGeneration(item.id);
     const callback = validCallback(item.id);
+    await repository.prepareCopyRequest({
+      contentItemId: item.id,
+      idempotencyKey: callback.idempotencyKey,
+    });
 
     const first = await handler(signedRequest(callback));
     const second = await handler(signedRequest(callback));
@@ -166,12 +173,60 @@ describe("POST /api/integrations/n8n/copy-result", () => {
     expect((await repository.getContentItem(item.id))?.state).toBe("DRAFT");
     expect(await repository.listCopyDrafts(item.id)).toHaveLength(2);
     const events = await repository.listAuditEvents(item.id);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
+    expect(events).toHaveLength(2);
+    expect(events.find((event) => event.type === "COPY_CALLBACK_RECEIVED")).toMatchObject({
       type: "COPY_CALLBACK_RECEIVED",
       metadata: { draftCount: 2, warningCount: 0 },
     });
-    expect(JSON.stringify(events[0])).not.toContain(callback.drafts[0].body);
+    expect(JSON.stringify(events)).not.toContain(callback.drafts[0].body);
+  });
+
+  it("accepts a signed callback after a queued retry reuses its original copy key", async () => {
+    const item = await repository.createContentItemWithAsset({
+      brief: validBrief,
+      asset: {
+        id: "d32c92ce-9e2b-4aa2-9c39-5c5d97746156",
+        filename: "agenda.png",
+        mimeType: "image/png",
+        width: 1080,
+        height: 1350,
+        checksum: "checksum",
+        bytes: new Uint8Array([1, 2, 3]),
+      },
+    });
+    const callback = validCallback(item.id);
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network timeout"))
+      .mockResolvedValueOnce(new Response(null, { status: 202 }));
+    const dependencies = {
+      repository,
+      fetchFn,
+      environment: {
+        SNAPGAD_N8N_COPY_URL: "https://n8n.example.com/webhook/snapgad/content/copy",
+        SNAPGAD_N8N_SHARED_SECRET: SECRET,
+        NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "server-only-key",
+      },
+      createId: () => callback.idempotencyKey,
+    };
+    const copyInput = {
+      contentItemId: item.id,
+    };
+
+    await expect(requestN8nCopy(copyInput, dependencies)).resolves.toMatchObject({
+      status: "DELIVERY_UNCONFIRMED",
+      idempotencyKey: callback.idempotencyKey,
+      created: true,
+    });
+    await expect(
+      requestN8nCopy({ ...copyInput, idempotencyKey: callback.idempotencyKey }, dependencies),
+    ).resolves.toMatchObject({ status: "QUEUED", created: false });
+
+    const response = await handler(signedRequest(callback));
+
+    expect(response.status).toBe(202);
+    expect((await repository.getContentItem(item.id))?.state).toBe("DRAFT");
   });
 
   it("does not persist a valid callback unless the item is GENERATING", async () => {

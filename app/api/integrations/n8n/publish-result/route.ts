@@ -35,6 +35,7 @@ const errorCallbackSchema = callbackIdentitySchema.extend({
     })
     .strict(),
 });
+const MAX_CALLBACK_BYTES = 256_000;
 
 export const publishResultSchema = z.union([
   successCallbackSchema,
@@ -75,6 +76,10 @@ export function createPublishResultHandler(
   const nowMs = dependencies.nowMs ?? Date.now;
 
   return async function handlePublishResult(request: Request): Promise<Response> {
+    const declaredLength = Number(request.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_CALLBACK_BYTES) {
+      return jsonError("CALLBACK_TOO_LARGE", 413);
+    }
     const timestamp = request.headers.get("x-snapgad-timestamp");
     const signature = request.headers.get("x-snapgad-signature");
     if (!timestamp || !signature) return jsonError("INVALID_SIGNATURE", 401);
@@ -87,6 +92,10 @@ export function createPublishResultHandler(
       rawPayload = await request.text();
     } catch {
       return jsonError("INVALID_CALLBACK", 400);
+    }
+
+    if (new TextEncoder().encode(rawPayload).byteLength > MAX_CALLBACK_BYTES) {
+      return jsonError("CALLBACK_TOO_LARGE", 413);
     }
 
     if (

@@ -5,10 +5,15 @@ import { describe, expect, it } from "vitest";
 
 import { createDemoRepository } from "@/lib/demo/repository";
 import {
+  ContentConfigurationError,
   createContentRepository,
   getContentRepositoryMode,
+  OrganizationSelectionRequiredError,
   resetDemoRepositoryForTests,
+  selectOrganizationMembership,
+  selectSingleOrganizationMembership,
 } from "@/lib/content/repository-factory";
+import { OrganizationAccessError } from "@/lib/organizations/context";
 import { AUTOMATION_RUN_KINDS } from "@/lib/content/repository";
 
 const validBrief = {
@@ -23,7 +28,79 @@ const validBrief = {
   allowedFacts: ["El POS registra ventas y cortes de caja."],
 };
 
+const validCampaign = {
+  ...validBrief,
+  campaignName: "Agenda clínica septiembre",
+  offer: "Automatización de agenda por WhatsApp",
+  funnelStage: "captacion",
+  destination: "whatsapp",
+  destinationValue: "https://wa.me/5215555555555?text=AGENDA",
+};
+
 describe("content repository contract", () => {
+  it("rejects a user without an organization membership", () => {
+    expect(() => selectSingleOrganizationMembership([])).toThrow(
+      OrganizationAccessError,
+    );
+  });
+
+  it("uses the only available organization membership", () => {
+    expect(
+      selectSingleOrganizationMembership([
+        {
+          organization_id: "organization-a",
+          user_id: "user-a",
+          role: "owner",
+        },
+      ]),
+    ).toEqual({
+      organizationId: "organization-a",
+      userId: "user-a",
+      role: "owner",
+    });
+  });
+
+  it("requires an explicit active organization when a user belongs to multiple organizations", () => {
+    expect(() =>
+      selectSingleOrganizationMembership([
+        {
+          organization_id: "organization-a",
+          user_id: "user-a",
+          role: "owner",
+        },
+        {
+          organization_id: "organization-b",
+          user_id: "user-a",
+          role: "editor",
+        },
+      ]),
+    ).toThrow(OrganizationSelectionRequiredError);
+  });
+
+  it("resolves an explicitly selected organization only when it belongs to the session", () => {
+    const memberships = [
+      {
+        organization_id: "organization-a",
+        user_id: "user-a",
+        role: "owner" as const,
+      },
+      {
+        organization_id: "organization-b",
+        user_id: "user-a",
+        role: "editor" as const,
+      },
+    ];
+
+    expect(selectOrganizationMembership(memberships, "organization-b")).toEqual({
+      organizationId: "organization-b",
+      userId: "user-a",
+      role: "editor",
+    });
+    expect(() => selectOrganizationMembership(memberships, "organization-c")).toThrow(
+      OrganizationAccessError,
+    );
+  });
+
   it("keeps idempotency distinct for a request and its callback", () => {
     expect(AUTOMATION_RUN_KINDS).toEqual([
       "COPY_REQUEST",
@@ -40,7 +117,7 @@ describe("content repository contract", () => {
         NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
         NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key",
       }),
-    ).toBe("demo");
+    ).toBe("misconfigured");
     expect(
       getContentRepositoryMode({
         NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
@@ -77,6 +154,17 @@ describe("content repository contract", () => {
     );
   });
 
+  it("fails closed instead of falling back to demo when Supabase is partial", async () => {
+    await expect(
+      createContentRepository({
+        environment: {
+          NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key",
+        },
+      }),
+    ).rejects.toBeInstanceOf(ContentConfigurationError);
+  });
+
   it("rejects a content item whose brief is not valid", async () => {
     const repository = createDemoRepository();
 
@@ -84,9 +172,82 @@ describe("content repository contract", () => {
       repository.createContentItem({ ...validBrief, allowedFacts: [] }),
     ).rejects.toThrow();
   });
+
+  it("keeps a selected final copy immutable and only enters review after validation", async () => {
+    const repository = createDemoRepository();
+    const item = await repository.createContentItem(validCampaign);
+
+    const finalCopy = await repository.submitFinalCopyForReview(item.id, {
+      headline: "Tu WhatsApp también puede agendar",
+      body: "El bot puede atender, calificar y agendar citas.",
+      cta: "Escribe AGENDA por WhatsApp",
+    });
+    const record = await repository.getContentRecord(item.id);
+
+    expect(finalCopy.version).toBe(1);
+    expect(record?.content.state).toBe("REVIEW");
+    expect(record?.finalCopy).toMatchObject({ id: finalCopy.id, version: 1 });
+    await expect(
+      repository.submitFinalCopyForReview(item.id, {
+        headline: "Otro copy",
+        body: "No debe sobrescribir el seleccionado.",
+        cta: "Escribe AGENDA",
+      }),
+    ).rejects.toThrow();
+  });
 });
 
 describe("content storage migration", () => {
+  it("tenantizes domain tables with organization membership RLS and private organization storage paths", async () => {
+    const migrationPath = fileURLToPath(
+      new URL("../../supabase/migrations/0009_tenantize_content_and_jobs.sql", import.meta.url),
+    );
+    const sql = await readFile(migrationPath, "utf8");
+
+    for (const table of [
+      "assets",
+      "content_items",
+      "copy_drafts",
+      "final_copy_versions",
+      "publication_targets",
+      "automation_runs",
+      "audit_events",
+    ]) {
+      expect(sql).toMatch(new RegExp(`alter table public\\.${table} add column if not exists organization_id`, "i"));
+      expect(sql).toMatch(new RegExp(`create index if not exists ${table}_organization`, "i"));
+    }
+    expect(sql).toMatch(/organization_id = organization\.id[\s\S]*owner_id = organization\.legacy_owner_id/i);
+    expect(sql).toMatch(/create policy[\s\S]*public\.is_organization_member/i);
+    expect(sql).toMatch(/drop policy if exists "Users upload their assets" on public\.assets/i);
+    expect(sql).toMatch(/drop policy if exists "Users create uploaded content" on public\.content_items/i);
+    expect(sql).toMatch(/storage\.foldername\(name\)\)\[1\][\s\S]*organization_id/i);
+    expect(sql).toMatch(/asset\.id\s*=\s*\(storage\.foldername\(name\)\)\[2\]/i);
+    expect(sql).not.toMatch(/security definer\s+set search_path = public/i);
+    const securityDefinerBodies = [
+      ...sql.matchAll(/security definer\s+set search_path = pg_catalog\s+as \$\$([\s\S]*?)\$\$/gi),
+    ];
+    expect(securityDefinerBodies).not.toHaveLength(0);
+    for (const [, body] of securityDefinerBodies) {
+      expect(body).not.toMatch(/\bfrom\s+(?!public\.|auth\.|storage\.)[a-z_]/i);
+    }
+  });
+  it("stores campaign attribution and append-only selected final copy before review", async () => {
+    const migrationPath = fileURLToPath(
+      new URL("../../supabase/migrations/0007_campaign_and_final_copy.sql", import.meta.url),
+    );
+    const sql = await readFile(migrationPath, "utf8");
+
+    expect(sql).toMatch(/add column if not exists campaign_name/i);
+    expect(sql).toMatch(/add column if not exists campaign_code/i);
+    expect(sql).toMatch(/create table public\.final_copy_versions/i);
+    expect(sql).toMatch(/selected_final_copy_id uuid/i);
+    expect(sql).toMatch(/create function public\.submit_final_copy_for_review/i);
+    expect(sql).toMatch(/final_copy_submission_invalid_state/i);
+    expect(sql).toMatch(/create function public\.reject_final_copy_mutation/i);
+    expect(sql).toMatch(/before update or delete on public\.final_copy_versions/i);
+    expect(sql).toMatch(/grant execute on function public\.submit_final_copy_for_review[\s\S]*to service_role/i);
+  });
+
   it("defines owner-scoped tables, private storage, and idempotency constraints", async () => {
     const migrationPath = fileURLToPath(
       new URL("../../supabase/migrations/0001_content_os.sql", import.meta.url),
@@ -177,6 +338,40 @@ describe("content storage migration", () => {
     expect(auditEventsTable).toBeDefined();
     expect(auditEventsTable).not.toMatch(/on delete cascade/i);
     expect(auditEventsTable).toMatch(/on delete restrict/i);
+  });
+
+  it("defines an owner-scoped, review-gated target approval RPC", async () => {
+    const migrationPath = fileURLToPath(
+      new URL("../../supabase/migrations/0005_approve_publication_target.sql", import.meta.url),
+    );
+    const sql = await readFile(migrationPath, "utf8");
+
+    expect(sql).toMatch(/create function public\.approve_publication_target/i);
+    expect(sql).toMatch(/p_owner_id uuid/i);
+    expect(sql).toMatch(/owner_id\s*=\s*p_owner_id/i);
+    expect(sql).toMatch(/item_state\s*<>\s*'REVIEW'/i);
+    expect(sql).toMatch(/target\.status\s+not\s+in\s*\('PENDING_REVIEW',\s*'APPROVED'\)/i);
+    expect(sql).toMatch(/set status\s*=\s*'APPROVED'/i);
+    expect(sql).toMatch(/event_type[\s\S]*'TARGET_APPROVED'/i);
+    expect(sql).toMatch(/set state\s*=\s*'APPROVED'/i);
+    expect(sql).toMatch(/revoke all on function public\.approve_publication_target/i);
+    expect(sql).toMatch(/grant execute on function public\.approve_publication_target[\s\S]*to service_role/i);
+  });
+
+  it("defines an atomic content-plus-asset RPC with private storage metadata", async () => {
+    const migrationPath = fileURLToPath(
+      new URL("../../supabase/migrations/0006_create_content_item_with_asset.sql", import.meta.url),
+    );
+    const sql = await readFile(migrationPath, "utf8");
+
+    expect(sql).toMatch(/create function public\.create_content_item_with_asset/i);
+    expect(sql).toMatch(/insert into public\.assets/i);
+    expect(sql).toMatch(/bucket_id[\s\S]*'content-assets'/i);
+    expect(sql).toMatch(/asset_id[\s\S]*p_asset_id/i);
+    expect(sql).toMatch(/state[\s\S]*'UPLOADED'/i);
+    expect(sql).toMatch(/insert into public\.publication_targets[\s\S]*'FACEBOOK'[\s\S]*'INSTAGRAM'/i);
+    expect(sql).toMatch(/revoke all on function public\.create_content_item_with_asset/i);
+    expect(sql).toMatch(/grant execute on function public\.create_content_item_with_asset[\s\S]*to service_role/i);
   });
 });
 

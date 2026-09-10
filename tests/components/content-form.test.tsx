@@ -9,6 +9,15 @@ import { clearDemoDrafts, readDemoDrafts } from "@/lib/demo/draft-store";
 import { clearDemoAssets } from "@/lib/demo/browser-assets";
 
 const completeBriefFields = () => {
+  fireEvent.change(screen.getByLabelText("Nombre de campaña"), {
+    target: { value: "Agenda clínica septiembre" },
+  });
+  fireEvent.change(screen.getByLabelText("Oferta concreta"), {
+    target: { value: "Automatización de agenda por WhatsApp" },
+  });
+  fireEvent.change(screen.getByLabelText("URL de destino"), {
+    target: { value: "https://wa.me/5215555555555?text=AGENDA" },
+  });
   fireEvent.change(screen.getByLabelText("CTA"), {
     target: { value: "Solicita una demo" },
   });
@@ -66,6 +75,8 @@ describe("ContentForm", () => {
       cta: "Solicita una demo",
       humanDescription: "Mostrar cómo el equipo atiende y agenda solicitudes.",
       allowedFacts: ["El equipo responde y agenda solicitudes."],
+      campaignName: "Agenda clínica septiembre",
+      destination: "whatsapp",
     });
     expect(screen.getByText("Borrador guardado en modo local")).toBeInTheDocument();
     expect(

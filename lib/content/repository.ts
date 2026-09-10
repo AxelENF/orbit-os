@@ -1,5 +1,11 @@
+import type {
+  CampaignBrief,
+  CampaignDestination,
+  CampaignFunnelStage,
+} from "@/lib/content/campaign";
 import type { ContentBrief } from "@/lib/content/contracts";
 import type { ContentState } from "@/lib/content/state-machine";
+import type { CopyJobRepository } from "@/lib/automation/jobs";
 
 export const PUBLICATION_PLATFORMS = ["FACEBOOK", "INSTAGRAM"] as const;
 export const PUBLICATION_TARGET_STATUSES = [
@@ -31,6 +37,65 @@ export type ContentItem = ContentBrief & {
   id: string;
   state: ContentState;
   createdAt: string;
+  assetId?: string;
+  selectedFinalCopyId?: string;
+  campaign?: CampaignContext;
+};
+
+/** Lightweight list projection; detail screens request full records separately. */
+export type ContentSummary = Pick<
+  ContentItem,
+  "id" | "state" | "createdAt" | "assetId" | "campaign"
+> &
+  Pick<ContentBrief, "service" | "niche" | "contentType" | "objective">;
+
+export type CampaignContext = Pick<
+  CampaignBrief,
+  "campaignName" | "offer" | "destination" | "destinationValue"
+> & {
+  funnelStage: CampaignFunnelStage;
+  destination: CampaignDestination;
+  campaignCode: string;
+};
+
+export type FinalCopy = {
+  id: string;
+  contentItemId: string;
+  selectedCopyDraftId?: string;
+  headline: string;
+  body: string;
+  cta: string;
+  checksum: string;
+  version: number;
+  createdAt: string;
+};
+
+export type FinalCopySubmission = {
+  selectedCopyDraftId?: string;
+  headline: string;
+  body: string;
+  cta: string;
+};
+
+export type ContentAsset = {
+  id: string;
+  filename: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  checksum: string;
+  createdAt: string;
+  signedUrl?: string;
+};
+
+export type ContentAssetUpload = {
+  id: string;
+  filename: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  checksum: string;
+  bytes: Uint8Array;
 };
 
 export type PublicationTarget = {
@@ -56,6 +121,18 @@ export type PublishRequestPreparation = {
   ownerId: string;
   approvedAt: string;
   target: PublicationTarget & { status: "APPROVED" };
+};
+
+export type CopyRequestPreparationInput = {
+  contentItemId: string;
+  idempotencyKey: string;
+};
+
+export type CopyRequestPreparation = {
+  created: boolean;
+  status: "READY" | "DRY_RUN_QUEUED";
+  ownerId: string;
+  contentItem: ContentItem;
 };
 
 type PublishResultIdentity = {
@@ -121,6 +198,15 @@ export type ContentAuditEvent = {
   createdAt: string;
 };
 
+export type ContentRecord = {
+  content: ContentItem;
+  asset?: ContentAsset;
+  targets: PublicationTarget[];
+  drafts: StoredCopyDraft[];
+  auditEvents: ContentAuditEvent[];
+  finalCopy?: FinalCopy;
+};
+
 export type CopyResultIngestion = {
   created: boolean;
 };
@@ -132,6 +218,14 @@ export interface CopyResultRepository {
   ingestCopyResult(input: CopyResultCallback): Promise<CopyResultIngestion>;
   listCopyDrafts(contentItemId: string): Promise<StoredCopyDraft[]>;
   listAuditEvents(contentItemId: string): Promise<ContentAuditEvent[]>;
+}
+
+/** Persistence needed before sending a signed n8n copy request. */
+export interface CopyRequestRepository {
+  getContentItem(contentItemId: string): Promise<ContentItem | null>;
+  prepareCopyRequest(
+    input: CopyRequestPreparationInput,
+  ): Promise<CopyRequestPreparation>;
 }
 
 export interface PublishRequestRepository {
@@ -165,7 +259,25 @@ export class PublishTargetConflictError extends Error {
  * Persistence boundary for the portal. UI and routes depend on this contract,
  * never directly on a specific database client.
  */
-export interface ContentRepository extends PublishRequestRepository {
+export interface ContentRepository
+  extends PublishRequestRepository,
+    CopyRequestRepository,
+    CopyJobRepository {
   createContentItem(input: unknown): Promise<ContentItem>;
+  createContentItemWithAsset(input: {
+    brief: unknown;
+    asset: ContentAssetUpload;
+  }): Promise<ContentItem>;
+  listContentItems(): Promise<ContentItem[]>;
+  listContentSummaries(): Promise<ContentSummary[]>;
+  getContentRecord(contentItemId: string): Promise<ContentRecord | null>;
   listPublicationTargets(contentItemId: string): Promise<PublicationTarget[]>;
+  approvePublicationTarget(
+    contentItemId: string,
+    publicationTargetId: string,
+  ): Promise<PublicationTarget & { status: "APPROVED" }>;
+  submitFinalCopyForReview(
+    contentItemId: string,
+    input: FinalCopySubmission,
+  ): Promise<FinalCopy>;
 }

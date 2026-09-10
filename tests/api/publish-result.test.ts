@@ -112,7 +112,7 @@ describe("demo publish bridge", () => {
   });
 
   it("records one DRY_RUN_QUEUED event for an approved target without network", async () => {
-    const repository = createDemoRepository();
+    const repository = createDemoRepository({ initialContentState: "REVIEW" });
     const item = await repository.createContentItem(validBrief);
     const [facebook, instagram] = await repository.listPublicationTargets(item.id);
     await repository.approvePublicationTarget(item.id, facebook!.id);
@@ -134,6 +134,10 @@ describe("demo publish bridge", () => {
     expect((await repository.listPublicationTargets(item.id))[1]).toEqual(instagram);
     expect(await repository.listAuditEvents(item.id)).toEqual([
       expect.objectContaining({
+        type: "TARGET_APPROVED",
+        metadata: { platform: "FACEBOOK", publicationTargetId: facebook!.id },
+      }),
+      expect.objectContaining({
         type: "DRY_RUN_QUEUED",
         metadata: { platform: "FACEBOOK", publicationTargetId: facebook!.id },
       }),
@@ -141,7 +145,7 @@ describe("demo publish bridge", () => {
   });
 
   it("publishes only the approved target and applies the callback once", async () => {
-    const repository = createDemoRepository();
+    const repository = createDemoRepository({ initialContentState: "REVIEW" });
     const item = await repository.createContentItem(validBrief);
     const [facebook, instagram] = await repository.listPublicationTargets(item.id);
     await repository.approvePublicationTarget(item.id, facebook!.id);
@@ -154,6 +158,12 @@ describe("demo publish bridge", () => {
       remoteUrl: "https://www.facebook.com/facebook-post-123",
       publishedAt: "2026-09-02T18:02:00.000Z",
     };
+
+    await repository.preparePublishRequest({
+      contentItemId: item.id,
+      publicationTargetId: facebook!.id,
+      idempotencyKey: callback.idempotencyKey,
+    });
 
     await expect(repository.ingestPublishResult(callback)).resolves.toEqual({
       created: true,
@@ -177,13 +187,33 @@ describe("demo publish bridge", () => {
     ).toHaveLength(1);
   });
 
+  it("rejects an unsolicited callback even when the target is approved", async () => {
+    const repository = createDemoRepository({ initialContentState: "REVIEW" });
+    const item = await repository.createContentItem(validBrief);
+    const [facebook] = await repository.listPublicationTargets(item.id);
+    await repository.approvePublicationTarget(item.id, facebook!.id);
+
+    await expect(
+      repository.ingestPublishResult({
+        ...validSuccessCallback(item.id, facebook!.id),
+        idempotencyKey: "1f5f2e4c-91b4-4e0c-a3a3-0c5f2ab46c1a",
+      }),
+    ).rejects.toBeInstanceOf(PublishTargetConflictError);
+  });
+
   it("keeps an error on its own target and rejects idempotency-key reuse across targets", async () => {
-    const repository = createDemoRepository();
+    const repository = createDemoRepository({ initialContentState: "REVIEW" });
     const item = await repository.createContentItem(validBrief);
     const [facebook, instagram] = await repository.listPublicationTargets(item.id);
     await repository.approvePublicationTarget(item.id, facebook!.id);
     await repository.approvePublicationTarget(item.id, instagram!.id);
     const idempotencyKey = "cced3e68-7206-4c2f-9848-6bf474882150";
+
+    await repository.preparePublishRequest({
+      contentItemId: item.id,
+      publicationTargetId: facebook!.id,
+      idempotencyKey,
+    });
 
     await repository.ingestPublishResult({
       contentItemId: item.id,
@@ -221,7 +251,7 @@ describe("POST /api/integrations/n8n/publish-result", () => {
   let handler: ReturnType<typeof createPublishResultHandler>;
 
   beforeEach(() => {
-    repository = createDemoRepository();
+    repository = createDemoRepository({ initialContentState: "REVIEW" });
     handler = createPublishResultHandler({
       getRepository: async () => repository,
       getSecret: () => SECRET,
@@ -260,6 +290,11 @@ describe("POST /api/integrations/n8n/publish-result", () => {
     const [facebook, instagram] = await repository.listPublicationTargets(item.id);
     await repository.approvePublicationTarget(item.id, facebook!.id);
     const callback = validSuccessCallback(item.id, facebook!.id);
+    await repository.preparePublishRequest({
+      contentItemId: item.id,
+      publicationTargetId: facebook!.id,
+      idempotencyKey: callback.idempotencyKey,
+    });
 
     const first = await handler(signedRequest(callback));
     const retry = await handler(signedRequest(callback));
@@ -289,6 +324,11 @@ describe("POST /api/integrations/n8n/publish-result", () => {
         message: "Authorization Bearer secret-token access_token=other-secret failed",
       },
     };
+    await repository.preparePublishRequest({
+      contentItemId: item.id,
+      publicationTargetId: facebook!.id,
+      idempotencyKey: callback.idempotencyKey,
+    });
 
     const response = await handler(signedRequest(callback));
     const target = (await repository.listPublicationTargets(item.id)).find(

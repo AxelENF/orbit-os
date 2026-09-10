@@ -18,6 +18,7 @@ declare
   callback_run_id uuid;
   content_owner_id uuid;
   current_state public.content_state;
+  request_content_item_id uuid;
 begin
   if jsonb_typeof(p_visual_analysis) is distinct from 'object' then
     raise exception using errcode = '22023', message = 'COPY_RESULT_INVALID_VISUAL_ANALYSIS';
@@ -47,6 +48,19 @@ begin
 
   if not found then
     raise exception using errcode = 'P0001', message = 'COPY_RESULT_CONTENT_NOT_FOUND';
+  end if;
+
+  select content_item_id
+  into request_content_item_id
+  from public.automation_runs
+  where kind = 'COPY_REQUEST'
+    and idempotency_key = p_idempotency_key;
+
+  if not found then
+    raise exception using errcode = 'P0001', message = 'COPY_REQUEST_NOT_FOUND';
+  end if;
+  if request_content_item_id <> p_content_item_id then
+    raise exception using errcode = 'P0001', message = 'COPY_REQUEST_IDEMPOTENCY_KEY_REUSED';
   end if;
 
   insert into public.automation_runs (

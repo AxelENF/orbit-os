@@ -28,6 +28,7 @@ export const contentBriefSchema = z.object({
   cta: requiredText,
   humanDescription: requiredText,
   allowedFacts: z.array(requiredText).min(1),
+  forbiddenClaims: z.array(requiredText).optional(),
 });
 
 export type ContentBrief = z.infer<typeof contentBriefSchema>;

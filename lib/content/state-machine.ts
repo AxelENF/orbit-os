@@ -9,7 +9,7 @@ export type ContentState = z.infer<typeof contentStateSchema>;
 const allowedTransitions: Readonly<Record<ContentState, readonly ContentState[]>> = {
   UPLOADED: ["GENERATING", "REJECTED"],
   GENERATING: ["DRAFT", "ERROR"],
-  DRAFT: ["REVIEW"],
+  DRAFT: ["GENERATING", "REVIEW"],
   REVIEW: ["APPROVED", "REJECTED", "DRAFT"],
   APPROVED: ["SCHEDULED", "DRAFT"],
   SCHEDULED: ["PUBLISHED", "DRAFT"],

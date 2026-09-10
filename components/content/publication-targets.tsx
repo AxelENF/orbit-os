@@ -9,7 +9,7 @@ import type {
 
 type PublicationTargetsProps = {
   targets: PublicationTarget[];
-  onApprove: (targetId: string) => void | Promise<void>;
+  onApprove: (targetId: string) => Promise<PublicationTarget & { status: "APPROVED" }>;
   disabled?: boolean;
 };
 
@@ -23,18 +23,25 @@ function platformLabel(platform: PublicationTarget["platform"]): string {
 }
 
 export function PublicationTargets({ targets, onApprove, disabled = false }: PublicationTargetsProps) {
-  const [optimisticallyApproved, setOptimisticallyApproved] = useState<Set<string>>(
+  const [pendingTargetId, setPendingTargetId] = useState<string | null>(null);
+  const [confirmedTargetIds, setConfirmedTargetIds] = useState<Set<string>>(
     () => new Set(targets.filter((target) => target.status === "APPROVED").map((target) => target.id)),
   );
+  const [approvalErrorTargetId, setApprovalErrorTargetId] = useState<string | null>(null);
 
-  const localTargets = targets.map((target) =>
-    optimisticallyApproved.has(target.id) ? { ...target, status: "APPROVED" as const } : target,
-  );
-
-  function handleApprove(target: PublicationTarget) {
+  async function handleApprove(target: PublicationTarget) {
     if (disabled || target.status === "APPROVED") return;
-    setOptimisticallyApproved((current) => new Set(current).add(target.id));
-    void onApprove(target.id);
+    setPendingTargetId(target.id);
+    setApprovalErrorTargetId(null);
+    try {
+      const result = await onApprove(target.id);
+      if (result.status !== "APPROVED") throw new Error("APPROVAL_NOT_CONFIRMED");
+      setConfirmedTargetIds((current) => new Set(current).add(target.id));
+    } catch {
+      setApprovalErrorTargetId(target.id);
+    } finally {
+      setPendingTargetId(null);
+    }
   }
 
   return (
@@ -47,24 +54,26 @@ export function PublicationTargets({ targets, onApprove, disabled = false }: Pub
         <p className="max-w-xs text-xs leading-5 text-slate-500 sm:text-right">Aprobar una red no habilita la otra.</p>
       </div>
 
-      {localTargets.length > 0 ? (
+      {targets.length > 0 ? (
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          {localTargets.map((target) => {
-            const isApproved = target.status === "APPROVED";
+          {targets.map((target) => {
+            const isApproved = target.status === "APPROVED" || confirmedTargetIds.has(target.id);
+            const isPending = pendingTargetId === target.id;
             return (
               <div key={target.id} className="rounded-xl border border-white/[0.08] bg-[#081127] p-4">
                 <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold text-white">{statusText(target.platform, target.status)}</p>
+                  <p className="text-sm font-semibold text-white">{statusText(target.platform, isApproved ? "APPROVED" : target.status)}</p>
                   <span className={`size-2 rounded-full ${isApproved ? "bg-emerald-300" : "bg-orange-300"}`} aria-hidden="true" />
                 </div>
                 <button
                   className="mt-4 inline-flex min-h-10 w-full items-center justify-center rounded-lg border border-orange-200/25 px-3 py-2 text-sm font-semibold text-orange-100 transition hover:bg-orange-200/10 focus:outline-none focus:ring-2 focus:ring-orange-200/50 disabled:cursor-not-allowed disabled:border-emerald-200/20 disabled:text-emerald-200/80"
                   type="button"
-                  disabled={isApproved || disabled}
-                  onClick={() => handleApprove(target)}
+                  disabled={isApproved || disabled || isPending}
+                  onClick={() => void handleApprove(target)}
                 >
-                  {`Aprobar ${platformLabel(target.platform)}`}
+                  {isPending ? "Registrando aprobación…" : `Aprobar ${platformLabel(target.platform)}`}
                 </button>
+                {approvalErrorTargetId === target.id ? <p className="mt-3 text-xs leading-5 text-orange-100" role="alert">No se pudo registrar la aprobación de {platformLabel(target.platform)}. Inténtalo de nuevo.</p> : null}
               </div>
             );
           })}

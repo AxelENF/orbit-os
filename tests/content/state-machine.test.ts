@@ -5,6 +5,7 @@ import { transitionContentState } from "@/lib/content/state-machine";
 describe("transitionContentState", () => {
   it.each([
     ["UPLOADED", "GENERATING"],
+    ["DRAFT", "GENERATING"],
     ["GENERATING", "DRAFT"],
     ["DRAFT", "REVIEW"],
     ["REVIEW", "APPROVED"],

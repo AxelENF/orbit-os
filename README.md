@@ -19,17 +19,23 @@ npm run lint
 - **Demo (default):** leave the Supabase variables unset. The app uses the
   in-memory repository and browser-local asset previews for local development
   and tests only. Nothing is uploaded to a remote service.
-- **Configured Supabase (later):** copy `.env.example` to `.env.local` and set
+- **Configured Supabase:** copy `.env.example` to `.env.local` and set
   `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and the
   server-only `SUPABASE_SERVICE_ROLE_KEY`. Signed n8n callbacks additionally
-  require `SNAPGAD_N8N_SHARED_SECRET` on both servers. The selector stays in demo mode
-  until all three are present. The service-role key is never imported into or
+  require `SNAPGAD_N8N_SHARED_SECRET` on both servers. If a public Supabase
+  variable is present but the server key is missing, the API fails closed with
+  a configuration error instead of silently using demo data. The service-role key is never imported into or
   exposed to the browser.
 
 The database schema has not been applied by this repository. When a Supabase
-project is ready, review `supabase/migrations/0001_content_os.sql` and apply it
-with the Supabase CLI or SQL editor in the intended environment. The migration
-creates a private `content-assets` storage bucket and owner-only RLS policies.
+project is ready, review `supabase/migrations/0001_content_os.sql` through
+`0013_automation_job_lifecycle.sql` and apply them in order with the Supabase
+CLI or SQL editor in the intended environment. The migrations create
+organization-scoped tables, a private `content-assets` storage bucket,
+membership RLS policies, AIAS profiles, and portal-owned durable copy jobs.
+Migration `0013` adds the staged worker lifecycle RPCs used by
+`SupabaseCopyWorkerStore`; it is not a claim that those RPCs have been applied
+or verified against a live project.
 Live RLS/migration verification remains pending until staging credentials exist.
 
 The n8n callback route uses HMAC authentication and a service-role repository,
@@ -64,15 +70,70 @@ of the same kind is rejected.
 ## n8n Content Engine V1
 
 The inactive export at [`n8n/SnapGad-Content-Engine-V1.json`](n8n/SnapGad-Content-Engine-V1.json)
-contains two signed webhook paths:
+contains one signed, copy-only worker path:
 
 - `POST /webhook/snapgad/content/copy` — OpenRouter vision/copy generation and
-  callback with two alternatives.
-- `POST /webhook/snapgad/content/publish` — approved, target-specific Meta
-  publication for Facebook or Instagram.
+  callback with two alternatives. The worker claims a durable job from the
+  portal before reading the private asset and completes that job through the
+  signed callback.
 
 Use the runbooks in [`docs/n8n/`](docs/n8n/) before importing. Keep the workflow
-inactive until Supabase migrations `0001`, `0002`, and `0003` are applied in a
-staging project, the portal callback URL is reachable, and one approved test
-asset has been verified. The export contains no credentials and has not been
-imported or activated in the connected n8n instance.
+inactive until migrations `0001` through `0010` are applied in a staging
+project, the portal callback URL is reachable, and one test job has been
+verified. The export contains no credentials, has no direct Supabase access,
+and has not been imported or activated in the connected n8n instance.
+
+The server exposes a signed request bridge at `/api/integrations/n8n/copy` and
+signed worker endpoints at `/api/integrations/n8n/copy/claim` and
+`/api/integrations/n8n/copy/complete`. The portal enqueues the durable job
+before any n8n delivery; n8n receives only the job identifier and signed
+lease, then reads the stored brief and asset through the claim endpoint. The
+Meta publish bridge remains preflight-only and is not part of this worker.
+For the portal-owned path, the server-only `SupabaseCopyWorkerStore` uses the
+same lifecycle through Postgres RPCs and signed `content-assets` URLs. An
+internal `GET /api/internal/worker/health` endpoint exposes aggregate queue
+telemetry only when `SNAPGAD_WORKER_HEALTH_TOKEN` is configured; it is not a
+browser or tenant-facing route.
+
+The persistent runner is started with `npm run worker`. It fails closed unless
+`NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
+`SNAPGAD_COPY_WORKER_MODULE` are present. The processor module must export a
+default function (or `processCopyJob`) that receives one claimed job and
+returns an object result. Polling, lease heartbeat, retry, and expired-lease
+recovery are owned by `worker/durable-runner.ts`; provider code is injected and
+therefore no Meta, OpenRouter, or n8n call is implicit.
+In demo mode, the browser screens use their explicit local store; with
+Supabase configuration, the new-creative, campaigns, drafts, review and
+history screens use the authenticated API.
+
+The production read/approval API is available at `GET /api/content`,
+`GET /api/content/:id`, and
+`POST /api/content/:id/targets/:targetId/approve`. These routes derive the
+owner from the Supabase session, return the content record with targets, copy
+drafts and audit events, and require the item to be in `REVIEW` before a target
+can be approved. Applying migration `0005` is required before using the
+approval route against Supabase, and migration `0006` is required for asset
+uploads. The new-creative form sends multipart assets to `POST /api/content`
+when public Supabase configuration is present; staging credentials are still
+required for end-to-end verification.
+
+## Campaign control plane
+
+Every newly uploaded creative now requires a campaign name, concrete offer,
+funnel stage and HTTPS destination alongside its commercial brief. The server
+stores a readable `campaign_code` and the portal only enables per-network
+approval after `POST /api/content/:id/final-copy` has persisted a validated,
+immutable final-copy version and moved the item to `REVIEW`.
+
+`GET /api/content/:id/preflight` is a non-mutating check for asset format,
+destination and final copy. It is safe to use while preparing a campaign. The
+Meta configuration boundary is deliberately preflight-only: credentials in
+`META_*` are server-only and do not make any Meta API call or publish a post.
+Even a configured n8n publish URL is fail-closed unless the explicit,
+reviewed `SNAPGAD_PUBLISH_WORKER_ENABLED=true` staging flag is present; the
+default remains no network publication.
+The actual Facebook/Instagram publishing connector remains staging work until
+a single approved asset and target-specific Meta permissions are verified.
+
+La fase y su checklist de transferencia están documentadas en
+[`docs/superpowers/plans/2026-09-04-snapgad-content-os-production-adapter.md`](docs/superpowers/plans/2026-09-04-snapgad-content-os-production-adapter.md).

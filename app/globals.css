@@ -1,8 +1,12 @@
 @import "tailwindcss";
 
 :root {
-  --background: #060c1b;
-  --foreground: #e2e8f0;
+  --background: #07112e;
+  --foreground: #f4f7fc;
+  --snapgad-navy: #07112e;
+  --snapgad-cobalt: #1748d2;
+  --snapgad-orange: #ff4d00;
+  --snapgad-ice: #a8c7ff;
 }
 
 @theme inline {
@@ -16,4 +20,9 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  text-rendering: optimizeLegibility;
 }
+
+button, a, input, select, textarea { outline-color: var(--snapgad-orange); }
+
+::selection { background: var(--snapgad-orange); color: #160b05; }

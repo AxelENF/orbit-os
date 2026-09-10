@@ -2,88 +2,97 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
+import { AppIcon } from "@/components/layout/app-icon";
+import { listContentSummaries } from "@/lib/content/client";
+import { CAMPAIGN_STATUS_LABELS, campaignNextAction, campaignTitle } from "@/lib/content/campaign-view";
+import type { ContentSummary } from "@/lib/content/repository";
+import type { ContentState } from "@/lib/content/state-machine";
 import { readDemoAssets, type DemoBrowserAsset } from "@/lib/demo/browser-assets";
+import { hasSupabaseBrowserConfig } from "@/lib/supabase/client";
 
-const lanes = [
-  { title: "Controlar", description: "POS, inventario y operación visible.", tone: "text-cyan-200" },
-  { title: "Captar", description: "Web, CRM y oportunidades calificadas.", tone: "text-blue-200" },
-  { title: "Automatizar", description: "Bots, citas y tareas que avanzan.", tone: "text-orange-200" },
+type CampaignFilter = "ALL" | "ATTENTION" | "SCHEDULED" | "PUBLISHED";
+
+const filters: Array<{ id: CampaignFilter; label: string }> = [
+  { id: "ALL", label: "Todas" },
+  { id: "ATTENTION", label: "Por revisar" },
+  { id: "SCHEDULED", label: "Programadas" },
+  { id: "PUBLISHED", label: "Publicadas" },
 ];
+
+const attentionStates: ContentState[] = ["DRAFT", "REVIEW", "REJECTED", "ERROR"];
+
+function matchesFilter(item: ContentSummary, filter: CampaignFilter): boolean {
+  if (filter === "ATTENTION") return attentionStates.includes(item.state);
+  if (filter === "SCHEDULED") return item.state === "SCHEDULED";
+  if (filter === "PUBLISHED") return item.state === "PUBLISHED";
+  return true;
+}
+
+function statusTone(state: ContentState): string {
+  if (state === "PUBLISHED") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-200";
+  if (state === "SCHEDULED" || state === "APPROVED") return "border-[#A8C7FF]/25 bg-[#A8C7FF]/10 text-[#A8C7FF]";
+  if (state === "ERROR" || state === "REJECTED") return "border-red-300/25 bg-red-300/10 text-red-200";
+  return "border-[#FF4D00]/30 bg-[#FF4D00]/10 text-orange-200";
+}
+
+function campaignDescription(item: ContentSummary): string {
+  return item.campaign?.offer || `${item.niche.replaceAll("_", " ")} · ${item.contentType.replaceAll("_", " ")}`;
+}
+
+function Stat({ value, label, tone = "text-white" }: { value: number; label: string; tone?: string }) {
+  return <div className="flex items-baseline justify-between gap-3 border-b border-white/[0.08] py-3 last:border-0"><span className={`text-2xl font-semibold tracking-[-0.05em] ${tone}`}>{value}</span><span className="text-right text-[0.62rem] font-semibold uppercase tracking-[0.16em] text-slate-500">{label}</span></div>;
+}
 
 export default function LibraryPage() {
   const [assets, setAssets] = useState<DemoBrowserAsset[]>([]);
+  const [items, setItems] = useState<ContentSummary[]>([]);
+  const [filter, setFilter] = useState<CampaignFilter>("ALL");
+  const [isLoading, setIsLoading] = useState(true);
+  const isProductionMode = hasSupabaseBrowserConfig();
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setAssets(readDemoAssets()), 0);
-    return () => window.clearTimeout(timer);
-  }, []);
+    if (!isProductionMode) {
+      const timer = window.setTimeout(() => { setAssets(readDemoAssets()); setIsLoading(false); }, 0);
+      return () => window.clearTimeout(timer);
+    }
+    listContentSummaries().then(setItems).catch(() => setItems([])).finally(() => setIsLoading(false));
+  }, [isProductionMode]);
+
+  const filteredItems = useMemo(() => items.filter((item) => matchesFilter(item, filter)), [filter, items]);
+  const filteredAssets = useMemo(() => assets.filter((asset) => matchesFilter(asset.content, filter)), [assets, filter]);
+  const visibleItems = isProductionMode ? items : assets.map((asset) => asset.content);
+  const attentionCount = visibleItems.filter((item) => attentionStates.includes(item.state)).length;
+  const publishedCount = visibleItems.filter((item) => item.state === "PUBLISHED").length;
 
   return (
     <div className="mx-auto max-w-6xl">
-      <div className="flex flex-col gap-6 border-b border-white/[0.08] pb-8 md:flex-row md:items-end md:justify-between">
-        <div>
-          <p className="font-mono text-[0.68rem] uppercase tracking-[0.24em] text-cyan-200/80">Biblioteca de contenido</p>
-          <h1 className="mt-3 max-w-2xl text-3xl font-semibold tracking-[-0.04em] text-white sm:text-4xl">
-            Un lugar para cada creativo que sí tiene contexto.
-          </h1>
-          <p className="mt-4 max-w-xl text-sm leading-6 text-slate-400">
-            Sube los exports finales de Canva, segmenta la oferta y deja lista la información que la IA puede usar sin inventar.
-          </p>
+      <header className="flex flex-col gap-5 border-b border-white/[0.08] pb-6 sm:flex-row sm:items-end sm:justify-between">
+        <div className="flex items-center gap-4">
+          <span className="flex size-12 items-center justify-center rounded-2xl bg-[#1748D2]/35 text-[#A8C7FF] ring-1 ring-[#A8C7FF]/15"><AppIcon name="campaigns" size={23} /></span>
+          <div><p className="font-mono text-[0.62rem] uppercase tracking-[0.24em] text-[#A8C7FF]/65">SnapGad / workspace</p><h1 className="mt-1 text-3xl font-semibold tracking-[-0.045em] text-white">Campañas</h1></div>
         </div>
-        <Link
-          href="/library/new"
-          className="inline-flex min-h-12 items-center justify-center rounded-xl bg-orange-300 px-5 text-sm font-bold text-[#17110a] shadow-lg shadow-orange-300/10 transition hover:bg-orange-200"
-        >
-          + Subir creativo
-        </Link>
-      </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="rounded-full border border-white/10 px-3 py-2 text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-slate-500">{isProductionMode ? "Conectado" : "Modo demo"}</span>
+          <Link href="/library/new" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-[#FF4D00] px-4 text-sm font-bold text-white shadow-[0_10px_25px_rgba(255,77,0,0.18)] transition hover:bg-[#ff6a2f]"><AppIcon name="plus" size={16} /> Nueva campaña</Link>
+        </div>
+      </header>
 
-      <div className="mt-8 grid gap-4 md:grid-cols-3">
-        {lanes.map((lane, index) => (
-          <div key={lane.title} className="rounded-2xl border border-white/[0.08] bg-[#0b1429] p-5">
-            <div className="flex items-center justify-between">
-              <span className={`font-mono text-[0.65rem] uppercase tracking-[0.2em] ${lane.tone}`}>0{index + 1}</span>
-              <span className="size-2 rounded-full bg-white/15" aria-hidden="true" />
-            </div>
-            <h2 className="mt-7 text-lg font-semibold text-white">{lane.title}</h2>
-            <p className="mt-2 text-xs leading-5 text-slate-500">{lane.description}</p>
-          </div>
-        ))}
-      </div>
-
-      {assets.length > 0 ? (
-        <section className="mt-8 grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
-          {assets.map((asset) => (
-            <article key={asset.contentItemId} className="overflow-hidden rounded-3xl border border-white/[0.08] bg-[#0b1429]">
-              <div className="relative aspect-[4/5] overflow-hidden bg-[#081127]">
-                <Image src={asset.previewDataUrl} alt={`Creativo ${asset.filename}`} fill sizes="(min-width: 1280px) 30vw, (min-width: 640px) 45vw, 100vw" unoptimized className="object-cover" />
-              </div>
-              <div className="space-y-3 p-5">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-cyan-200/75">{asset.content.state}</span>
-                  <span className="text-xs text-slate-500">Demo local</span>
-                </div>
-                <h2 className="truncate text-sm font-semibold text-white">{asset.filename}</h2>
-                <p className="text-xs leading-5 text-slate-500">{asset.content.service} · {asset.content.niche} · {asset.content.contentType}</p>
-              </div>
-            </article>
-          ))}
-        </section>
-      ) : (
-      <section className="mt-8 rounded-3xl border border-dashed border-cyan-200/20 bg-cyan-200/[0.025] px-6 py-14 text-center sm:px-10">
-        <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-cyan-200/10 text-2xl text-cyan-100 ring-1 ring-cyan-200/20">✦</div>
-        <p className="mt-6 font-mono text-[0.65rem] uppercase tracking-[0.22em] text-cyan-200/75">Sin activos todavía</p>
-        <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Empieza con tu primer export de Canva</h2>
-        <p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-slate-400">
-          El archivo se queda en este navegador durante el modo demo. Cuando conectemos Supabase, se guardará en tu biblioteca privada con su historial.
-        </p>
-        <Link href="/library/new" className="mt-7 inline-flex rounded-xl border border-cyan-200/25 px-4 py-3 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-200/10">
-          Crear primer registro
-        </Link>
+      <section className="mt-6 grid gap-3 rounded-2xl border border-white/[0.08] bg-[#091735] p-4 sm:grid-cols-[1fr_auto] sm:items-center sm:p-5">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3"><div><p className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-slate-600">Actividad</p><p className="mt-1 text-sm font-semibold text-white">Tu operación está lista para recibir campañas.</p></div><div className="hidden h-9 w-px bg-white/10 sm:block" aria-hidden="true" /><div className="flex gap-5"><Stat value={visibleItems.length} label="campañas" /><Stat value={attentionCount} label="por revisar" tone="text-[#FF8B68]" /><Stat value={publishedCount} label="publicadas" tone="text-[#A8C7FF]" /></div></div>
+        <Link href="/library/new" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-[#FF4D00]/35 bg-[#FF4D00]/10 px-4 text-xs font-bold text-orange-100 transition hover:bg-[#FF4D00]/20"><AppIcon name="plus" size={15} /> Crear campaña</Link>
       </section>
-      )}
+
+      <section className="mt-10"><div className="flex flex-col gap-4 border-b border-white/[0.08] pb-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="font-mono text-[0.62rem] uppercase tracking-[0.22em] text-[#A8C7FF]/65">Workspace</p><h2 className="mt-1 text-xl font-semibold text-white">Campañas recientes</h2></div><div className="flex flex-wrap gap-2" role="tablist" aria-label="Filtrar campañas">{filters.map((option) => { const selected = filter === option.id; return <button key={option.id} type="button" role="tab" aria-selected={selected} onClick={() => setFilter(option.id)} className={`rounded-lg border px-3.5 py-2 text-xs font-semibold transition ${selected ? "border-[#FF4D00]/50 bg-[#FF4D00]/15 text-orange-100" : "border-white/10 text-slate-500 hover:border-white/25 hover:text-white"}`}>{option.label}</button>; })}</div></div></section>
+
+      {isLoading ? <p className="mt-8 text-sm text-slate-500">Cargando campañas…</p> : null}
+
+      {isProductionMode && !isLoading && filteredItems.length > 0 ? <section className="mt-5 grid gap-3 sm:grid-cols-2">{filteredItems.map((item) => <article key={item.id} className="group flex min-h-44 flex-col rounded-2xl border border-white/[0.08] bg-[#091735] p-5 transition hover:border-[#315bd6]/60"><div className="flex items-start justify-between gap-3"><span className={`rounded-full border px-2.5 py-1 text-[0.6rem] font-bold uppercase tracking-[0.11em] ${statusTone(item.state)}`}>{CAMPAIGN_STATUS_LABELS[item.state]}</span><span className="font-mono text-[0.6rem] text-slate-600">{new Date(item.createdAt).toLocaleDateString("es-MX")}</span></div><h3 className="mt-5 text-base font-semibold tracking-[-0.02em] text-white">{campaignTitle(item)}</h3><p className="mt-1 line-clamp-1 text-xs text-slate-500">{campaignDescription(item)}</p><div className="mt-auto flex items-center justify-between gap-3 pt-5"><span className="flex items-center gap-2 text-xs font-semibold text-[#A8C7FF]"><span className="size-1.5 rounded-full bg-[#FF4D00]" />{campaignNextAction(item)}</span><Link href={`/drafts/${item.id}`} className="inline-flex items-center gap-1.5 text-xs font-semibold text-white transition group-hover:text-[#FF8B68]">Abrir <AppIcon name="arrow" size={14} /></Link></div></article>)}</section> : null}
+
+      {!isProductionMode && filteredAssets.length > 0 ? <section className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{filteredAssets.map((asset) => <article key={asset.contentItemId} className="overflow-hidden rounded-2xl border border-white/[0.08] bg-[#091735]"><div className="relative aspect-[4/5] overflow-hidden bg-[#081127]"><Image src={asset.previewDataUrl} alt={`Creativo ${asset.filename}`} fill sizes="(min-width: 1280px) 30vw, (min-width: 640px) 45vw, 100vw" unoptimized className="object-cover" /></div><div className="space-y-3 p-4"><div className="flex items-center justify-between gap-3"><span className={`rounded-full border px-2.5 py-1 text-[0.6rem] font-bold uppercase tracking-[0.11em] ${statusTone(asset.content.state)}`}>{CAMPAIGN_STATUS_LABELS[asset.content.state]}</span><span className="text-[0.65rem] text-slate-500">Demo local</span></div><h3 className="truncate text-sm font-semibold text-white">{campaignTitle(asset.content)}</h3><p className="text-xs text-slate-500">{campaignDescription(asset.content)}</p></div></article>)}</section> : null}
+
+      {!isLoading && ((isProductionMode && filteredItems.length === 0) || (!isProductionMode && filteredAssets.length === 0)) ? <section className="mt-5 grid gap-6 rounded-2xl border border-dashed border-[#315bd6]/35 bg-[#091735] p-5 sm:grid-cols-[180px_1fr] sm:items-center sm:p-7"><div className="flex aspect-[4/3] items-center justify-center rounded-xl border border-white/10 bg-[radial-gradient(circle_at_50%_0%,rgba(255,77,0,0.14),transparent_70%),#07112E] text-[#FF8B68]"><AppIcon name="spark" size={30} /></div><div><p className="font-mono text-[0.62rem] uppercase tracking-[0.2em] text-[#FF8B68]">{filter === "ALL" ? "Tu espacio de trabajo" : "Sin coincidencias"}</p><h2 className="mt-2 text-2xl font-semibold tracking-[-0.035em] text-white">{filter === "ALL" ? "Tu primera campaña empieza aquí." : "Cambia el filtro para ver otras campañas."}</h2><p className="mt-2 max-w-lg text-sm leading-6 text-slate-400">{filter === "ALL" ? "Carga el creativo final de Canva, añade la oferta y deja que el sistema prepare la conversación correcta." : "No hay campañas en este estado todavía."}</p>{filter === "ALL" ? <Link href="/library/new" className="mt-5 inline-flex items-center gap-2 rounded-lg bg-[#FF4D00] px-4 py-2.5 text-sm font-bold text-white transition hover:bg-[#ff6a2f]">Crear campaña <AppIcon name="arrow" size={15} /></Link> : null}</div></section> : null}
     </div>
   );
 }

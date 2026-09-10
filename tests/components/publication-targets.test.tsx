@@ -25,8 +25,11 @@ const pendingTargets: PublicationTarget[] = [
 describe("PublicationTargets", () => {
   afterEach(() => cleanup());
 
-  it("approves Facebook without approving Instagram", () => {
-    const onApprove = vi.fn();
+  it("approves Facebook without approving Instagram", async () => {
+    const onApprove = vi.fn().mockResolvedValue({
+      ...pendingTargets[0],
+      status: "APPROVED",
+    });
 
     render(<PublicationTargets targets={pendingTargets} onApprove={onApprove} />);
 
@@ -34,18 +37,33 @@ describe("PublicationTargets", () => {
 
     expect(onApprove).toHaveBeenCalledWith("facebook-target-id");
     expect(screen.getByText("Instagram: pendiente de revisión")).toBeInTheDocument();
-    expect(screen.getByText("Facebook: aprobado")).toBeInTheDocument();
+    expect(await screen.findByText("Facebook: aprobado")).toBeInTheDocument();
   });
 
-  it("keeps the second platform pending until its own approval", () => {
-    const onApprove = vi.fn();
+  it("keeps the second platform pending until its own approval", async () => {
+    const onApprove = vi.fn().mockResolvedValue({
+      ...pendingTargets[0],
+      status: "APPROVED",
+    });
 
     render(<PublicationTargets targets={pendingTargets} onApprove={onApprove} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Aprobar Facebook" }));
 
-    expect(screen.getByRole("button", { name: "Aprobar Instagram" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Aprobar Instagram" })).toBeEnabled();
     expect(onApprove).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a target pending and offers a retry when approval fails", async () => {
+    const onApprove = vi.fn().mockRejectedValue(new Error("approval unavailable"));
+
+    render(<PublicationTargets targets={pendingTargets} onApprove={onApprove} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Aprobar Facebook" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("No se pudo registrar la aprobación de Facebook");
+    expect(screen.getByText("Facebook: pendiente de revisión")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Aprobar Facebook" })).toBeEnabled();
   });
 
   it("explains an empty target list without creating an approval", () => {

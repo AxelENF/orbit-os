@@ -1,12 +1,19 @@
 import {
   PUBLICATION_PLATFORMS,
   CopyResultConflictError,
+  type CopyRequestPreparation,
+  type CopyRequestPreparationInput,
+  type CopyRequestRepository,
   PublishTargetConflictError,
   type ContentAuditEvent,
+  type ContentAssetUpload,
   type CopyResultCallback,
   type CopyResultIngestion,
   type CopyResultRepository,
   type ContentItem,
+  type ContentSummary,
+  type FinalCopy,
+  type FinalCopySubmission,
   type ContentRepository,
   type PublicationTarget,
   type PublishRequestPreparation,
@@ -17,21 +24,62 @@ import {
   type PublishResultRepository,
   type StoredCopyDraft,
 } from "@/lib/content/repository";
+import { buildCampaignCode, campaignBriefSchema } from "@/lib/content/campaign";
+import { validateFinalCopy } from "@/lib/content/final-copy";
 import { transitionContentState, type ContentState } from "@/lib/content/state-machine";
 import { parseContentBrief } from "@/lib/content/validation";
+import type {
+  ClaimedCopyJob,
+  CopyJobClaim,
+  CopyJobEnqueue,
+  CopyJobWorkerRepository,
+} from "@/lib/automation/jobs";
 
 function createId(): string {
   return crypto.randomUUID();
 }
 
 type DemoRepositoryOptions = {
-  initialContentState?: "DRAFT" | "UPLOADED";
+  initialContentState?: ContentState;
+  now?: () => Date;
 };
+
+type DemoCopyJob = {
+  id: string;
+  contentItemId: string;
+  idempotencyKey: string;
+  status: "QUEUED" | "PROCESSING" | "COMPLETED";
+  leaseToken?: string;
+  leaseExpiresAt?: Date;
+  attempts: number;
+};
+
+const DEMO_ORGANIZATION_ID = "00000000-0000-4000-8000-000000000000";
+const COPY_LEASE_MS = 10 * 60 * 1_000;
+
+function storedBriefForJob(item: ContentItem): Record<string, unknown> {
+  const brief = {
+    businessLine: item.businessLine,
+    service: item.service,
+    niche: item.niche,
+    contentType: item.contentType,
+    objective: item.objective,
+    format: item.format,
+    cta: item.cta,
+    humanDescription: item.humanDescription,
+    allowedFacts: item.allowedFacts,
+  };
+  return item.campaign
+    ? { ...brief, ...item.campaign }
+    : brief;
+}
 
 export class DemoContentRepository
   implements
     ContentRepository,
     CopyResultRepository,
+    CopyRequestRepository,
+    CopyJobWorkerRepository,
     PublishRequestRepository,
     PublishResultRepository
 {
@@ -39,19 +87,51 @@ export class DemoContentRepository
   private readonly targetsByContentItem = new Map<string, PublicationTarget[]>();
   private readonly copyDraftsByContentItem = new Map<string, StoredCopyDraft[]>();
   private readonly auditEventsByContentItem = new Map<string, ContentAuditEvent[]>();
+  private readonly finalCopyByContentItem = new Map<string, FinalCopy>();
+  private readonly assetsById = new Map<string, {
+    id: string;
+    filename: string;
+    mimeType: string;
+    width: number;
+    height: number;
+    checksum: string;
+    createdAt: string;
+  }>();
   private readonly callbackKeys = new Set<string>();
   private readonly publishRequestTargetsByKey = new Map<string, string>();
+  private readonly copyRequestItemsByKey = new Map<string, string>();
   private readonly publishCallbackTargetsByKey = new Map<string, string>();
+  private readonly copyJobsById = new Map<string, DemoCopyJob>();
+  private readonly copyJobIdByIdempotencyKey = new Map<string, string>();
 
   constructor(private readonly options: DemoRepositoryOptions = {}) {}
 
   async createContentItem(input: unknown): Promise<ContentItem> {
     const brief = parseContentBrief(input);
+    const campaign = campaignBriefSchema.safeParse(input);
+    const id = createId();
+    const createdAt = new Date().toISOString();
     const item: ContentItem = {
       ...brief,
-      id: createId(),
+      id,
       state: this.options.initialContentState ?? "DRAFT",
-      createdAt: new Date().toISOString(),
+      createdAt,
+      ...(campaign.success
+        ? {
+            campaign: {
+              campaignName: campaign.data.campaignName,
+              offer: campaign.data.offer,
+              funnelStage: campaign.data.funnelStage,
+              destination: campaign.data.destination,
+              destinationValue: campaign.data.destinationValue,
+              campaignCode: buildCampaignCode(
+                campaign.data.campaignName,
+                id,
+                new Date(createdAt),
+              ),
+            },
+          }
+        : {}),
     };
 
     this.contentItems.set(item.id, item);
@@ -69,28 +149,186 @@ export class DemoContentRepository
     return item;
   }
 
+  async createContentItemWithAsset(input: {
+    brief: unknown;
+    asset: ContentAssetUpload;
+  }): Promise<ContentItem> {
+    const created = await this.createContentItem(input.brief);
+    const uploaded: ContentItem = {
+      ...created,
+      assetId: input.asset.id,
+      state: "UPLOADED",
+    };
+    this.assetsById.set(input.asset.id, {
+      id: input.asset.id,
+      filename: input.asset.filename,
+      mimeType: input.asset.mimeType,
+      width: input.asset.width,
+      height: input.asset.height,
+      checksum: input.asset.checksum,
+      createdAt: new Date().toISOString(),
+    });
+    this.contentItems.set(uploaded.id, uploaded);
+    return { ...uploaded };
+  }
+
   async listPublicationTargets(
     contentItemId: string,
   ): Promise<PublicationTarget[]> {
-    return [...(this.targetsByContentItem.get(contentItemId) ?? [])];
+    return structuredClone(this.targetsByContentItem.get(contentItemId) ?? []);
+  }
+
+  async listContentItems(): Promise<ContentItem[]> {
+    return structuredClone([...this.contentItems.values()]);
+  }
+
+  async listContentSummaries(): Promise<ContentSummary[]> {
+    return structuredClone(
+      [...this.contentItems.values()].map((item) => ({
+        id: item.id,
+        state: item.state,
+        createdAt: item.createdAt,
+        service: item.service,
+        niche: item.niche,
+        contentType: item.contentType,
+        objective: item.objective,
+        ...(item.assetId ? { assetId: item.assetId } : {}),
+        ...(item.campaign ? { campaign: item.campaign } : {}),
+      })),
+    );
+  }
+
+  async getContentRecord(contentItemId: string) {
+    const content = await this.getContentItem(contentItemId);
+    if (!content) return null;
+
+    const [targets, drafts, auditEvents] = await Promise.all([
+      this.listPublicationTargets(contentItemId),
+      this.listCopyDrafts(contentItemId),
+      this.listAuditEvents(contentItemId),
+    ]);
+
+    const finalCopy = this.finalCopyByContentItem.get(contentItemId);
+    return {
+      content,
+      targets,
+      drafts,
+      auditEvents,
+      ...(finalCopy ? { finalCopy: structuredClone(finalCopy) } : {}),
+    };
+  }
+
+  async submitFinalCopyForReview(
+    contentItemId: string,
+    input: FinalCopySubmission,
+  ): Promise<FinalCopy> {
+    const item = this.contentItems.get(contentItemId);
+    if (!item || item.state !== "DRAFT" || !item.campaign) {
+      throw new CopyResultConflictError();
+    }
+    if (this.finalCopyByContentItem.has(contentItemId)) {
+      throw new CopyResultConflictError();
+    }
+    const validation = validateFinalCopy(input, item);
+    if (!validation.ok) {
+      throw new CopyResultConflictError();
+    }
+    const selectedCopyDraftId = input.selectedCopyDraftId;
+    if (
+      selectedCopyDraftId &&
+      !(this.copyDraftsByContentItem.get(contentItemId) ?? []).some(
+        (draft) => draft.id === selectedCopyDraftId,
+      )
+    ) {
+      throw new CopyResultConflictError();
+    }
+
+    const finalCopy: FinalCopy = {
+      id: createId(),
+      contentItemId,
+      ...(selectedCopyDraftId ? { selectedCopyDraftId } : {}),
+      headline: input.headline.trim(),
+      body: input.body.trim(),
+      cta: input.cta.trim(),
+      checksum: `${item.campaign.campaignCode}:${input.headline.trim()}:${input.body.trim()}:${input.cta.trim()}`,
+      version: 1,
+      createdAt: new Date().toISOString(),
+    };
+    this.finalCopyByContentItem.set(contentItemId, finalCopy);
+    this.contentItems.set(contentItemId, {
+      ...item,
+      state: transitionContentState(item.state, "REVIEW"),
+      selectedFinalCopyId: finalCopy.id,
+    });
+    this.auditEventsByContentItem.set(contentItemId, [
+      ...(this.auditEventsByContentItem.get(contentItemId) ?? []),
+      {
+        id: createId(),
+        contentItemId,
+        type: "FINAL_COPY_SUBMITTED",
+        status: "success",
+        message: "Copy final enviado a revisión humana.",
+        metadata: { finalCopyId: finalCopy.id, version: finalCopy.version },
+        createdAt: finalCopy.createdAt,
+      },
+    ]);
+    return structuredClone(finalCopy);
   }
 
   async approvePublicationTarget(
     contentItemId: string,
     publicationTargetId: string,
-  ): Promise<PublicationTarget> {
+  ): Promise<PublicationTarget & { status: "APPROVED" }> {
+    const item = this.contentItems.get(contentItemId);
+    if (!item || item.state !== "REVIEW") {
+      throw new PublishTargetConflictError();
+    }
+
     const targets = this.targetsByContentItem.get(contentItemId);
     const target = targets?.find((candidate) => candidate.id === publicationTargetId);
-    if (!target) throw new PublishTargetConflictError();
+    if (!target || !["PENDING_REVIEW", "APPROVED"].includes(target.status)) {
+      throw new PublishTargetConflictError();
+    }
+
+    if (target.status === "APPROVED") {
+      return { ...target, status: "APPROVED" };
+    }
 
     const approved: PublicationTarget = { ...target, status: "APPROVED" };
     this.targetsByContentItem.set(
       contentItemId,
       targets!.map((candidate) =>
-        candidate.id === publicationTargetId ? approved : candidate,
+      candidate.id === publicationTargetId ? approved : candidate,
       ),
     );
-    return { ...approved };
+
+    const allTargetsApproved = targets!.every((candidate) =>
+      candidate.id === publicationTargetId
+        ? true
+        : candidate.status === "APPROVED",
+    );
+    if (allTargetsApproved) {
+      this.contentItems.set(contentItemId, {
+        ...item,
+        state: transitionContentState(item.state, "APPROVED"),
+      });
+    }
+
+    const event: ContentAuditEvent = {
+      id: createId(),
+      contentItemId,
+      type: "TARGET_APPROVED",
+      status: "success",
+      message: `${target.platform} aprobado de forma independiente en modo demo local.`,
+      metadata: { publicationTargetId, platform: target.platform },
+      createdAt: new Date().toISOString(),
+    };
+    this.auditEventsByContentItem.set(contentItemId, [
+      ...(this.auditEventsByContentItem.get(contentItemId) ?? []),
+      event,
+    ]);
+
+    return { ...approved, status: "APPROVED" };
   }
 
   async preparePublishRequest(
@@ -140,6 +378,181 @@ export class DemoContentRepository
     };
   }
 
+  async prepareCopyRequest(
+    input: CopyRequestPreparationInput,
+  ): Promise<CopyRequestPreparation> {
+    const item = this.contentItems.get(input.contentItemId);
+    if (!item) throw new CopyResultConflictError();
+
+    const requestKey = `COPY_REQUEST:${input.idempotencyKey}`;
+    const priorItemId = this.copyRequestItemsByKey.get(requestKey);
+    if (priorItemId && priorItemId !== input.contentItemId) {
+      throw new CopyResultConflictError();
+    }
+
+    if (priorItemId) {
+      return {
+        created: false,
+        status: "DRY_RUN_QUEUED",
+        ownerId: "00000000-0000-4000-8000-000000000000",
+        contentItem: { ...item },
+      };
+    }
+
+    const next: ContentItem = {
+      ...item,
+      state: transitionContentState(item.state, "GENERATING"),
+    };
+    this.contentItems.set(input.contentItemId, next);
+    this.copyRequestItemsByKey.set(requestKey, input.contentItemId);
+
+    const event: ContentAuditEvent = {
+      id: createId(),
+      contentItemId: input.contentItemId,
+      type: "COPY_REQUEST_QUEUED",
+      status: "info",
+      message: "Copy request queued in demo mode; no network request was sent.",
+      metadata: { idempotencyKey: input.idempotencyKey },
+      createdAt: new Date().toISOString(),
+    };
+    this.auditEventsByContentItem.set(input.contentItemId, [
+      ...(this.auditEventsByContentItem.get(input.contentItemId) ?? []),
+      event,
+    ]);
+
+    return {
+      created: true,
+      status: "DRY_RUN_QUEUED",
+      ownerId: "00000000-0000-4000-8000-000000000000",
+      contentItem: { ...next },
+    };
+  }
+
+  async enqueueCopyJob(input: {
+    contentItemId: string;
+    idempotencyKey: string;
+  }): Promise<CopyJobEnqueue> {
+    const item = this.contentItems.get(input.contentItemId);
+    if (!item?.assetId || !this.assetsById.has(item.assetId)) {
+      throw new CopyResultConflictError();
+    }
+
+    const priorJobId = this.copyJobIdByIdempotencyKey.get(input.idempotencyKey);
+    if (priorJobId) {
+      const prior = this.copyJobsById.get(priorJobId);
+      if (!prior || prior.contentItemId !== input.contentItemId) {
+        throw new CopyResultConflictError();
+      }
+      return { created: false, jobId: prior.id, idempotencyKey: prior.idempotencyKey };
+    }
+
+    if (!(["UPLOADED", "DRAFT", "ERROR"] as const).includes(item.state as "UPLOADED" | "DRAFT" | "ERROR")) {
+      throw new CopyResultConflictError();
+    }
+    const job: DemoCopyJob = {
+      id: createId(),
+      contentItemId: item.id,
+      idempotencyKey: input.idempotencyKey,
+      status: "QUEUED",
+      attempts: 0,
+    };
+    this.copyJobsById.set(job.id, job);
+    this.copyJobIdByIdempotencyKey.set(job.idempotencyKey, job.id);
+    this.copyRequestItemsByKey.set(`COPY_REQUEST:${job.idempotencyKey}`, item.id);
+    this.contentItems.set(item.id, {
+      ...item,
+      state: transitionContentState(item.state, "GENERATING"),
+    });
+    this.auditEventsByContentItem.set(item.id, [
+      ...(this.auditEventsByContentItem.get(item.id) ?? []),
+      {
+        id: createId(),
+        contentItemId: item.id,
+        type: "COPY_JOB_QUEUED",
+        status: "info",
+        message: "Copy job queued for the portal-owned worker.",
+        metadata: { jobId: job.id, idempotencyKey: job.idempotencyKey },
+        createdAt: this.now().toISOString(),
+      },
+    ]);
+    return { created: true, jobId: job.id, idempotencyKey: job.idempotencyKey };
+  }
+
+  async claimCopyJob(input: {
+    jobId: string;
+    idempotencyKey: string;
+  }): Promise<CopyJobClaim> {
+    const job = this.copyJobsById.get(input.jobId);
+    if (!job || job.idempotencyKey !== input.idempotencyKey || job.status === "COMPLETED") {
+      return { state: "NOT_CLAIMABLE" };
+    }
+    const now = this.now();
+    if (job.status === "PROCESSING" && job.leaseExpiresAt && job.leaseExpiresAt > now) {
+      return { state: "NOT_CLAIMABLE" };
+    }
+    const item = this.contentItems.get(job.contentItemId);
+    const asset = item?.assetId ? this.assetsById.get(item.assetId) : undefined;
+    if (!item || !asset) return { state: "NOT_CLAIMABLE" };
+
+    const leaseToken = createId();
+    const leaseExpiresAt = new Date(now.getTime() + COPY_LEASE_MS);
+    const claimed: DemoCopyJob = {
+      ...job,
+      status: "PROCESSING",
+      leaseToken,
+      leaseExpiresAt,
+      attempts: job.attempts + 1,
+    };
+    this.copyJobsById.set(job.id, claimed);
+    const payload: ClaimedCopyJob = {
+      id: claimed.id,
+      idempotencyKey: claimed.idempotencyKey,
+      leaseToken,
+      leaseExpiresAt: leaseExpiresAt.toISOString(),
+      contentItemId: item.id,
+      assetUrl: `https://demo.snapgad.invalid/content-assets/${DEMO_ORGANIZATION_ID}/${asset.id}/${encodeURIComponent(asset.filename)}`,
+      brief: storedBriefForJob(item),
+    };
+    return { state: "CLAIMED", job: payload };
+  }
+
+  async completeCopyJob(input: {
+    jobId: string;
+    idempotencyKey: string;
+    leaseToken: string;
+    result: Omit<CopyResultCallback, "contentItemId" | "idempotencyKey">;
+  }): Promise<{ created: boolean }> {
+    const job = this.copyJobsById.get(input.jobId);
+    if (!job || job.idempotencyKey !== input.idempotencyKey) {
+      throw new CopyResultConflictError();
+    }
+    if (job.status === "COMPLETED") return { created: false };
+    if (
+      job.status !== "PROCESSING" ||
+      job.leaseToken !== input.leaseToken ||
+      !job.leaseExpiresAt ||
+      job.leaseExpiresAt <= this.now()
+    ) {
+      throw new CopyResultConflictError();
+    }
+    const created = await this.ingestCopyResult({
+      contentItemId: job.contentItemId,
+      idempotencyKey: job.idempotencyKey,
+      ...input.result,
+    });
+    this.copyJobsById.set(job.id, {
+      ...job,
+      status: "COMPLETED",
+      leaseToken: undefined,
+      leaseExpiresAt: undefined,
+    });
+    return created;
+  }
+
+  private now(): Date {
+    return this.options.now?.() ?? new Date();
+  }
+
   async ingestPublishResult(
     input: PublishResultCallback,
   ): Promise<PublishResultIngestion> {
@@ -150,6 +563,13 @@ export class DemoContentRepository
         throw new PublishTargetConflictError();
       }
       return { created: false };
+    }
+
+    if (
+      this.publishRequestTargetsByKey.get(`PUBLISH_REQUEST:${input.idempotencyKey}`) !==
+      input.publicationTargetId
+    ) {
+      throw new PublishTargetConflictError();
     }
 
     const targets = this.targetsByContentItem.get(input.contentItemId);
@@ -227,6 +647,10 @@ export class DemoContentRepository
   async ingestCopyResult(input: CopyResultCallback): Promise<CopyResultIngestion> {
     const callbackKey = `COPY_CALLBACK:${input.idempotencyKey}`;
     if (this.callbackKeys.has(callbackKey)) return { created: false };
+
+    if (this.copyRequestItemsByKey.get(`COPY_REQUEST:${input.idempotencyKey}`) !== input.contentItemId) {
+      throw new CopyResultConflictError();
+    }
 
     const item = this.contentItems.get(input.contentItemId);
     if (!item || item.state !== "GENERATING") throw new CopyResultConflictError();
