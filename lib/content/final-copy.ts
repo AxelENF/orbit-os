@@ -4,6 +4,7 @@ export type FinalCopyInput = {
   headline: string;
   body: string;
   cta: string;
+  hashtags?: string[];
 };
 
 export type FinalCopyValidation = {
@@ -34,6 +35,17 @@ function containsForbiddenClaim(copy: string, forbiddenClaims: string[]): boolea
 }
 
 /**
+ * A hashtag has no internal spaces, so a claim embedded in a CamelCase tag
+ * (`#ResultadosGarantizados`) would never match `containsForbiddenClaim`'s
+ * substring check or `unsupportedClaimPattern`'s `\\b...\\b` boundaries. This
+ * inserts spaces at lower→upper transitions so hashtag text is checked the
+ * same way as normal prose.
+ */
+function expandHashtagWords(tag: string): string {
+  return tag.replace(/^#/, "").replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+}
+
+/**
  * A deliberately conservative gate: the human can rework a draft, but a
  * campaign cannot move into review until it contains a complete CTA and any
  * result/urgency language has explicit supporting evidence in allowedFacts.
@@ -46,7 +58,8 @@ export function validateFinalCopy(
   const headline = normalize(input.headline);
   const body = normalize(input.body);
   const cta = normalize(input.cta);
-  const combined = `${headline} ${body} ${cta}`.trim();
+  const hashtagWords = (input.hashtags ?? []).map((tag) => expandHashtagWords(normalize(tag)));
+  const combined = [headline, body, cta, ...hashtagWords].join(" ").trim();
   const reasons: string[] = [];
 
   if (!headline || !body || !cta) {

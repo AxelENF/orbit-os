@@ -42,7 +42,7 @@ function requestWithAsset(briefPayload: unknown = brief): Request {
 }
 
 describe("POST /api/content", () => {
-  it("validates the final creative and creates an uploaded demo item", async () => {
+  it("validates the final creative and creates an uploaded demo item, then queues its copy job", async () => {
     const repository = createDemoRepository();
     const response = await createContentCreateHandler({
       getRepository: async () => repository,
@@ -50,9 +50,10 @@ describe("POST /api/content", () => {
     })(requestWithAsset());
 
     expect(response.status).toBe(201);
-    await expect(response.json()).resolves.toMatchObject({
+    const payload = await response.json();
+    expect(payload).toMatchObject({
       content: {
-        state: "UPLOADED",
+        state: "GENERATING",
         assetId: "8ab76cc5-f59a-48ed-8bc8-186cc7007533",
         campaign: {
           campaignName: "Agenda clínica septiembre",
@@ -63,6 +64,9 @@ describe("POST /api/content", () => {
         },
       },
     });
+
+    const record = await repository.getContentRecord(payload.content.id);
+    expect(record?.content.state).toBe("GENERATING");
   });
 
   it("rejects an invalid brief or asset before repository writes", async () => {

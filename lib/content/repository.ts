@@ -65,6 +65,7 @@ export type FinalCopy = {
   headline: string;
   body: string;
   cta: string;
+  hashtags: string[];
   checksum: string;
   version: number;
   createdAt: string;
@@ -75,6 +76,7 @@ export type FinalCopySubmission = {
   headline: string;
   body: string;
   cta: string;
+  hashtags?: string[];
 };
 
 export type ContentAsset = {
@@ -173,6 +175,7 @@ export type CopyResultCallback = {
     headline: string;
     body: string;
     cta: string;
+    hashtags?: string[];
   }>;
   warnings: string[];
   provider?: string;
