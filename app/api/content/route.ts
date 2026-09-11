@@ -50,7 +50,9 @@ export const GET = createContentListHandler();
 const MAX_MULTIPART_BYTES = MAX_ASSET_BYTES + 64_000;
 
 type ContentCreateHandlerDependencies = {
-  getRepository?: () => Promise<Pick<ContentRepository, "createContentItemWithAsset">>;
+  getRepository?: () => Promise<
+    Pick<ContentRepository, "createContentItemWithAsset" | "enqueueCopyJob">
+  >;
   createId?: () => string;
 };
 
@@ -101,7 +103,8 @@ export function createContentCreateHandler(
       const checksum = createHash("sha256")
         .update(validatedAsset.bytes)
         .digest("hex");
-      const content = await (await getRepository()).createContentItemWithAsset({
+      const repository = await getRepository();
+      const content = await repository.createContentItemWithAsset({
         brief,
         asset: {
           id: createId(),
@@ -113,7 +116,11 @@ export function createContentCreateHandler(
           bytes: validatedAsset.bytes,
         },
       });
-      return Response.json({ content }, { status: 201 });
+      await repository.enqueueCopyJob({
+        contentItemId: content.id,
+        idempotencyKey: createId(),
+      });
+      return Response.json({ content: { ...content, state: "GENERATING" } }, { status: 201 });
     } catch (error) {
       if (error instanceof z.ZodError || error instanceof AssetValidationError) {
         return jsonError("INVALID_CONTENT_ASSET", 400);
