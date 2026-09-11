@@ -315,3 +315,102 @@ revoke all on function public.fail_copy_automation_job(uuid, uuid, uuid, text, b
   from public, anon, authenticated;
 grant execute on function public.fail_copy_automation_job(uuid, uuid, uuid, text, boolean)
   to service_role;
+
+-- 6. Hashtags on the immutable final copy record, so what a human approves
+--    for review is what actually gets published — not just what the AI
+--    proposed in copy_drafts.
+--
+--    Postgres identifies a function by (name, parameter TYPES), so adding
+--    `p_hashtags` — even with a default — via `create or replace` would NOT
+--    replace the existing 8-parameter function; it would create a second,
+--    coexisting 9-parameter overload. Postgres grants EXECUTE on a newly
+--    created function to PUBLIC by default, and nothing in this repo alters
+--    that default, so the new overload would be callable directly by any
+--    `authenticated` role via PostgREST/supabase-js — bypassing the Next.js
+--    route entirely and this RPC's `service_role`-only intent (see the
+--    revoke/grant pair for the 8-parameter version in
+--    0009_tenantize_content_and_jobs.sql:324,328). `assert_organization_actor`
+--    trusts `p_owner_id`/`p_organization_id` as already-verified — it does not
+--    check them against `auth.uid()` — so an exposed overload would let any
+--    authenticated member of any organization submit final copy while
+--    attributing it to an arbitrary `p_owner_id` from that org's membership.
+--    Dropping the old signature and creating a single 9-parameter function
+--    under the same name avoids the overload trap entirely. The sole caller
+--    (lib/supabase/repository.ts, Task 11 Step 6) is updated in the same
+--    task to pass all nine parameters by name, so nothing is left calling
+--    the old 8-parameter shape.
+alter table public.final_copy_versions
+  add column hashtags jsonb not null default '[]'::jsonb
+  check (
+    jsonb_typeof(hashtags) = 'array'
+    and jsonb_array_length(hashtags) <= 8
+  );
+
+drop function if exists public.submit_final_copy_for_review(
+  uuid, uuid, uuid, uuid, text, text, text, text
+);
+
+create function public.submit_final_copy_for_review(
+  p_organization_id uuid, p_owner_id uuid, p_content_item_id uuid,
+  p_selected_copy_draft_id uuid, p_headline text, p_body text, p_cta text,
+  p_checksum text, p_hashtags jsonb
+)
+returns public.final_copy_versions
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  item public.content_items;
+  created_copy public.final_copy_versions;
+  next_version integer;
+begin
+  if jsonb_typeof(p_hashtags) is distinct from 'array' or jsonb_array_length(p_hashtags) > 8 then
+    raise exception using errcode = '22023', message = 'FINAL_COPY_INVALID_HASHTAGS';
+  end if;
+  if exists (
+    select 1 from jsonb_array_elements_text(p_hashtags) as tag
+    where nullif(btrim(tag), '') is null
+  ) then
+    raise exception using errcode = '22023', message = 'FINAL_COPY_INVALID_HASHTAGS';
+  end if;
+  perform public.assert_organization_actor(
+    p_organization_id, p_owner_id,
+    array['owner', 'editor']::public.organization_role[]
+  );
+  select * into item from public.content_items as content
+  where content.id = p_content_item_id and content.organization_id = p_organization_id
+  for update;
+  if not found then raise exception using errcode = 'P0001', message = 'FINAL_COPY_CONTENT_NOT_FOUND'; end if;
+  if item.state <> 'DRAFT' then raise exception using errcode = 'P0001', message = 'FINAL_COPY_SUBMISSION_INVALID_STATE'; end if;
+  if item.campaign_code is null then raise exception using errcode = 'P0001', message = 'FINAL_COPY_CAMPAIGN_REQUIRED'; end if;
+  if p_selected_copy_draft_id is not null and not exists (
+    select 1 from public.copy_drafts as draft
+    where draft.id = p_selected_copy_draft_id
+      and draft.content_item_id = p_content_item_id
+      and draft.organization_id = p_organization_id
+  ) then raise exception using errcode = 'P0001', message = 'FINAL_COPY_DRAFT_MISMATCH'; end if;
+  select coalesce(max(version), 0) + 1 into next_version
+  from public.final_copy_versions as copy where copy.content_item_id = p_content_item_id;
+  insert into public.final_copy_versions (
+    organization_id, owner_id, content_item_id, selected_copy_draft_id, headline,
+    body, cta, hashtags, checksum, version
+  ) values (
+    p_organization_id, item.owner_id, p_content_item_id, p_selected_copy_draft_id,
+    p_headline, p_body, p_cta, p_hashtags, p_checksum, next_version
+  ) returning * into created_copy;
+  update public.content_items set selected_final_copy_id = created_copy.id, state = 'REVIEW'
+  where id = p_content_item_id and organization_id = p_organization_id;
+  insert into public.audit_events (organization_id, owner_id, actor_id, content_item_id, event_type, metadata)
+  values (p_organization_id, item.owner_id, p_owner_id, p_content_item_id,
+    'FINAL_COPY_SUBMITTED', jsonb_build_object('finalCopyId', created_copy.id, 'version', next_version));
+  return created_copy;
+end;
+$$;
+
+revoke all on function public.submit_final_copy_for_review(
+  uuid, uuid, uuid, uuid, text, text, text, text, jsonb
+) from public, anon, authenticated;
+grant execute on function public.submit_final_copy_for_review(
+  uuid, uuid, uuid, uuid, text, text, text, text, jsonb
+) to service_role;

@@ -75,6 +75,7 @@ const finalCopyRowSchema = z.object({
   headline: z.string().min(1),
   body: z.string().min(1),
   cta: z.string().min(1),
+  hashtags: z.array(z.string()).default([]),
   checksum: z.string().min(1),
   version: z.number().int().positive(),
   created_at: z.string().datetime({ offset: true }),
@@ -221,6 +222,7 @@ function toFinalCopy(row: unknown): FinalCopy {
     headline: parsedRow.data.headline,
     body: parsedRow.data.body,
     cta: parsedRow.data.cta,
+    hashtags: parsedRow.data.hashtags,
     checksum: parsedRow.data.checksum,
     version: parsedRow.data.version,
     createdAt: parsedRow.data.created_at,
@@ -678,7 +680,7 @@ class SupabaseContentRepository
       content.selectedFinalCopyId
         ? this.client
             .from("final_copy_versions")
-            .select("id, content_item_id, selected_copy_draft_id, headline, body, cta, checksum, version, created_at")
+            .select("id, content_item_id, selected_copy_draft_id, headline, body, cta, hashtags, checksum, version, created_at")
             .eq("id", content.selectedFinalCopyId)
             .eq("content_item_id", contentItemId)
             .eq("organization_id", this.organization.organizationId)
@@ -732,6 +734,7 @@ class SupabaseContentRepository
     const validation = validateFinalCopy(input, content);
     if (!validation.ok) throw new CopyResultConflictError();
 
+    const hashtags = (input.hashtags ?? []).map((tag) => tag.trim());
     const checksum = createHash("sha256")
       .update(
         JSON.stringify({
@@ -740,6 +743,7 @@ class SupabaseContentRepository
           headline: input.headline.trim(),
           body: input.body.trim(),
           cta: input.cta.trim(),
+          hashtags,
         }),
       )
       .digest("hex");
@@ -752,6 +756,7 @@ class SupabaseContentRepository
       p_body: input.body.trim(),
       p_cta: input.cta.trim(),
       p_checksum: checksum,
+      p_hashtags: hashtags,
     });
     if (error) {
       if (

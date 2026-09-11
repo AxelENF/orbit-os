@@ -17,6 +17,7 @@ const finalCopySchema = z.object({
   headline: z.string().trim().min(1).max(240),
   body: z.string().trim().min(1).max(5000),
   cta: z.string().trim().min(1).max(240),
+  hashtags: z.array(z.string().trim().min(1)).max(8).optional(),
 });
 const MAX_REQUEST_BYTES = 16_000;
 
@@ -32,10 +33,13 @@ function isSameFinalCopy(
   stored: FinalCopy,
   submitted: z.infer<typeof finalCopySchema>,
 ): boolean {
+  const submittedHashtags = (submitted.hashtags ?? []).map((tag) => tag.trim());
   return stored.selectedCopyDraftId === submitted.selectedCopyDraftId &&
     stored.headline === submitted.headline.trim() &&
     stored.body === submitted.body.trim() &&
-    stored.cta === submitted.cta.trim();
+    stored.cta === submitted.cta.trim() &&
+    stored.hashtags.length === submittedHashtags.length &&
+    stored.hashtags.every((tag, index) => tag === submittedHashtags[index]);
 }
 
 export function createFinalCopySubmissionHandler(

@@ -46,4 +46,35 @@ describe("copy hashtags and AI usage migration", () => {
     expect(sql).toMatch(/set state = 'ERROR'::public\.content_state/i);
     expect(sql).toMatch(/'COPY_JOB_FAILED'/i);
   });
+
+  it("adds hashtags to the immutable final copy record", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.final_copy_versions/i);
+    expect(sql).toMatch(/add column hashtags jsonb not null default '\[\]'::jsonb/i);
+    expect(sql).toMatch(/p_hashtags jsonb/i);
+  });
+
+  it("drops the 8-parameter submit_final_copy_for_review instead of creating a coexisting overload", async () => {
+    const sql = await readMigration();
+    // Adding a parameter via create-or-replace creates a second overload
+    // instead of replacing the function, and Postgres grants PUBLIC execute
+    // on newly created functions by default — an easy way to accidentally
+    // expose a service_role-only RPC to any authenticated caller. Guard
+    // against reintroducing that pattern.
+    expect(sql).toMatch(
+      /drop function if exists public\.submit_final_copy_for_review\(\s*uuid, uuid, uuid, uuid, text, text, text, text\s*\)/i,
+    );
+    expect(sql).not.toMatch(/create or replace function public\.submit_final_copy_for_review/i);
+    expect(sql).toMatch(/create function public\.submit_final_copy_for_review/i);
+  });
+
+  it("restricts the new submit_final_copy_for_review overload to service_role", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(
+      /revoke all on function public\.submit_final_copy_for_review\(\s*uuid, uuid, uuid, uuid, text, text, text, text, jsonb\s*\)[\s\S]*from public, anon, authenticated/i,
+    );
+    expect(sql).toMatch(
+      /grant execute on function public\.submit_final_copy_for_review\(\s*uuid, uuid, uuid, uuid, text, text, text, text, jsonb\s*\)[\s\S]*to service_role/i,
+    );
+  });
 });
