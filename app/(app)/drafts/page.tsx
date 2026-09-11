@@ -31,19 +31,40 @@ export default function DraftsPage() {
   const isProductionMode = hasSupabaseBrowserConfig();
 
   useEffect(() => {
-    if (isProductionMode) {
-      listContentItems()
-        .then((items) => Promise.all(items.map((item) => getContentRecord(item.id))))
-        .then(setProductionRecords)
-        .catch(() => setProductionRecords([]))
-        .finally(() => setIsLoading(false));
-      return;
+    if (!isProductionMode) {
+      const timer = window.setTimeout(() => {
+        setDrafts(readDemoDrafts());
+        setIsLoading(false);
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
-    const timer = window.setTimeout(() => {
-      setDrafts(readDemoDrafts());
-      setIsLoading(false);
-    }, 0);
-    return () => window.clearTimeout(timer);
+
+    let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    async function load() {
+      try {
+        const items = await listContentItems();
+        const records = await Promise.all(items.map((item) => getContentRecord(item.id)));
+        if (cancelled) return;
+        setProductionRecords(records);
+        setIsLoading(false);
+        if (records.some((record) => record.content.state === "GENERATING")) {
+          pollTimer = setTimeout(load, 4000);
+        }
+      } catch {
+        if (!cancelled) {
+          setProductionRecords([]);
+          setIsLoading(false);
+        }
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
+    };
   }, [isProductionMode]);
 
   return (
