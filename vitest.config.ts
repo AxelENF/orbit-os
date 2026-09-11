@@ -12,5 +12,9 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    // Linked implementation worktrees contain their own dependencies and tests.
+    // Never discover them from the primary workspace: doing so loads a second
+    // React runtime and makes the root suite report false hook failures.
+    exclude: ["**/node_modules/**", "**/.worktrees/**"],
   },
 });
