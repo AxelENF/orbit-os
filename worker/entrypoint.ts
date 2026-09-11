@@ -6,6 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 import type { SupabaseCopyJobPayload } from "@/lib/automation/supabase-copy-worker-store";
 import { createSupabaseCopyWorkerStore } from "@/lib/automation/supabase-copy-worker-store";
 import { DurableJobRunner, type DurableJobProcessor } from "@/worker/durable-runner";
+import { CopyGuardrailError } from "@/worker/providers/copy-guardrail-error";
 
 type CopyResult = Record<string, unknown>;
 
@@ -35,6 +36,15 @@ export function parseWorkerDuration(
     throw new Error(`${name} must be a positive integer in milliseconds.`);
   }
   return value;
+}
+
+/**
+ * Without this, DurableJobRunner's default treats every error as retryable
+ * (see worker/durable-runner.ts), so a budget or claims guardrail would
+ * reach DEAD_LETTER through retries instead of failing straight to FAILED.
+ */
+export function isCopyJobRetryable(error: unknown): boolean {
+  return !(error instanceof CopyGuardrailError) || error.retryable;
 }
 
 function moduleSpecifier(value: string): string {
@@ -75,6 +85,7 @@ export async function main(): Promise<void> {
     leaseDurationMs: parseWorkerDuration("SNAPGAD_WORKER_LEASE_DURATION_MS", DEFAULT_LEASE_DURATION_MS),
     heartbeatIntervalMs: parseWorkerDuration("SNAPGAD_WORKER_HEARTBEAT_INTERVAL_MS", DEFAULT_HEARTBEAT_INTERVAL_MS),
     recoveryIntervalMs: parseWorkerDuration("SNAPGAD_WORKER_RECOVERY_INTERVAL_MS", DEFAULT_RECOVERY_INTERVAL_MS),
+    isRetryable: isCopyJobRetryable,
     logger: {
       error(message, metadata) {
         console.error(JSON.stringify({ message, ...metadata }));

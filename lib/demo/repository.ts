@@ -250,6 +250,7 @@ export class DemoContentRepository
       headline: input.headline.trim(),
       body: input.body.trim(),
       cta: input.cta.trim(),
+      hashtags: input.hashtags ?? [],
       checksum: `${item.campaign.campaignCode}:${input.headline.trim()}:${input.body.trim()}:${input.cta.trim()}`,
       version: 1,
       createdAt: new Date().toISOString(),

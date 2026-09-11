@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createFinalCopySubmissionHandler } from "@/app/api/content/[id]/final-copy/route";
 import { createDemoRepository } from "@/lib/demo/repository";
@@ -46,6 +46,37 @@ describe("POST /api/content/[id]/final-copy", () => {
       finalCopy: { contentItemId: item.id, version: 1 },
     });
     expect((await repository.getContentRecord(item.id))?.content.state).toBe("REVIEW");
+  });
+
+  it("passes final hashtags from the request to the injected repository", async () => {
+    const repository = createDemoRepository();
+    const item = await repository.createContentItem(campaign);
+    const submitFinalCopyForReview = vi.spyOn(repository, "submitFinalCopyForReview");
+    const handler = createFinalCopySubmissionHandler({
+      getRepository: async () => repository,
+    });
+
+    const response = await handler(
+      new Request("http://localhost/api/content/final-copy", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          headline: "Tu WhatsApp también puede agendar",
+          body: "El bot puede atender, calificar y agendar citas.",
+          cta: "Escribe AGENDA por WhatsApp",
+          hashtags: ["#AutomatizacionWhatsApp", "#NegociosMexico"],
+        }),
+      }),
+      { params: Promise.resolve({ id: item.id }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(submitFinalCopyForReview).toHaveBeenCalledWith(
+      item.id,
+      expect.objectContaining({
+        hashtags: ["#AutomatizacionWhatsApp", "#NegociosMexico"],
+      }),
+    );
   });
 
   it("fails closed when the final copy is not grounded in the brief", async () => {

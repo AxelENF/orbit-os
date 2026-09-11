@@ -48,6 +48,7 @@ function recordWithFinalCopy(id: string, body: string, state: "DRAFT" | "REVIEW"
       headline: `Titular ${id}`,
       body,
       cta: "Agenda una demo",
+      hashtags: [],
       checksum: "checksum",
       version: 1,
       createdAt: "2026-09-07T00:00:00.000Z",

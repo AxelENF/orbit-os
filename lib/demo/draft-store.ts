@@ -12,10 +12,11 @@ export type DemoCopyOption = {
   headline: string;
   body: string;
   cta: string;
+  hashtags: string[];
   source: "local-demo";
 };
 
-export type DemoFinalCopy = Pick<DemoCopyOption, "headline" | "body" | "cta">;
+export type DemoFinalCopy = Pick<DemoCopyOption, "headline" | "body" | "cta" | "hashtags">;
 
 export type DemoAuditEvent = {
   id: string;
@@ -95,11 +96,17 @@ function createDraftRecord(asset: DemoBrowserAsset): DemoDraftRecord {
   const { content } = asset;
   const firstFact = content.allowedFacts[0] ?? "El brief define los hechos permitidos.";
   const secondFact = content.allowedFacts[1] ?? firstFact;
+  const baseHashtags = [
+    `#${content.niche.replaceAll("_", "")}`,
+    `#${content.service.replaceAll("_", "")}`,
+    "#SnapGad",
+  ];
   const firstDraft: DemoCopyOption = {
     id: createId("copy"),
     headline: "Más control para la operación diaria",
     body: `${firstFact} ${content.humanDescription} ${content.cta}.`,
     cta: content.cta,
+    hashtags: baseHashtags,
     source: "local-demo",
   };
   const secondDraft: DemoCopyOption = {
@@ -107,6 +114,7 @@ function createDraftRecord(asset: DemoBrowserAsset): DemoDraftRecord {
     headline: "Una atención que sí avanza",
     body: `${secondFact} ${content.humanDescription} Da el siguiente paso: ${content.cta}.`,
     cta: content.cta,
+    hashtags: baseHashtags,
     source: "local-demo",
   };
   const now = new Date().toISOString();
@@ -127,6 +135,7 @@ function createDraftRecord(asset: DemoBrowserAsset): DemoDraftRecord {
       headline: firstDraft.headline,
       body: firstDraft.body,
       cta: firstDraft.cta,
+      hashtags: firstDraft.hashtags,
     },
     warnings: [
       "Demo local: estas dos alternativas son ejemplos de interfaz; no se ejecutó IA.",

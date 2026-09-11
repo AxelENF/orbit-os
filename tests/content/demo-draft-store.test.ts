@@ -50,4 +50,14 @@ describe("demo draft store", () => {
     expect(facebook?.content.state).toBe("REVIEW");
     expect(readDemoDrafts()[0]?.auditEvents.some((event) => event.type === "TARGET_APPROVED")).toBe(true);
   });
+
+  it("gives each local draft a deterministic, non-empty hashtag list", async () => {
+    await persistDemoAsset(content, new File(["png"], "demo.png", { type: "image/png" }));
+    const record = persistDemoDraft(content);
+
+    for (const draft of record!.drafts) {
+      expect(draft.hashtags.length).toBeGreaterThanOrEqual(1);
+      expect(draft.hashtags.every((tag) => tag.startsWith("#"))).toBe(true);
+    }
+  });
 });
