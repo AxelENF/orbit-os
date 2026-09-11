@@ -129,6 +129,7 @@ const copyDraftRowSchema = z.object({
   headline: z.string().min(1),
   body: z.string().min(1),
   cta: z.string().min(1),
+  hashtags: z.array(z.string()).default([]),
   provider: z.string().nullable().optional(),
   model: z.string().nullable().optional(),
   created_at: z.string().datetime({ offset: true }),
@@ -272,6 +273,7 @@ function toCopyDrafts(rows: unknown): StoredCopyDraft[] {
     headline: row.headline,
     body: row.body,
     cta: row.cta,
+    hashtags: row.hashtags,
     ...(row.provider ? { provider: row.provider } : {}),
     ...(row.model ? { model: row.model } : {}),
     createdAt: row.created_at,
@@ -663,7 +665,7 @@ class SupabaseContentRepository
         .order("platform"),
       this.client
         .from("copy_drafts")
-        .select("id, content_item_id, visual_analysis, headline, body, cta, provider, model, created_at")
+        .select("id, content_item_id, visual_analysis, headline, body, cta, hashtags, provider, model, created_at")
         .eq("content_item_id", contentItemId)
         .eq("organization_id", this.organization.organizationId)
         .order("revision"),

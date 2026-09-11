@@ -173,6 +173,7 @@ export type CopyResultCallback = {
     headline: string;
     body: string;
     cta: string;
+    hashtags?: string[];
   }>;
   warnings: string[];
   provider?: string;

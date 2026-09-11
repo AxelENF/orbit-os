@@ -295,6 +295,7 @@ describe("SupabaseContentRepository", () => {
       headline: "Control al cierre",
       body: "Consulta las ventas registradas.",
       cta: "Escribe POS",
+      hashtags: ["#Agenda", "#POS"],
       provider: "openrouter",
       model: "test-model",
       created_at: "2026-09-02T18:02:00.000Z",
@@ -329,7 +330,7 @@ describe("SupabaseContentRepository", () => {
     await expect(repository.getContentRecord(createdRow.id)).resolves.toMatchObject({
       content: { id: createdRow.id },
       targets: [{ id: targetRow.id, status: "APPROVED" }],
-      drafts: [{ id: draftRow.id, headline: draftRow.headline }],
+      drafts: [{ id: draftRow.id, headline: draftRow.headline, hashtags: ["#Agenda", "#POS"] }],
       auditEvents: [{ type: "TARGET_APPROVED", status: "success" }],
     });
     expect(from).toHaveBeenCalledWith("content_items");
