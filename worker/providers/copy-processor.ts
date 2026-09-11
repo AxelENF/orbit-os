@@ -14,12 +14,16 @@ import {
 
 const HASHTAG_MIN = 5;
 const HASHTAG_MAX = 8;
+const HASHTAG_PATTERN = /^#[\p{L}\p{N}_]+$/u;
 
 const draftSchema = z.object({
   headline: z.string().trim().min(1),
   body: z.string().trim().min(1),
   cta: z.string().trim().min(1),
-  hashtags: z.array(z.string().trim().min(1)).min(HASHTAG_MIN).max(HASHTAG_MAX),
+  hashtags: z
+    .array(z.string().trim().regex(HASHTAG_PATTERN, "Each hashtag must start with # and contain no spaces."))
+    .min(HASHTAG_MIN)
+    .max(HASHTAG_MAX),
 });
 
 const modelResponseSchema = z.object({
@@ -53,6 +57,26 @@ function requiredPriceEnv(environment: CopyProcessorEnvironment, name: string): 
   const value = Number(requiredEnv(environment, name));
   if (!Number.isFinite(value) || value < 0) {
     throw new Error(`${name} must be a non-negative number.`);
+  }
+  return value;
+}
+
+function positiveIntegerEnv(
+  environment: CopyProcessorEnvironment,
+  name: string,
+  fallback: number,
+): number {
+  const value = Number(environment[name] ?? fallback);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return value;
+}
+
+function positiveMoneyEnv(environment: CopyProcessorEnvironment, name: string, fallback: number): number {
+  const value = Number(environment[name] ?? fallback);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive number.`);
   }
   return value;
 }
@@ -124,14 +148,16 @@ export function createCopyProcessor(dependencies: CopyProcessorDependencies = {}
     const timeoutMs = Number(environment.SNAPGAD_COPY_TIMEOUT_MS ?? "45000");
     const inputPrice = requiredPriceEnv(environment, "SNAPGAD_COPY_MODEL_INPUT_PRICE_PER_1M_USD");
     const outputPrice = requiredPriceEnv(environment, "SNAPGAD_COPY_MODEL_OUTPUT_PRICE_PER_1M_USD");
+    const maxOutputTokens = positiveIntegerEnv(environment, "SNAPGAD_COPY_MAX_OUTPUT_TOKENS", 700);
+    const maxRequestCostUsd = positiveMoneyEnv(environment, "SNAPGAD_COPY_MAX_REQUEST_COST_USD", 0.05);
 
     // Guardrail 1: presupuesto, antes de gastar nada.
     const budget = await getMonthlyBudgetUsd(client, job.organizationId);
     if (budget !== null) {
       const spend = await getMonthToDateSpendUsd(client, job.organizationId, new Date(now()));
-      if (spend >= budget) {
+      if (spend + maxRequestCostUsd > budget) {
         throw new CopyGuardrailError(
-          `Monthly AI budget of $${budget} exceeded ($${spend.toFixed(2)} spent).`,
+          `Monthly AI budget of $${budget} leaves less than the $${maxRequestCostUsd.toFixed(2)} request reserve.`,
           false,
         );
       }
@@ -151,6 +177,7 @@ export function createCopyProcessor(dependencies: CopyProcessorDependencies = {}
         },
         body: JSON.stringify({
           model,
+          max_tokens: maxOutputTokens,
           response_format: { type: "json_object" },
           messages: [
             { role: "system", content: system },
@@ -193,6 +220,13 @@ export function createCopyProcessor(dependencies: CopyProcessorDependencies = {}
       outputTokens,
       estimatedCostUsd,
     });
+
+    if (estimatedCostUsd > maxRequestCostUsd) {
+      throw new CopyGuardrailError(
+        `OpenRouter response exceeded the configured $${maxRequestCostUsd.toFixed(2)} request cost reserve.`,
+        false,
+      );
+    }
 
     // Guardrail 3: forma exacta de la respuesta.
     const rawContent = payload.choices?.[0]?.message?.content ?? "";

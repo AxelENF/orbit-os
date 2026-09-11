@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/link", () => ({
@@ -10,6 +10,9 @@ vi.mock("next/link", () => ({
   ),
 }));
 vi.mock("next/image", () => ({
+  // This mock only exposes the DOM contract consumed by the page; image
+  // optimization belongs to Next's runtime and is deliberately not tested here.
+  // eslint-disable-next-line @next/next/no-img-element
   default: (props: Record<string, unknown>) => <img {...(props as Record<string, string>)} alt={props.alt as string} />,
 }));
 vi.mock("@/lib/supabase/client", () => ({ hasSupabaseBrowserConfig: () => true }));

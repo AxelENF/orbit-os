@@ -15,14 +15,16 @@ describe("copy hashtags and AI usage migration", () => {
     const sql = await readMigration();
     expect(sql).toMatch(/alter table public\.copy_drafts/i);
     expect(sql).toMatch(/add column hashtags jsonb not null default '\[\]'::jsonb/i);
-    expect(sql).toMatch(/jsonb_array_length\(hashtags\)\s*<=\s*8/i);
+    expect(sql).toMatch(/jsonb_array_length\(p_hashtags\)\s*<=\s*8/i);
+    expect(sql).toMatch(/create function public\.are_valid_hashtags/i);
+    expect(sql).toMatch(/tag !~ '\^#\[\[:alnum:\]_\]\+\$'/i);
   });
 
   it("extends ingest_copy_result_callback to accept and validate hashtags", async () => {
     const sql = await readMigration();
     expect(sql).toMatch(/create or replace function public\.ingest_copy_result_callback/i);
     expect(sql).toMatch(/coalesce\(item\.draft -> 'hashtags', '\[\]'::jsonb\)/i);
-    expect(sql).toMatch(/jsonb_array_length\(item\.draft -> 'hashtags'\)\s*>\s*8/i);
+    expect(sql).toMatch(/not public\.are_valid_hashtags\(coalesce\(item\.draft -> 'hashtags'/i);
   });
 
   it("creates an append-only ai_usage_events ledger scoped by organization", async () => {

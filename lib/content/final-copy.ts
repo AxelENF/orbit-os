@@ -13,6 +13,7 @@ export type FinalCopyValidation = {
 };
 
 const unsupportedClaimPattern = /(?:\b(?:duplica|triplica|garantiza|garantizado|asegurado|lider(?:es)?|n[úu]mero\s*1|#1)\b|\b(?:hoy|ahora mismo|[0-9]+\s*(?:horas?|d[ií]as?|semanas?))\b|\b[0-9]+(?:[.,][0-9]+)?\s*%)/i;
+const hashtagPattern = /^#[\p{L}\p{N}_]+$/u;
 
 function normalize(value: string): string {
   return value.trim().replace(/\s+/g, " ");
@@ -64,6 +65,10 @@ export function validateFinalCopy(
 
   if (!headline || !body || !cta) {
     reasons.push("El copy final necesita un mensaje principal, cuerpo y CTA.");
+  }
+
+  if ((input.hashtags ?? []).some((tag) => !hashtagPattern.test(normalize(tag)))) {
+    reasons.push("Cada hashtag debe iniciar con # y no contener espacios.");
   }
 
   if (containsForbiddenClaim(combined, brief.forbiddenClaims ?? [])) {

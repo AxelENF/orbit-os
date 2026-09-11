@@ -3,18 +3,26 @@
 -- 1. Hashtags on stored copy drafts. Deliberately looser (0-8) than the
 --    processor's own 5-8 guardrail, so an inactive n8n path that never
 --    sends hashtags keeps working unchanged.
---    Postgres CHECK constraints cannot contain subqueries (including a
---    `select ... from jsonb_array_elements_text(...)`), so only the
---    subquery-free part (type + max length) is enforced here. The
---    non-empty-string-per-tag rule is enforced in
---    ingest_copy_result_callback below, which is a function body and can
---    use EXISTS/subqueries freely.
+--    Postgres CHECK constraints cannot contain subqueries, so the reusable
+--    immutable function below owns both structure and item format.
+create function public.are_valid_hashtags(p_hashtags jsonb)
+returns boolean
+language sql
+immutable
+set search_path = pg_catalog
+as $$
+  select jsonb_typeof(p_hashtags) = 'array'
+    and jsonb_array_length(p_hashtags) <= 8
+    and not exists (
+      select 1
+      from jsonb_array_elements_text(p_hashtags) as tag
+      where tag !~ '^#[[:alnum:]_]+$'
+    );
+$$;
+
 alter table public.copy_drafts
   add column hashtags jsonb not null default '[]'::jsonb
-  check (
-    jsonb_typeof(hashtags) = 'array'
-    and jsonb_array_length(hashtags) <= 8
-  );
+  check (public.are_valid_hashtags(hashtags));
 
 -- 2. ingest_copy_result_callback: same name and signature, now also reads
 --    and validates an optional `hashtags` array per draft.
@@ -54,13 +62,7 @@ begin
       or nullif(btrim(item.draft ->> 'headline'), '') is null
       or nullif(btrim(item.draft ->> 'body'), '') is null
       or nullif(btrim(item.draft ->> 'cta'), '') is null
-      or (item.draft ? 'hashtags' and jsonb_typeof(item.draft -> 'hashtags') <> 'array')
-      or (item.draft ? 'hashtags' and jsonb_array_length(item.draft -> 'hashtags') > 8)
-      or exists (
-        select 1
-        from jsonb_array_elements_text(coalesce(item.draft -> 'hashtags', '[]'::jsonb)) as tag
-        where nullif(btrim(tag), '') is null
-      )
+      or not public.are_valid_hashtags(coalesce(item.draft -> 'hashtags', '[]'::jsonb))
   ) then
     raise exception using errcode = '22023', message = 'COPY_RESULT_INVALID_DRAFTS';
   end if;
@@ -341,10 +343,7 @@ grant execute on function public.fail_copy_automation_job(uuid, uuid, uuid, text
 --    the old 8-parameter shape.
 alter table public.final_copy_versions
   add column hashtags jsonb not null default '[]'::jsonb
-  check (
-    jsonb_typeof(hashtags) = 'array'
-    and jsonb_array_length(hashtags) <= 8
-  );
+  check (public.are_valid_hashtags(hashtags));
 
 drop function if exists public.submit_final_copy_for_review(
   uuid, uuid, uuid, uuid, text, text, text, text
@@ -365,13 +364,7 @@ declare
   created_copy public.final_copy_versions;
   next_version integer;
 begin
-  if jsonb_typeof(p_hashtags) is distinct from 'array' or jsonb_array_length(p_hashtags) > 8 then
-    raise exception using errcode = '22023', message = 'FINAL_COPY_INVALID_HASHTAGS';
-  end if;
-  if exists (
-    select 1 from jsonb_array_elements_text(p_hashtags) as tag
-    where nullif(btrim(tag), '') is null
-  ) then
+  if not public.are_valid_hashtags(p_hashtags) then
     raise exception using errcode = '22023', message = 'FINAL_COPY_INVALID_HASHTAGS';
   end if;
   perform public.assert_organization_actor(

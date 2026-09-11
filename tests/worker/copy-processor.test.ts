@@ -83,6 +83,8 @@ const environment = {
   OPENROUTER_API_KEY: "openrouter-key",
   SNAPGAD_COPY_OPENROUTER_MODEL: "some/vision-model",
   SNAPGAD_COPY_TIMEOUT_MS: "45000",
+  SNAPGAD_COPY_MAX_OUTPUT_TOKENS: "700",
+  SNAPGAD_COPY_MAX_REQUEST_COST_USD: "0.05",
   SNAPGAD_COPY_MODEL_INPUT_PRICE_PER_1M_USD: "3",
   SNAPGAD_COPY_MODEL_OUTPUT_PRICE_PER_1M_USD: "15",
 };
@@ -141,6 +143,7 @@ describe("copy-processor", () => {
     const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
     expect(body.model).toBe("some/vision-model");
+    expect(body.max_tokens).toBe(700);
     const userMessage = body.messages.find((message: { role: string }) => message.role === "user");
     const serializedUserContent = JSON.stringify(userMessage.content);
     expect(serializedUserContent).toContain("https://signed.example.com/asset.png");
@@ -157,6 +160,20 @@ describe("copy-processor", () => {
       input_tokens: 1000,
       output_tokens: 500,
       estimated_cost_usd: 0.0105,
+    });
+  });
+
+  it("rejects malformed hashtags before a draft can reach human review", async () => {
+    const malformedDrafts = validDrafts.map((draft, index) =>
+      index === 0 ? { ...draft, hashtags: ["sin-hash", ...draft.hashtags.slice(1)] } : draft,
+    );
+    const fetchFn = vi.fn().mockResolvedValue(openRouterResponse(malformedDrafts));
+    const client = fakeClient({ budget: null });
+    const processor = createCopyProcessor({ environment, fetchFn, getSupabaseClient: () => client });
+
+    await expect(processor(baseJob())).rejects.toMatchObject({
+      name: "CopyGuardrailError",
+      retryable: true,
     });
   });
 

@@ -63,4 +63,18 @@ describe("validateFinalCopy — hashtags", () => {
     );
     expect(result.ok).toBe(true);
   });
+
+  it("rejects a final hashtag without its # prefix", () => {
+    const result = validateFinalCopy(
+      {
+        headline: "Más control",
+        body: "El bot atiende preguntas y ayuda a agendar citas.",
+        cta: "Escribe AGENDA",
+        hashtags: ["AutomatizacionWhatsApp"],
+      },
+      baseBrief,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("Cada hashtag debe iniciar con # y no contener espacios.");
+  });
 });
