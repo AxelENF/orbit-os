@@ -25,7 +25,8 @@ export type DemoAuditEvent = {
     | "CONTENT_CREATED"
     | "LOCAL_DRAFTS_CREATED"
     | "SENT_TO_REVIEW"
-    | "TARGET_APPROVED";
+    | "TARGET_APPROVED"
+    | "MANUAL_PUBLICATION_RECORDED";
   status: "info" | "success" | "warning";
   message: string;
   createdAt: string;
@@ -269,6 +270,47 @@ export function approveDemoTarget(contentItemId: string, targetId: string): Demo
     updatedAt: new Date().toISOString(),
   };
 
+  saveDemoDraft(nextRecord);
+  return nextRecord;
+}
+
+export function recordDemoManualPublicationDelivery(
+  contentItemId: string,
+  targetId: string,
+  input: { remoteUrl: string; publishedAt: string; note?: string },
+): DemoDraftRecord | null {
+  const record = readDemoDraft(contentItemId);
+  if (!record || record.content.state !== "APPROVED") return null;
+
+  const target = record.targets.find((candidate) => candidate.id === targetId);
+  if (!target || target.status !== "APPROVED") return null;
+
+  const targets = record.targets.map((candidate) => candidate.id === targetId
+    ? {
+        ...candidate,
+        status: "PUBLISHED" as const,
+        remoteUrl: input.remoteUrl,
+        publishedAt: input.publishedAt,
+      }
+    : candidate);
+  const completed = targets.every((candidate) => candidate.status === "PUBLISHED");
+  const nextRecord: DemoDraftRecord = {
+    ...record,
+    content: completed
+      ? { ...record.content, state: transitionContentState(record.content.state, "PUBLISHED") }
+      : record.content,
+    targets,
+    auditEvents: [
+      ...record.auditEvents,
+      createAuditEvent(
+        contentItemId,
+        "MANUAL_PUBLICATION_RECORDED",
+        "success",
+        `${target.platform === "FACEBOOK" ? "Facebook" : "Instagram"} registrado como publicado manualmente en modo demo local.${input.note ? " Incluye una nota de seguimiento." : ""}`,
+      ),
+    ],
+    updatedAt: new Date().toISOString(),
+  };
   saveDemoDraft(nextRecord);
   return nextRecord;
 }

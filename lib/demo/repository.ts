@@ -15,6 +15,7 @@ import {
   type FinalCopy,
   type FinalCopySubmission,
   type ContentRepository,
+  type ManualPublicationDeliveryInput,
   type PublicationTarget,
   type PublishRequestPreparation,
   type PublishRequestPreparationInput,
@@ -101,6 +102,7 @@ export class DemoContentRepository
   private readonly publishRequestTargetsByKey = new Map<string, string>();
   private readonly copyRequestItemsByKey = new Map<string, string>();
   private readonly publishCallbackTargetsByKey = new Map<string, string>();
+  private readonly manualDeliveryTargetsByKey = new Map<string, string>();
   private readonly copyJobsById = new Map<string, DemoCopyJob>();
   private readonly copyJobIdByIdempotencyKey = new Map<string, string>();
 
@@ -330,6 +332,67 @@ export class DemoContentRepository
     ]);
 
     return { ...approved, status: "APPROVED" };
+  }
+
+  async recordManualPublicationDelivery(
+    input: ManualPublicationDeliveryInput,
+  ): Promise<PublicationTarget & { status: "PUBLISHED" }> {
+    const deliveryKey = `MANUAL_PUBLICATION:${input.idempotencyKey}`;
+    const priorTargetId = this.manualDeliveryTargetsByKey.get(deliveryKey);
+    if (priorTargetId) {
+      if (priorTargetId !== input.publicationTargetId) throw new PublishTargetConflictError();
+      const existing = this.targetsByContentItem
+        .get(input.contentItemId)
+        ?.find((candidate) => candidate.id === input.publicationTargetId);
+      if (!existing || existing.status !== "PUBLISHED") throw new PublishTargetConflictError();
+      return { ...existing, status: "PUBLISHED" };
+    }
+
+    const item = this.contentItems.get(input.contentItemId);
+    const targets = this.targetsByContentItem.get(input.contentItemId);
+    const target = targets?.find((candidate) => candidate.id === input.publicationTargetId);
+    if (!item || item.state !== "APPROVED" || !target || target.status !== "APPROVED") {
+      throw new PublishTargetConflictError();
+    }
+
+    const delivered: PublicationTarget = {
+      ...target,
+      status: "PUBLISHED",
+      remoteUrl: input.remoteUrl,
+      publishedAt: input.publishedAt,
+    };
+    const nextTargets = targets!.map((candidate) =>
+      candidate.id === target.id ? delivered : candidate,
+    );
+    this.targetsByContentItem.set(input.contentItemId, nextTargets);
+    this.manualDeliveryTargetsByKey.set(deliveryKey, target.id);
+
+    if (nextTargets.every((candidate) => candidate.status === "PUBLISHED")) {
+      this.contentItems.set(input.contentItemId, {
+        ...item,
+        state: transitionContentState(item.state, "PUBLISHED"),
+      });
+    }
+
+    const event: ContentAuditEvent = {
+      id: createId(),
+      contentItemId: input.contentItemId,
+      type: "MANUAL_PUBLICATION_RECORDED",
+      status: "success",
+      message: `${target.platform} registrado como publicado manualmente en modo demo local.`,
+      metadata: {
+        publicationTargetId: target.id,
+        platform: target.platform,
+        source: "manual",
+        ...(input.note ? { note: input.note } : {}),
+      },
+      createdAt: new Date().toISOString(),
+    };
+    this.auditEventsByContentItem.set(input.contentItemId, [
+      ...(this.auditEventsByContentItem.get(input.contentItemId) ?? []),
+      event,
+    ]);
+    return { ...delivered, status: "PUBLISHED" };
   }
 
   async preparePublishRequest(

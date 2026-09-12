@@ -11,7 +11,9 @@ const allowedTransitions: Readonly<Record<ContentState, readonly ContentState[]>
   GENERATING: ["DRAFT", "ERROR"],
   DRAFT: ["GENERATING", "REVIEW"],
   REVIEW: ["APPROVED", "REJECTED", "DRAFT"],
-  APPROVED: ["SCHEDULED", "DRAFT"],
+  // A human may publish directly in the network and then register verifiable
+  // delivery evidence. That path has no scheduler in the middle.
+  APPROVED: ["SCHEDULED", "PUBLISHED", "DRAFT"],
   SCHEDULED: ["PUBLISHED", "DRAFT"],
   PUBLISHED: [],
   REJECTED: ["DRAFT"],

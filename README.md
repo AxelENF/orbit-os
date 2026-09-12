@@ -33,7 +33,8 @@ The database schema is now applied to the connected Supabase project
 `0013_automation_job_lifecycle.sql` (including the enum-only `0012` step),
 applied and verified in order with the Supabase CLI. The additive migrations
 `0014_copy_hashtags_and_ai_usage.sql` and
-`0015_ai_usage_reservations.sql` are committed but remain pending a reviewed
+`0015_ai_usage_reservations.sql` and `0016_manual_publication_delivery.sql`
+are committed but remain pending a reviewed
 staging apply. The migrations create
 organization-scoped tables, a private `content-assets` storage bucket,
 membership RLS policies, AIAS profiles, and portal-owned durable copy jobs.
@@ -129,6 +130,14 @@ uploads. The new-creative form sends multipart assets to `POST /api/content`
 when public Supabase configuration is present; application environment
 credentials and an authenticated user are still required for end-to-end
 verification.
+
+After a human publishes a previously approved destination directly in Meta,
+`POST /api/content/:id/targets/:targetId/manual-delivery` records its HTTPS
+URL, publication date and an optional internal note. It never invokes Meta or
+uses a Meta token. It is organization-scoped, idempotent and remains a manual
+evidence step until migration `0016` has been reviewed and applied. A content
+item becomes `PUBLISHED` only after every configured destination has its own
+recorded delivery.
 
 ## Campaign control plane
 

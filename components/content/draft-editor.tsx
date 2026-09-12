@@ -9,11 +9,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PublicationTargets } from "@/components/content/publication-targets";
 import type { PublicationTarget } from "@/lib/content/repository";
-import { approveContentTarget, getContentRecord, submitFinalCopy } from "@/lib/content/client";
-import type { ContentRecord, FinalCopySubmission } from "@/lib/content/repository";
+import { approveContentTarget, getContentRecord, recordManualPublicationDelivery, submitFinalCopy } from "@/lib/content/client";
+import type { ContentRecord, FinalCopySubmission, ManualPublicationDeliveryInput } from "@/lib/content/repository";
 import { hasSupabaseBrowserConfig } from "@/lib/supabase/client";
 import {
   approveDemoTarget,
+  recordDemoManualPublicationDelivery,
   readDemoDraft,
   submitDemoDraftForReview,
   type DemoCopyOption,
@@ -117,6 +118,21 @@ function DemoDraftEditor({ draftId }: DraftEditorProps) {
     setRecord(next);
     setFeedback("Aprobación local registrada para este destino únicamente.");
     return Promise.resolve({ ...approvedTarget, status: "APPROVED" });
+  }
+
+  function handleManualDelivery(
+    targetId: string,
+    input: Pick<ManualPublicationDeliveryInput, "remoteUrl" | "publishedAt" | "note" | "idempotencyKey">,
+  ): Promise<PublicationTarget & { status: "PUBLISHED" }> {
+    if (!record) return Promise.reject(new Error("DEMO_RECORD_NOT_FOUND"));
+    const next = recordDemoManualPublicationDelivery(record.content.id, targetId, input);
+    const deliveredTarget = next?.targets.find((target) => target.id === targetId);
+    if (!next || !deliveredTarget || deliveredTarget.status !== "PUBLISHED") {
+      return Promise.reject(new Error("DEMO_TARGET_NOT_DELIVERABLE"));
+    }
+    setRecord(next);
+    setFeedback("Evidencia de publicación manual guardada localmente para este destino.");
+    return Promise.resolve({ ...deliveredTarget, status: "PUBLISHED" });
   }
 
   if (isLoading) {
@@ -267,7 +283,7 @@ function DemoDraftEditor({ draftId }: DraftEditorProps) {
           </section>
 
           {targetsAreReviewable ? (
-            <PublicationTargets targets={record.targets} onApprove={handleApprove} />
+            <PublicationTargets targets={record.targets} onApprove={handleApprove} onRecordManualDelivery={handleManualDelivery} />
           ) : (
             <section className="rounded-2xl border border-dashed border-orange-200/20 bg-orange-200/[0.035] p-5">
               <p className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-orange-200/75">Destinos bloqueados</p>
@@ -413,6 +429,22 @@ function ProductionDraftEditor({ draftId }: DraftEditorProps) {
     return { ...approvedTarget, status: "APPROVED" };
   }
 
+  async function recordManualDelivery(
+    targetId: string,
+    input: Pick<ManualPublicationDeliveryInput, "remoteUrl" | "publishedAt" | "note" | "idempotencyKey">,
+  ): Promise<PublicationTarget & { status: "PUBLISHED" }> {
+    if (!record) throw new Error("CONTENT_RECORD_NOT_LOADED");
+    const target = await recordManualPublicationDelivery({
+      contentItemId: record.content.id,
+      publicationTargetId: targetId,
+      ...input,
+    });
+    if (target.status !== "PUBLISHED") throw new Error("MANUAL_DELIVERY_NOT_CONFIRMED");
+    await refresh();
+    setFeedback("Publicación manual registrada con URL y fecha. No se hizo ninguna llamada a Meta.");
+    return { ...target, status: "PUBLISHED" };
+  }
+
   function chooseProductionDraft(draft: ContentRecord["drafts"][number]) {
     setSelectedDraftId(draft.id);
     setFinalCopy({
@@ -481,7 +513,7 @@ function ProductionDraftEditor({ draftId }: DraftEditorProps) {
           <section className="rounded-3xl border border-cyan-200/15 bg-cyan-200/[0.035] p-5 sm:p-6"><div className="flex items-start justify-between gap-4"><div><p className="font-mono text-[0.62rem] uppercase tracking-[0.2em] text-cyan-200/80">Motor interno</p><h2 className="mt-2 text-xl font-semibold text-white">Genera análisis visual y dos alternativas</h2></div><span className="rounded-full border border-cyan-200/20 px-2 py-1 font-mono text-[0.58rem] uppercase tracking-[0.14em] text-cyan-100/70">{content.state}</span></div><p className="mt-4 text-sm leading-6 text-slate-300">El worker usa el brief almacenado y una URL temporal. Cada intento queda ligado a una llave de idempotencia antes de crear borradores.</p><button type="button" onClick={() => void requestCopy()} disabled={isRequestingCopy || content.state === "GENERATING"} className="mt-5 inline-flex min-h-11 w-full items-center justify-center rounded-xl bg-orange-300 px-5 text-sm font-bold text-[#17110a] disabled:cursor-not-allowed disabled:opacity-45">{isRequestingCopy ? "Encolando generación…" : content.state === "GENERATING" ? "Generación en proceso" : content.state === "ERROR" ? "Reintentar generación de copy" : "Generar copy con IA"}</button></section>
            <section className="rounded-3xl border border-white/[0.08] bg-[#0b1429] p-5 sm:p-6"><div className="flex items-end justify-between gap-3 border-b border-white/[0.08] pb-4"><div><p className="font-mono text-[0.62rem] uppercase tracking-[0.2em] text-orange-200/80">Alternativas recibidas</p><h2 className="mt-2 text-xl font-semibold text-white">Elige una base, luego edítala</h2></div><span className="text-xs text-slate-500">{record.drafts.length} opciones</span></div>{record.drafts.length > 0 ? <div className="mt-4 grid gap-3 sm:grid-cols-2">{record.drafts.map((draft, index) => <button key={draft.id} type="button" onClick={() => chooseProductionDraft(draft)} aria-pressed={selectedDraftId === draft.id} disabled={Boolean(record.finalCopy)} className={`rounded-2xl border p-4 text-left transition disabled:cursor-default ${selectedDraftId === draft.id ? "border-cyan-200/55 bg-cyan-200/[0.08]" : "border-white/[0.08] bg-[#081127] hover:border-cyan-200/25"}`}><span className="font-mono text-[0.6rem] uppercase tracking-[0.16em] text-cyan-200/70">Alternativa 0{index + 1}</span><h3 className="mt-3 text-sm font-semibold leading-5 text-white">{draft.headline}</h3><p className="mt-2 text-xs leading-5 text-slate-400">{draft.body}</p><p className="mt-3 text-xs text-cyan-100/75">CTA: {draft.cta}</p><p className="mt-1 text-xs text-cyan-200/70">{(draft.hashtags ?? []).join(" ")}</p></button>)}</div> : <p className="mt-4 rounded-xl border border-dashed border-white/[0.12] p-4 text-sm text-slate-500">Aún no hay alternativas generadas.</p>}</section>
           <section className="rounded-3xl border border-white/[0.08] bg-[#0b1429] p-5 sm:p-6"><div className="border-b border-white/[0.08] pb-4"><p className="font-mono text-[0.62rem] uppercase tracking-[0.2em] text-orange-200/80">Copy final seleccionado</p><h2 className="mt-2 text-xl font-semibold text-white">Una versión inmutable antes de aprobar destinos</h2></div><div className="mt-5 space-y-4"><label className="block text-sm font-semibold text-slate-100" htmlFor="production-final-headline">Titular final<input id="production-final-headline" disabled={Boolean(record.finalCopy)} className={fieldClasses} value={finalCopy.headline} onChange={(event) => setFinalCopy((current) => ({ ...current, headline: event.target.value }))} /></label><label className="block text-sm font-semibold text-slate-100" htmlFor="production-final-body">Texto final<textarea id="production-final-body" disabled={Boolean(record.finalCopy)} className={`${fieldClasses} min-h-36 resize-y`} value={finalCopy.body} onChange={(event) => setFinalCopy((current) => ({ ...current, body: event.target.value }))} /></label><label className="block text-sm font-semibold text-slate-100" htmlFor="production-final-cta">CTA final<input id="production-final-cta" disabled={Boolean(record.finalCopy)} className={fieldClasses} value={finalCopy.cta} onChange={(event) => setFinalCopy((current) => ({ ...current, cta: event.target.value }))} /></label><label className="block text-sm font-semibold text-slate-100" htmlFor="production-final-hashtags">Hashtags finales<input id="production-final-hashtags" disabled={Boolean(record.finalCopy)} className={fieldClasses} value={(finalCopy.hashtags ?? []).join(" ")} onChange={(event) => setFinalCopy((current) => ({ ...current, hashtags: event.target.value.split(/\s+/).map((tag) => tag.trim()).filter(Boolean) }))} placeholder="#AutomatizacionWhatsApp #NegociosMexico" /></label></div>{record.finalCopy ? <p className="mt-5 rounded-xl border border-cyan-200/20 bg-cyan-200/[0.05] p-4 text-xs leading-5 text-cyan-100">Versión {record.finalCopy.version} seleccionada. Para modificarla debe volver a borrador mediante un flujo auditado.</p> : <button type="button" onClick={() => void sendFinalCopyToReview()} disabled={isSubmittingFinalCopy || content.state !== "DRAFT" || !finalCopy.headline.trim() || !finalCopy.body.trim() || !finalCopy.cta.trim()} className="mt-5 inline-flex min-h-11 w-full items-center justify-center rounded-xl bg-orange-300 px-5 text-sm font-bold text-[#17110a] disabled:cursor-not-allowed disabled:opacity-45">{isSubmittingFinalCopy ? "Validando copy…" : "Enviar copy final a revisión"}</button>}</section>
-          <PublicationTargets targets={record.targets} disabled={!record.finalCopy || content.state !== "REVIEW"} onApprove={approveTarget} />
+          <PublicationTargets targets={record.targets} disabled={!record.finalCopy || content.state === "DRAFT"} onApprove={approveTarget} onRecordManualDelivery={record.content.state === "APPROVED" ? recordManualDelivery : undefined} />
           {loadError ? <div className="rounded-xl border border-orange-200/20 bg-orange-200/[0.04] p-4 text-sm text-orange-100" role="alert"><p>{loadError}</p><button type="button" onClick={() => void refresh()} className="mt-3 text-xs font-bold uppercase tracking-[0.14em] text-orange-200 hover:text-orange-100">Reintentar carga</button></div> : null}
           {feedback ? <p className="rounded-xl border border-cyan-200/20 bg-cyan-200/[0.05] p-4 text-sm text-cyan-100" role="status">{feedback}</p> : null}
         </div>

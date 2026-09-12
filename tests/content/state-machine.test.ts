@@ -10,6 +10,7 @@ describe("transitionContentState", () => {
     ["DRAFT", "REVIEW"],
     ["REVIEW", "APPROVED"],
     ["APPROVED", "SCHEDULED"],
+    ["APPROVED", "PUBLISHED"],
     ["SCHEDULED", "PUBLISHED"],
     ["UPLOADED", "REJECTED"],
     ["REVIEW", "REJECTED"],

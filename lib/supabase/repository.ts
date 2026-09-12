@@ -25,6 +25,7 @@ import {
   type FinalCopySubmission,
   type ContentRecord,
   type ContentRepository,
+  type ManualPublicationDeliveryInput,
   type CopyResultCallback,
   type CopyResultIngestion,
   type CopyResultRepository,
@@ -799,6 +800,43 @@ class SupabaseContentRepository
       throw new Error("Supabase returned an invalid approved target.");
     }
     return { ...target, status: "APPROVED" };
+  }
+
+  async recordManualPublicationDelivery(
+    input: ManualPublicationDeliveryInput,
+  ): Promise<PublicationTarget & { status: "PUBLISHED" }> {
+    const { data, error } = await this.client.rpc(
+      "record_manual_publication_delivery",
+      {
+        p_organization_id: this.organization.organizationId,
+        p_owner_id: this.organization.userId,
+        p_content_item_id: input.contentItemId,
+        p_publication_target_id: input.publicationTargetId,
+        p_remote_url: input.remoteUrl,
+        p_published_at: input.publishedAt,
+        p_note: input.note ?? null,
+        p_idempotency_key: input.idempotencyKey,
+      },
+    );
+
+    if (error) {
+      if (
+        error.message === "MANUAL_DELIVERY_CONTENT_NOT_APPROVED" ||
+        error.message === "MANUAL_DELIVERY_TARGET_NOT_FOUND" ||
+        error.message === "MANUAL_DELIVERY_TARGET_NOT_APPROVED" ||
+        error.message === "MANUAL_DELIVERY_IDEMPOTENCY_KEY_REUSED" ||
+        error.message === "MANUAL_DELIVERY_ALREADY_RECORDED"
+      ) {
+        throw new PublishTargetConflictError();
+      }
+      throw new Error("Unable to record the manual publication delivery.");
+    }
+
+    const target = toPublicationTargets([data])[0];
+    if (!target || target.status !== "PUBLISHED") {
+      throw new Error("Supabase returned an invalid manual publication delivery.");
+    }
+    return { ...target, status: "PUBLISHED" };
   }
 
   async getContentItem(contentItemId: string): Promise<ContentItem | null> {

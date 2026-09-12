@@ -125,6 +125,20 @@ export type PublishRequestPreparation = {
   target: PublicationTarget & { status: "APPROVED" };
 };
 
+/**
+ * Evidence entered by a human after publishing directly in a social network.
+ * This is deliberately separate from a provider callback: no Meta action is
+ * inferred or triggered by recording this URL.
+ */
+export type ManualPublicationDeliveryInput = {
+  contentItemId: string;
+  publicationTargetId: string;
+  remoteUrl: string;
+  publishedAt: string;
+  note?: string;
+  idempotencyKey: string;
+};
+
 export type CopyRequestPreparationInput = {
   contentItemId: string;
   idempotencyKey: string;
@@ -279,6 +293,9 @@ export interface ContentRepository
     contentItemId: string,
     publicationTargetId: string,
   ): Promise<PublicationTarget & { status: "APPROVED" }>;
+  recordManualPublicationDelivery(
+    input: ManualPublicationDeliveryInput,
+  ): Promise<PublicationTarget & { status: "PUBLISHED" }>;
   submitFinalCopyForReview(
     contentItemId: string,
     input: FinalCopySubmission,
