@@ -326,12 +326,6 @@ export function toEditableFinalCopy(record: ContentRecord): FinalCopySubmission 
   };
 }
 
-function copyRetryKeyFromRecord(record: ContentRecord): string | null {
-  const event = record.auditEvents.findLast((candidate) => candidate.type === "COPY_REQUEST_QUEUED");
-  const idempotencyKey = event?.metadata.idempotencyKey;
-  return typeof idempotencyKey === "string" ? idempotencyKey : null;
-}
-
 function ProductionDraftEditor({ draftId }: DraftEditorProps) {
   const [record, setRecord] = useState<ContentRecord | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -380,44 +374,16 @@ function ProductionDraftEditor({ draftId }: DraftEditorProps) {
   }, [refresh]);
 
   async function requestCopy() {
-    if (!record?.asset?.signedUrl) {
-      setFeedback("Este registro no tiene una URL privada disponible para n8n.");
-      return;
-    }
-    const existingCopyRetryKey = copyRetryKey ?? copyRetryKeyFromRecord(record);
-    const idempotencyKey = existingCopyRetryKey ?? crypto.randomUUID();
+    if (!record) return;
+    const idempotencyKey = copyRetryKey ?? crypto.randomUUID();
     setIsRequestingCopy(true);
     setFeedback(null);
-    const content = record.content;
-    const brief = {
-      businessLine: content.businessLine,
-      service: content.service,
-      niche: content.niche,
-      contentType: content.contentType,
-      objective: content.objective,
-      format: content.format,
-      cta: content.cta,
-      humanDescription: content.humanDescription,
-      allowedFacts: content.allowedFacts,
-      ...(content.campaign
-        ? {
-            campaignName: content.campaign.campaignName,
-            offer: content.campaign.offer,
-            funnelStage: content.campaign.funnelStage,
-            destination: content.campaign.destination,
-            destinationValue: content.campaign.destinationValue,
-          }
-        : {}),
-    };
     try {
-      const response = await fetch("/api/integrations/n8n/copy", {
+      const response = await fetch(`/api/content/${record.content.id}/copy`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({
-          contentItemId: content.id,
-          assetUrl: record.asset.signedUrl,
-          brief,
           idempotencyKey,
         }),
       });
@@ -425,17 +391,12 @@ function ProductionDraftEditor({ draftId }: DraftEditorProps) {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(payload?.error ?? "COPY_REQUEST_FAILED");
       }
-      const payload = (await response.json()) as { status?: string; idempotencyKey?: string };
-      if (payload.status === "DELIVERY_UNCONFIRMED") {
-        setCopyRetryKey(payload.idempotencyKey ?? idempotencyKey);
-        setFeedback("No se pudo confirmar la entrega a n8n. Puedes reenviar esta misma solicitud sin duplicar el trabajo.");
-      } else {
-        setCopyRetryKey(null);
-        setFeedback("Solicitud enviada a n8n. Refresca cuando llegue el callback con las alternativas.");
-      }
+      setCopyRetryKey(null);
+      setFeedback("Generación encolada en el motor interno.");
       await refresh();
     } catch {
-      setFeedback("No se pudo solicitar el copy. Verifica n8n y la configuración de staging.");
+      setCopyRetryKey(idempotencyKey);
+      setFeedback("No se pudo confirmar la generación. Reintenta sin duplicar el trabajo.");
     } finally {
       setIsRequestingCopy(false);
     }
@@ -503,7 +464,7 @@ function ProductionDraftEditor({ draftId }: DraftEditorProps) {
   return (
     <div className="mx-auto max-w-6xl">
       <div className="mb-8 flex flex-col gap-4 border-b border-white/[0.08] pb-7 sm:flex-row sm:items-end sm:justify-between">
-        <div><Link href="/drafts" className="font-mono text-[0.65rem] uppercase tracking-[0.18em] text-cyan-200/75 hover:text-cyan-100">← Borradores</Link><p className="mt-6 font-mono text-[0.68rem] uppercase tracking-[0.24em] text-orange-200/80">Registro Supabase</p><h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-white sm:text-4xl">Revisa el contexto antes de pedir el siguiente paso.</h1><p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">El asset permanece privado, n8n sólo recibe una URL temporal y cada red mantiene su propia aprobación.</p></div>
+        <div><Link href="/drafts" className="font-mono text-[0.65rem] uppercase tracking-[0.18em] text-cyan-200/75 hover:text-cyan-100">← Borradores</Link><p className="mt-6 font-mono text-[0.68rem] uppercase tracking-[0.24em] text-orange-200/80">Registro Supabase</p><h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-white sm:text-4xl">Revisa el contexto antes de pedir el siguiente paso.</h1><p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">El asset permanece privado, el worker usa una URL temporal y cada red mantiene su propia aprobación.</p></div>
         <span className="rounded-full border border-cyan-200/20 bg-cyan-200/[0.05] px-3 py-2 font-mono text-[0.62rem] uppercase tracking-[0.15em] text-cyan-100/80">{content.state} · Supabase</span>
       </div>
 
@@ -517,8 +478,8 @@ function ProductionDraftEditor({ draftId }: DraftEditorProps) {
         </div>
 
         <div className="space-y-6">
-          <section className="rounded-3xl border border-cyan-200/15 bg-cyan-200/[0.035] p-5 sm:p-6"><div className="flex items-start justify-between gap-4"><div><p className="font-mono text-[0.62rem] uppercase tracking-[0.2em] text-cyan-200/80">Motor n8n</p><h2 className="mt-2 text-xl font-semibold text-white">Solicita análisis visual y dos alternativas</h2></div><span className="rounded-full border border-cyan-200/20 px-2 py-1 font-mono text-[0.58rem] uppercase tracking-[0.14em] text-cyan-100/70">{content.state}</span></div><p className="mt-4 text-sm leading-6 text-slate-300">n8n recibe el brief almacenado y una URL temporal; el callback debe coincidir con la llave de idempotencia antes de crear borradores.</p><button type="button" onClick={() => void requestCopy()} disabled={isRequestingCopy || (content.state === "GENERATING" && !copyRetryKey && !copyRetryKeyFromRecord(record))} className="mt-5 inline-flex min-h-11 w-full items-center justify-center rounded-xl bg-orange-300 px-5 text-sm font-bold text-[#17110a] disabled:cursor-not-allowed disabled:opacity-45">{isRequestingCopy ? "Enviando solicitud…" : content.state === "GENERATING" ? "Reenviar solicitud a n8n" : "Solicitar copy a n8n"}</button></section>
-           <section className="rounded-3xl border border-white/[0.08] bg-[#0b1429] p-5 sm:p-6"><div className="flex items-end justify-between gap-3 border-b border-white/[0.08] pb-4"><div><p className="font-mono text-[0.62rem] uppercase tracking-[0.2em] text-orange-200/80">Alternativas recibidas</p><h2 className="mt-2 text-xl font-semibold text-white">Elige una base, luego edítala</h2></div><span className="text-xs text-slate-500">{record.drafts.length} opciones</span></div>{record.drafts.length > 0 ? <div className="mt-4 grid gap-3 sm:grid-cols-2">{record.drafts.map((draft, index) => <button key={draft.id} type="button" onClick={() => chooseProductionDraft(draft)} aria-pressed={selectedDraftId === draft.id} disabled={Boolean(record.finalCopy)} className={`rounded-2xl border p-4 text-left transition disabled:cursor-default ${selectedDraftId === draft.id ? "border-cyan-200/55 bg-cyan-200/[0.08]" : "border-white/[0.08] bg-[#081127] hover:border-cyan-200/25"}`}><span className="font-mono text-[0.6rem] uppercase tracking-[0.16em] text-cyan-200/70">Alternativa 0{index + 1}</span><h3 className="mt-3 text-sm font-semibold leading-5 text-white">{draft.headline}</h3><p className="mt-2 text-xs leading-5 text-slate-400">{draft.body}</p><p className="mt-3 text-xs text-cyan-100/75">CTA: {draft.cta}</p><p className="mt-1 text-xs text-cyan-200/70">{(draft.hashtags ?? []).join(" ")}</p></button>)}</div> : <p className="mt-4 rounded-xl border border-dashed border-white/[0.12] p-4 text-sm text-slate-500">Aún no hay callback de n8n.</p>}</section>
+          <section className="rounded-3xl border border-cyan-200/15 bg-cyan-200/[0.035] p-5 sm:p-6"><div className="flex items-start justify-between gap-4"><div><p className="font-mono text-[0.62rem] uppercase tracking-[0.2em] text-cyan-200/80">Motor interno</p><h2 className="mt-2 text-xl font-semibold text-white">Genera análisis visual y dos alternativas</h2></div><span className="rounded-full border border-cyan-200/20 px-2 py-1 font-mono text-[0.58rem] uppercase tracking-[0.14em] text-cyan-100/70">{content.state}</span></div><p className="mt-4 text-sm leading-6 text-slate-300">El worker usa el brief almacenado y una URL temporal. Cada intento queda ligado a una llave de idempotencia antes de crear borradores.</p><button type="button" onClick={() => void requestCopy()} disabled={isRequestingCopy || content.state === "GENERATING"} className="mt-5 inline-flex min-h-11 w-full items-center justify-center rounded-xl bg-orange-300 px-5 text-sm font-bold text-[#17110a] disabled:cursor-not-allowed disabled:opacity-45">{isRequestingCopy ? "Encolando generación…" : content.state === "GENERATING" ? "Generación en proceso" : content.state === "ERROR" ? "Reintentar generación de copy" : "Generar copy con IA"}</button></section>
+           <section className="rounded-3xl border border-white/[0.08] bg-[#0b1429] p-5 sm:p-6"><div className="flex items-end justify-between gap-3 border-b border-white/[0.08] pb-4"><div><p className="font-mono text-[0.62rem] uppercase tracking-[0.2em] text-orange-200/80">Alternativas recibidas</p><h2 className="mt-2 text-xl font-semibold text-white">Elige una base, luego edítala</h2></div><span className="text-xs text-slate-500">{record.drafts.length} opciones</span></div>{record.drafts.length > 0 ? <div className="mt-4 grid gap-3 sm:grid-cols-2">{record.drafts.map((draft, index) => <button key={draft.id} type="button" onClick={() => chooseProductionDraft(draft)} aria-pressed={selectedDraftId === draft.id} disabled={Boolean(record.finalCopy)} className={`rounded-2xl border p-4 text-left transition disabled:cursor-default ${selectedDraftId === draft.id ? "border-cyan-200/55 bg-cyan-200/[0.08]" : "border-white/[0.08] bg-[#081127] hover:border-cyan-200/25"}`}><span className="font-mono text-[0.6rem] uppercase tracking-[0.16em] text-cyan-200/70">Alternativa 0{index + 1}</span><h3 className="mt-3 text-sm font-semibold leading-5 text-white">{draft.headline}</h3><p className="mt-2 text-xs leading-5 text-slate-400">{draft.body}</p><p className="mt-3 text-xs text-cyan-100/75">CTA: {draft.cta}</p><p className="mt-1 text-xs text-cyan-200/70">{(draft.hashtags ?? []).join(" ")}</p></button>)}</div> : <p className="mt-4 rounded-xl border border-dashed border-white/[0.12] p-4 text-sm text-slate-500">Aún no hay alternativas generadas.</p>}</section>
           <section className="rounded-3xl border border-white/[0.08] bg-[#0b1429] p-5 sm:p-6"><div className="border-b border-white/[0.08] pb-4"><p className="font-mono text-[0.62rem] uppercase tracking-[0.2em] text-orange-200/80">Copy final seleccionado</p><h2 className="mt-2 text-xl font-semibold text-white">Una versión inmutable antes de aprobar destinos</h2></div><div className="mt-5 space-y-4"><label className="block text-sm font-semibold text-slate-100" htmlFor="production-final-headline">Titular final<input id="production-final-headline" disabled={Boolean(record.finalCopy)} className={fieldClasses} value={finalCopy.headline} onChange={(event) => setFinalCopy((current) => ({ ...current, headline: event.target.value }))} /></label><label className="block text-sm font-semibold text-slate-100" htmlFor="production-final-body">Texto final<textarea id="production-final-body" disabled={Boolean(record.finalCopy)} className={`${fieldClasses} min-h-36 resize-y`} value={finalCopy.body} onChange={(event) => setFinalCopy((current) => ({ ...current, body: event.target.value }))} /></label><label className="block text-sm font-semibold text-slate-100" htmlFor="production-final-cta">CTA final<input id="production-final-cta" disabled={Boolean(record.finalCopy)} className={fieldClasses} value={finalCopy.cta} onChange={(event) => setFinalCopy((current) => ({ ...current, cta: event.target.value }))} /></label><label className="block text-sm font-semibold text-slate-100" htmlFor="production-final-hashtags">Hashtags finales<input id="production-final-hashtags" disabled={Boolean(record.finalCopy)} className={fieldClasses} value={(finalCopy.hashtags ?? []).join(" ")} onChange={(event) => setFinalCopy((current) => ({ ...current, hashtags: event.target.value.split(/\s+/).map((tag) => tag.trim()).filter(Boolean) }))} placeholder="#AutomatizacionWhatsApp #NegociosMexico" /></label></div>{record.finalCopy ? <p className="mt-5 rounded-xl border border-cyan-200/20 bg-cyan-200/[0.05] p-4 text-xs leading-5 text-cyan-100">Versión {record.finalCopy.version} seleccionada. Para modificarla debe volver a borrador mediante un flujo auditado.</p> : <button type="button" onClick={() => void sendFinalCopyToReview()} disabled={isSubmittingFinalCopy || content.state !== "DRAFT" || !finalCopy.headline.trim() || !finalCopy.body.trim() || !finalCopy.cta.trim()} className="mt-5 inline-flex min-h-11 w-full items-center justify-center rounded-xl bg-orange-300 px-5 text-sm font-bold text-[#17110a] disabled:cursor-not-allowed disabled:opacity-45">{isSubmittingFinalCopy ? "Validando copy…" : "Enviar copy final a revisión"}</button>}</section>
           <PublicationTargets targets={record.targets} disabled={!record.finalCopy || content.state !== "REVIEW"} onApprove={approveTarget} />
           {loadError ? <div className="rounded-xl border border-orange-200/20 bg-orange-200/[0.04] p-4 text-sm text-orange-100" role="alert"><p>{loadError}</p><button type="button" onClick={() => void refresh()} className="mt-3 text-xs font-bold uppercase tracking-[0.14em] text-orange-200 hover:text-orange-100">Reintentar carga</button></div> : null}

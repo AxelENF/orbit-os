@@ -91,4 +91,24 @@ describe("POST /api/content", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "INVALID_CONTENT_ASSET" });
   });
+
+  it("keeps a saved asset recoverable when its first copy enqueue cannot be confirmed", async () => {
+    const repository = createDemoRepository();
+    const response = await createContentCreateHandler({
+      getRepository: async () => ({
+        createContentItemWithAsset: repository.createContentItemWithAsset.bind(repository),
+        enqueueCopyJob: async () => {
+          throw new Error("queue unavailable");
+        },
+      }),
+      createId: () => "8ab76cc5-f59a-48ed-8bc8-186cc7007533",
+    })(requestWithAsset());
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      warning: "COPY_QUEUE_PENDING",
+      content: { state: "UPLOADED" },
+    });
+    await expect(repository.listContentItems()).resolves.toHaveLength(1);
+  });
 });

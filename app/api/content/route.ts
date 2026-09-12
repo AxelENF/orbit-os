@@ -116,10 +116,20 @@ export function createContentCreateHandler(
           bytes: validatedAsset.bytes,
         },
       });
-      await repository.enqueueCopyJob({
-        contentItemId: content.id,
-        idempotencyKey: createId(),
-      });
+      try {
+        await repository.enqueueCopyJob({
+          contentItemId: content.id,
+          idempotencyKey: createId(),
+        });
+      } catch {
+        // Asset persistence is durable even when the queue is temporarily
+        // unavailable. Return the id so the user can retry from the draft
+        // screen instead of silently creating an unreachable orphan.
+        return Response.json(
+          { content, warning: "COPY_QUEUE_PENDING" },
+          { status: 202 },
+        );
+      }
       return Response.json({ content: { ...content, state: "GENERATING" } }, { status: 201 });
     } catch (error) {
       if (error instanceof z.ZodError || error instanceof AssetValidationError) {

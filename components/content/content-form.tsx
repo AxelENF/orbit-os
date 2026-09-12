@@ -452,7 +452,7 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
           </p>
           <p className="mt-1 text-xs leading-5 text-slate-400">
             {isProductionMode
-              ? "El asset quedó privado y listo para solicitar análisis a n8n."
+              ? "El asset quedó privado. Abre el borrador para confirmar o reintentar la generación."
               : "No se envió ninguna solicitud a servicios externos."}
           </p>
           <a

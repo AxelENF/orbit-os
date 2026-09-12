@@ -174,4 +174,40 @@ describe("DraftEditor production loading", () => {
     expect(screen.getByLabelText("Texto final")).toBeDisabled();
     expect(screen.getByRole("status")).toHaveTextContent("Se recargó el registro");
   });
+
+  it("retries failed generation through the portal-owned worker instead of n8n", async () => {
+    const failedRecord = recordWithEditableDraft("retry-copy");
+    failedRecord.content.state = "ERROR";
+    failedRecord.asset = {
+      id: "asset-retry-copy",
+      filename: "creative.png",
+      mimeType: "image/png",
+      width: 1080,
+      height: 1350,
+      checksum: "checksum",
+      createdAt: "2026-09-07T00:00:00.000Z",
+      signedUrl: "https://example.test/private/creative.png",
+    };
+    getContentRecord.mockResolvedValueOnce(failedRecord).mockResolvedValueOnce({
+      ...failedRecord,
+      content: { ...failedRecord.content, state: "GENERATING" },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ job: { created: true } }), { status: 202 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(DraftEditor({ draftId: "retry-copy" }));
+    const retry = await screen.findByRole("button", { name: "Reintentar generación de copy" });
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/content/retry-copy/copy");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({
+      idempotencyKey: expect.any(String),
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Generación encolada en el motor interno.");
+  });
 });
