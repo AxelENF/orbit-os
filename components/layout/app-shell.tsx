@@ -15,6 +15,7 @@ const navigation = [
   { href: "/library/new", label: "Nueva campaña", eyebrow: "Crear", icon: "plus" },
   { href: "/review", label: "Revisión", eyebrow: "Tu aprobación", icon: "review" },
   { href: "/history", label: "Resultados", eyebrow: "Aprendizaje", icon: "results" },
+  { href: "/pilot", label: "Piloto", eyebrow: "Salida real", icon: "check" },
 ] satisfies Array<{ href: string; label: string; eyebrow: string; icon: IconName }>;
 
 function isActive(pathname: string, href: string): boolean {

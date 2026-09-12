@@ -30,6 +30,7 @@ SnapGad Content OS tiene una base local sólida para campañas, borradores, copy
 - API autenticada `/api/organizations/[id]/profile` con GET/PUT/PATCH, roles y límites de payload/profundidad; está conectada al formulario de onboarding/settings. La migración/RLS existe, pero falta el smoke test con usuarios y membresías reales.
 - Registro manual de entrega por destino: URL HTTPS, fecha y nota opcional con idempotencia, auditoría y tenant scope. La migración `0016_manual_publication_delivery.sql` ya está aplicada; falta el smoke con usuario Auth y publicación real.
 - Snapshots manuales de resultados por destino: alcance, impresiones, conversaciones, leads calificados, citas, gasto/ingreso MXN y nota opcional. La migración `0017_publication_result_snapshots.sql` ya está aplicada; el sistema conserva observaciones y no atribuye ROI automáticamente.
+- Panel `/pilot` y API `/api/pilot/readiness`: muestra postura de configuración de persistencia, sesión/organización, worker y entrega manual sin filtrar secretos ni tratar un worker configurado como un worker en ejecución.
 
 ## Brecha adicional detectada
 
