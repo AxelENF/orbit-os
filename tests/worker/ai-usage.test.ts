@@ -5,7 +5,8 @@ import {
   estimateCostUsd,
   getMonthToDateSpendUsd,
   getMonthlyBudgetUsd,
-  recordAiUsage,
+  reserveAiRequestBudget,
+  settleAiUsageReservation,
 } from "@/worker/providers/ai-usage";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -74,46 +75,73 @@ describe("getMonthlyBudgetUsd", () => {
   });
 });
 
-describe("recordAiUsage", () => {
-  it("inserts a usage row with snake_case columns", async () => {
-    const insert = vi.fn().mockResolvedValue({ error: null });
-    const client = { from: vi.fn().mockReturnValue({ insert }) } as unknown as SupabaseClient;
-
-    await recordAiUsage(client, {
-      organizationId,
-      jobId: "22222222-2222-4222-8222-222222222222",
-      provider: "openrouter",
-      model: "some/vision-model",
-      inputTokens: 1000,
-      outputTokens: 500,
-      estimatedCostUsd: 0.0105,
+describe("AI budget reservation", () => {
+  it("reserves the maximum request cost atomically before a provider call", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: {
+        status: "RESERVED",
+        reservationId: "33333333-3333-4333-8333-333333333333",
+        reservedCostUsd: 0.05,
+      },
+      error: null,
     });
+    const client = { rpc } as unknown as SupabaseClient;
 
-    expect(insert).toHaveBeenCalledWith({
-      organization_id: organizationId,
-      job_id: "22222222-2222-4222-8222-222222222222",
-      provider: "openrouter",
-      model: "some/vision-model",
-      input_tokens: 1000,
-      output_tokens: 500,
-      estimated_cost_usd: 0.0105,
+    await expect(
+      reserveAiRequestBudget(client, {
+        organizationId,
+        jobId: "22222222-2222-4222-8222-222222222222",
+        attempt: 1,
+        maximumCostUsd: 0.05,
+      }),
+    ).resolves.toMatchObject({
+      id: "33333333-3333-4333-8333-333333333333",
+      reservedCostUsd: 0.05,
+    });
+    expect(rpc).toHaveBeenCalledWith("reserve_ai_request_budget", {
+      p_organization_id: organizationId,
+      p_job_id: "22222222-2222-4222-8222-222222222222",
+      p_attempt: 1,
+      p_maximum_cost_usd: 0.05,
     });
   });
 
-  it("throws a clean error when Supabase returns an error", async () => {
-    const insert = vi.fn().mockResolvedValue({ error: { message: "boom" } });
-    const client = { from: vi.fn().mockReturnValue({ insert }) } as unknown as SupabaseClient;
+  it("returns null when the atomic budget gate rejects the request", async () => {
+    const client = {
+      rpc: vi.fn().mockResolvedValue({ data: { status: "BUDGET_EXCEEDED" }, error: null }),
+    } as unknown as SupabaseClient;
 
     await expect(
-      recordAiUsage(client, {
+      reserveAiRequestBudget(client, {
         organizationId,
-        jobId: "job",
-        provider: "openrouter",
-        model: "model",
-        inputTokens: 0,
-        outputTokens: 0,
-        estimatedCostUsd: 0,
+        jobId: "22222222-2222-4222-8222-222222222222",
+        attempt: 1,
+        maximumCostUsd: 0.05,
       }),
-    ).rejects.toThrow("Unable to record AI usage.");
+    ).resolves.toBeNull();
+  });
+
+  it("settles the reserved request into the append-only ledger", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: { status: "SETTLED" }, error: null });
+    const client = { rpc } as unknown as SupabaseClient;
+
+    await expect(
+      settleAiUsageReservation(client, {
+        reservationId: "33333333-3333-4333-8333-333333333333",
+        provider: "openrouter",
+        model: "some/vision-model",
+        inputTokens: 1000,
+        outputTokens: 500,
+        estimatedCostUsd: 0.0105,
+      }),
+    ).resolves.toBe("SETTLED");
+    expect(rpc).toHaveBeenCalledWith("settle_ai_usage_reservation", {
+      p_reservation_id: "33333333-3333-4333-8333-333333333333",
+      p_provider: "openrouter",
+      p_model: "some/vision-model",
+      p_input_tokens: 1000,
+      p_output_tokens: 500,
+      p_estimated_cost_usd: 0.0105,
+    });
   });
 });

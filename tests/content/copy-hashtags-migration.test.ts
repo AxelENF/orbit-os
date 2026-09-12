@@ -80,3 +80,20 @@ describe("copy hashtags and AI usage migration", () => {
     );
   });
 });
+
+describe("AI usage reservation migration", () => {
+  it("adds an additive, worker-only atomic reservation contract", async () => {
+    const path = fileURLToPath(
+      new URL("../../supabase/migrations/0015_ai_usage_reservations.sql", import.meta.url),
+    );
+    const sql = await readFile(path, "utf8");
+
+    expect(sql).toMatch(/create table public\.ai_usage_reservations/i);
+    expect(sql).toMatch(/unique \(job_id, attempt\)/i);
+    expect(sql).toMatch(/create (or replace )?function public\.reserve_ai_request_budget/i);
+    expect(sql).toMatch(/for update/i);
+    expect(sql).toMatch(/create (or replace )?function public\.settle_ai_usage_reservation/i);
+    expect(sql).toMatch(/grant execute on function public\.reserve_ai_request_budget[\s\S]*to service_role/i);
+    expect(sql).toMatch(/grant execute on function public\.settle_ai_usage_reservation[\s\S]*to service_role/i);
+  });
+});

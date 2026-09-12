@@ -1,13 +1,30 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type AiUsageRecord = {
-  organizationId: string;
-  jobId: string;
+  reservationId: string;
   provider: string;
   model: string;
   inputTokens: number;
   outputTokens: number;
   estimatedCostUsd: number;
+};
+
+export type AiBudgetReservationInput = {
+  organizationId: string;
+  jobId: string;
+  attempt: number;
+  maximumCostUsd: number;
+};
+
+export type AiBudgetReservation = {
+  id: string;
+  reservedCostUsd: number;
+};
+
+type ReservationRpcResponse = {
+  status?: unknown;
+  reservationId?: unknown;
+  reservedCostUsd?: unknown;
 };
 
 /** Rounds to 4 decimals — enough precision for a cost estimate, not an invoice. */
@@ -55,15 +72,54 @@ export async function getMonthlyBudgetUsd(
   return value ?? null;
 }
 
-export async function recordAiUsage(client: SupabaseClient, record: AiUsageRecord): Promise<void> {
-  const { error } = await client.from("ai_usage_events").insert({
-    organization_id: record.organizationId,
-    job_id: record.jobId,
-    provider: record.provider,
-    model: record.model,
-    input_tokens: record.inputTokens,
-    output_tokens: record.outputTokens,
-    estimated_cost_usd: record.estimatedCostUsd,
+/**
+ * Atomically holds the maximum permitted spend for one durable job attempt.
+ * A null result is a business rejection (budget exhausted), not a transport
+ * failure. The database serializes reservations per organization.
+ */
+export async function reserveAiRequestBudget(
+  client: SupabaseClient,
+  input: AiBudgetReservationInput,
+): Promise<AiBudgetReservation | null> {
+  const { data, error } = await client.rpc("reserve_ai_request_budget", {
+    p_organization_id: input.organizationId,
+    p_job_id: input.jobId,
+    p_attempt: input.attempt,
+    p_maximum_cost_usd: input.maximumCostUsd,
   });
-  if (error) throw new Error("Unable to record AI usage.");
+  if (error) throw new Error("Unable to reserve the AI request budget.");
+  const result = data as ReservationRpcResponse | null;
+  if (result?.status === "BUDGET_EXCEEDED") return null;
+  if (
+    result?.status !== "RESERVED" ||
+    typeof result.reservationId !== "string" ||
+    !Number.isFinite(Number(result.reservedCostUsd))
+  ) {
+    throw new Error("Supabase returned an invalid AI budget reservation.");
+  }
+  return { id: result.reservationId, reservedCostUsd: Number(result.reservedCostUsd) };
+}
+
+/**
+ * Converts a reservation into one append-only ledger entry. It is idempotent
+ * for a completed reservation and never lets browser code write usage rows.
+ */
+export async function settleAiUsageReservation(
+  client: SupabaseClient,
+  record: AiUsageRecord,
+): Promise<"SETTLED" | "RESERVATION_EXCEEDED"> {
+  const { data, error } = await client.rpc("settle_ai_usage_reservation", {
+    p_reservation_id: record.reservationId,
+    p_provider: record.provider,
+    p_model: record.model,
+    p_input_tokens: record.inputTokens,
+    p_output_tokens: record.outputTokens,
+    p_estimated_cost_usd: record.estimatedCostUsd,
+  });
+  if (error) throw new Error("Unable to settle the AI usage reservation.");
+  const result = data as { status?: unknown } | null;
+  if (result?.status === "SETTLED" || result?.status === "RESERVATION_EXCEEDED") {
+    return result.status;
+  }
+  throw new Error("Supabase returned an invalid AI usage settlement.");
 }

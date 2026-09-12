@@ -31,7 +31,10 @@ The database schema is now applied to the connected Supabase project
 `zsljrjuebdgcyinexdlj`. The migration history contains
 `supabase/migrations/0001_content_os.sql` through
 `0013_automation_job_lifecycle.sql` (including the enum-only `0012` step),
-applied in order with the Supabase CLI. The migrations create
+applied and verified in order with the Supabase CLI. The additive migrations
+`0014_copy_hashtags_and_ai_usage.sql` and
+`0015_ai_usage_reservations.sql` are committed but remain pending a reviewed
+staging apply. The migrations create
 organization-scoped tables, a private `content-assets` storage bucket,
 membership RLS policies, AIAS profiles, and portal-owned durable copy jobs.
 Migration `0013` adds the worker lifecycle RPCs used by
@@ -39,6 +42,13 @@ Migration `0013` adds the worker lifecycle RPCs used by
 RPCs and the private bucket were verified by read-only queries after the push.
 End-to-end RLS behavior with a real Auth user and the application runtime still
 requires a separate staging smoke test.
+
+Before starting the real copy worker, set a finite
+`organizations.ai_monthly_budget_usd` for the pilot organization through a
+reviewed operator session. The worker atomically reserves the configured
+maximum request cost before it calls OpenRouter and settles the actual amount
+to the append-only usage ledger afterward. This does not enable Meta posting:
+all publication remains human-approved and manual-assisted.
 
 The n8n callback route uses HMAC authentication and a service-role repository,
 not a browser session. Its database RPC derives `owner_id` from the locked

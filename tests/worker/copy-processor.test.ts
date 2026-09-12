@@ -58,8 +58,28 @@ function fakeClient(overrides: {
   budget?: number | null;
   spend?: number;
   forbiddenClaims?: string[];
+  reservationStatus?: "RESERVED" | "BUDGET_EXCEEDED";
 }): SupabaseClient & { aiUsageInsert: ReturnType<typeof vi.fn> } {
   const aiUsageInsert = vi.fn().mockResolvedValue({ error: null });
+  const rpc = vi.fn().mockImplementation((name: string) => {
+    if (name === "reserve_ai_request_budget") {
+      return Promise.resolve({
+        data:
+          overrides.reservationStatus === "BUDGET_EXCEEDED"
+            ? { status: "BUDGET_EXCEEDED" }
+            : {
+                status: "RESERVED",
+                reservationId: "77777777-7777-4777-8777-777777777777",
+                reservedCostUsd: 0.05,
+              },
+        error: null,
+      });
+    }
+    if (name === "settle_ai_usage_reservation") {
+      return Promise.resolve({ data: { status: "SETTLED" }, error: null });
+    }
+    throw new Error(`Unexpected RPC: ${name}`);
+  });
   const tables: Record<string, unknown> = {
     organizations: chainable({ data: { ai_monthly_budget_usd: overrides.budget ?? null }, error: null }),
     ai_usage_events:
@@ -73,6 +93,7 @@ function fakeClient(overrides: {
   };
   return {
     from: vi.fn().mockImplementation((table: string) => tables[table]),
+    rpc,
     aiUsageInsert,
   } as unknown as SupabaseClient & { aiUsageInsert: ReturnType<typeof vi.fn> };
 }
@@ -117,7 +138,7 @@ const validDrafts = [
 describe("copy-processor", () => {
   it("rejects the job before calling OpenRouter when the monthly budget is exceeded", async () => {
     const fetchFn = vi.fn();
-    const client = fakeClient({ budget: 10, spend: 10 });
+    const client = fakeClient({ budget: 10, spend: 10, reservationStatus: "BUDGET_EXCEEDED" });
     const processor = createCopyProcessor({ environment, fetchFn, getSupabaseClient: () => client });
     const rejection = processor(baseJob());
 
@@ -151,16 +172,16 @@ describe("copy-processor", () => {
     expect(serializedUserContent).toContain("El bot atiende preguntas y ayuda a agendar citas.");
     expect(result.drafts).toHaveLength(2);
     expect(result.provider).toBe("openrouter");
-    expect(client.from).toHaveBeenCalledWith("ai_usage_events");
-    expect(client.aiUsageInsert).toHaveBeenCalledWith({
-      organization_id: organizationId,
-      job_id: jobId,
-      provider: "openrouter",
-      model: "some/vision-model",
-      input_tokens: 1000,
-      output_tokens: 500,
-      estimated_cost_usd: 0.0105,
-    });
+    expect(client.rpc).toHaveBeenCalledWith("reserve_ai_request_budget", expect.objectContaining({
+      p_organization_id: organizationId,
+      p_job_id: jobId,
+      p_attempt: 1,
+      p_maximum_cost_usd: 0.05,
+    }));
+    expect(client.rpc).toHaveBeenCalledWith("settle_ai_usage_reservation", expect.objectContaining({
+      p_reservation_id: "77777777-7777-4777-8777-777777777777",
+      p_estimated_cost_usd: 0.0105,
+    }));
   });
 
   it("rejects malformed hashtags before a draft can reach human review", async () => {

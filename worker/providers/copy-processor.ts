@@ -7,9 +7,8 @@ import { validateFinalCopy } from "@/lib/content/final-copy";
 import { CopyGuardrailError } from "@/worker/providers/copy-guardrail-error";
 import {
   estimateCostUsd,
-  getMonthToDateSpendUsd,
-  getMonthlyBudgetUsd,
-  recordAiUsage,
+  reserveAiRequestBudget,
+  settleAiUsageReservation,
 } from "@/worker/providers/ai-usage";
 
 const HASHTAG_MIN = 5;
@@ -43,7 +42,6 @@ export type CopyProcessorEnvironment = Record<string, string | undefined>;
 export type CopyProcessorDependencies = {
   fetchFn?: typeof fetch;
   environment?: CopyProcessorEnvironment;
-  nowMs?: () => number;
   getSupabaseClient?: () => SupabaseClient;
 };
 
@@ -124,7 +122,6 @@ function briefAllowedFacts(brief: Record<string, unknown>): string[] {
 export function createCopyProcessor(dependencies: CopyProcessorDependencies = {}) {
   const environment = dependencies.environment ?? process.env;
   const fetchImpl = dependencies.fetchFn ?? fetch;
-  const now = dependencies.nowMs ?? Date.now;
   let cachedClient: SupabaseClient | null = null;
 
   function getClient(): SupabaseClient {
@@ -151,16 +148,19 @@ export function createCopyProcessor(dependencies: CopyProcessorDependencies = {}
     const maxOutputTokens = positiveIntegerEnv(environment, "SNAPGAD_COPY_MAX_OUTPUT_TOKENS", 700);
     const maxRequestCostUsd = positiveMoneyEnv(environment, "SNAPGAD_COPY_MAX_REQUEST_COST_USD", 0.05);
 
-    // Guardrail 1: presupuesto, antes de gastar nada.
-    const budget = await getMonthlyBudgetUsd(client, job.organizationId);
-    if (budget !== null) {
-      const spend = await getMonthToDateSpendUsd(client, job.organizationId, new Date(now()));
-      if (spend + maxRequestCostUsd > budget) {
-        throw new CopyGuardrailError(
-          `Monthly AI budget of $${budget} leaves less than the $${maxRequestCostUsd.toFixed(2)} request reserve.`,
-          false,
-        );
-      }
+    // Guardrail 1: reserve budget in one database transaction before the
+    // provider call. This closes the read-then-write race between workers.
+    const reservation = await reserveAiRequestBudget(client, {
+      organizationId: job.organizationId,
+      jobId: job.id,
+      attempt: job.attempts,
+      maximumCostUsd: maxRequestCostUsd,
+    });
+    if (!reservation) {
+      throw new CopyGuardrailError(
+        `Monthly AI budget leaves less than the $${maxRequestCostUsd.toFixed(2)} request reserve.`,
+        false,
+      );
     }
 
     // Guardrail 2: timeout duro por llamada.
@@ -211,9 +211,8 @@ export function createCopyProcessor(dependencies: CopyProcessorDependencies = {}
     // modelo, incluso si las validaciones de forma o claims fallan después —
     // si no, un brief que dispara repetidamente el guardrail de claims
     // gastaría dinero real sin que el tope mensual se entere.
-    await recordAiUsage(client, {
-      organizationId: job.organizationId,
-      jobId: job.id,
+    const settlement = await settleAiUsageReservation(client, {
+      reservationId: reservation.id,
       provider: "openrouter",
       model,
       inputTokens,
@@ -221,7 +220,7 @@ export function createCopyProcessor(dependencies: CopyProcessorDependencies = {}
       estimatedCostUsd,
     });
 
-    if (estimatedCostUsd > maxRequestCostUsd) {
+    if (settlement === "RESERVATION_EXCEEDED" || estimatedCostUsd > maxRequestCostUsd) {
       throw new CopyGuardrailError(
         `OpenRouter response exceeded the configured $${maxRequestCostUsd.toFixed(2)} request cost reserve.`,
         false,
