@@ -5,6 +5,8 @@ import type {
   FinalCopy,
   FinalCopySubmission,
   ManualPublicationDeliveryInput,
+  PublicationResult,
+  PublicationResultInput,
   PublicationTarget,
 } from "@/lib/content/repository";
 
@@ -77,6 +79,33 @@ export async function recordManualPublicationDelivery(
   );
   const payload = await readJson<{ target: PublicationTarget }>(response);
   return payload.target;
+}
+
+export async function recordPublicationResult(
+  input: PublicationResultInput,
+): Promise<PublicationResult> {
+  const response = await fetch(
+    `/api/content/${input.contentItemId}/targets/${input.publicationTargetId}/result`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        observedAt: input.observedAt,
+        reach: input.reach,
+        impressions: input.impressions,
+        conversations: input.conversations,
+        qualifiedLeads: input.qualifiedLeads,
+        appointments: input.appointments,
+        spendMxn: input.spendMxn,
+        ...(input.revenueMxn === undefined ? {} : { revenueMxn: input.revenueMxn }),
+        ...(input.note ? { note: input.note } : {}),
+        idempotencyKey: input.idempotencyKey,
+      }),
+    },
+  );
+  const payload = await readJson<{ result: PublicationResult }>(response);
+  return payload.result;
 }
 
 export async function submitFinalCopy(

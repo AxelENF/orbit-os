@@ -139,6 +139,27 @@ export type ManualPublicationDeliveryInput = {
   idempotencyKey: string;
 };
 
+/** A point-in-time, human-entered result snapshot for one delivered post. */
+export type PublicationResult = {
+  id: string;
+  contentItemId: string;
+  publicationTargetId: string;
+  observedAt: string;
+  reach: number;
+  impressions: number;
+  conversations: number;
+  qualifiedLeads: number;
+  appointments: number;
+  spendMxn: number;
+  revenueMxn?: number;
+  note?: string;
+  createdAt: string;
+};
+
+export type PublicationResultInput = Omit<PublicationResult, "id" | "createdAt"> & {
+  idempotencyKey: string;
+};
+
 export type CopyRequestPreparationInput = {
   contentItemId: string;
   idempotencyKey: string;
@@ -221,6 +242,7 @@ export type ContentRecord = {
   targets: PublicationTarget[];
   drafts: StoredCopyDraft[];
   auditEvents: ContentAuditEvent[];
+  publicationResults: PublicationResult[];
   finalCopy?: FinalCopy;
 };
 
@@ -296,6 +318,7 @@ export interface ContentRepository
   recordManualPublicationDelivery(
     input: ManualPublicationDeliveryInput,
   ): Promise<PublicationTarget & { status: "PUBLISHED" }>;
+  recordPublicationResult(input: PublicationResultInput): Promise<PublicationResult>;
   submitFinalCopyForReview(
     contentItemId: string,
     input: FinalCopySubmission,

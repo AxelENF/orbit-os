@@ -16,6 +16,8 @@ import {
   type FinalCopySubmission,
   type ContentRepository,
   type ManualPublicationDeliveryInput,
+  type PublicationResult,
+  type PublicationResultInput,
   type PublicationTarget,
   type PublishRequestPreparation,
   type PublishRequestPreparationInput,
@@ -103,6 +105,8 @@ export class DemoContentRepository
   private readonly copyRequestItemsByKey = new Map<string, string>();
   private readonly publishCallbackTargetsByKey = new Map<string, string>();
   private readonly manualDeliveryTargetsByKey = new Map<string, string>();
+  private readonly publicationResultsByContentItem = new Map<string, PublicationResult[]>();
+  private readonly publicationResultTargetByKey = new Map<string, string>();
   private readonly copyJobsById = new Map<string, DemoCopyJob>();
   private readonly copyJobIdByIdempotencyKey = new Map<string, string>();
 
@@ -216,6 +220,7 @@ export class DemoContentRepository
       targets,
       drafts,
       auditEvents,
+      publicationResults: structuredClone(this.publicationResultsByContentItem.get(contentItemId) ?? []),
       ...(finalCopy ? { finalCopy: structuredClone(finalCopy) } : {}),
     };
   }
@@ -393,6 +398,72 @@ export class DemoContentRepository
       event,
     ]);
     return { ...delivered, status: "PUBLISHED" };
+  }
+
+  async recordPublicationResult(input: PublicationResultInput): Promise<PublicationResult> {
+    const resultKey = `PUBLICATION_RESULT:${input.idempotencyKey}`;
+    const priorTargetId = this.publicationResultTargetByKey.get(resultKey);
+    if (priorTargetId) {
+      if (priorTargetId !== input.publicationTargetId) throw new PublishTargetConflictError();
+      const existing = (this.publicationResultsByContentItem.get(input.contentItemId) ?? [])
+        .find((candidate) => candidate.publicationTargetId === input.publicationTargetId);
+      if (!existing) throw new PublishTargetConflictError();
+      return structuredClone(existing);
+    }
+
+    const target = this.targetsByContentItem.get(input.contentItemId)
+      ?.find((candidate) => candidate.id === input.publicationTargetId);
+    if (!target || target.status !== "PUBLISHED") throw new PublishTargetConflictError();
+    const metrics = [
+      input.reach,
+      input.impressions,
+      input.conversations,
+      input.qualifiedLeads,
+      input.appointments,
+      input.spendMxn,
+      ...(input.revenueMxn === undefined ? [] : [input.revenueMxn]),
+    ];
+    if (metrics.some((value) => !Number.isFinite(value) || value < 0)) {
+      throw new PublishTargetConflictError();
+    }
+
+    const result: PublicationResult = {
+      id: createId(),
+      contentItemId: input.contentItemId,
+      publicationTargetId: input.publicationTargetId,
+      observedAt: input.observedAt,
+      reach: input.reach,
+      impressions: input.impressions,
+      conversations: input.conversations,
+      qualifiedLeads: input.qualifiedLeads,
+      appointments: input.appointments,
+      spendMxn: input.spendMxn,
+      ...(input.revenueMxn === undefined ? {} : { revenueMxn: input.revenueMxn }),
+      ...(input.note ? { note: input.note } : {}),
+      createdAt: new Date().toISOString(),
+    };
+    this.publicationResultTargetByKey.set(resultKey, input.publicationTargetId);
+    this.publicationResultsByContentItem.set(input.contentItemId, [
+      ...(this.publicationResultsByContentItem.get(input.contentItemId) ?? []),
+      result,
+    ]);
+    this.auditEventsByContentItem.set(input.contentItemId, [
+      ...(this.auditEventsByContentItem.get(input.contentItemId) ?? []),
+      {
+        id: createId(),
+        contentItemId: input.contentItemId,
+        type: "PUBLICATION_RESULT_RECORDED",
+        status: "success",
+        message: `${target.platform} recibió un resultado manual de seguimiento en modo demo local.`,
+        metadata: {
+          publicationTargetId: target.id,
+          platform: target.platform,
+          source: "manual",
+        },
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    return structuredClone(result);
   }
 
   async preparePublishRequest(

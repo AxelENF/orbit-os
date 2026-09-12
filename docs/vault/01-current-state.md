@@ -8,7 +8,7 @@ SnapGad Content OS tiene una base local sólida para campañas, borradores, copy
 
 - Next.js + React + TypeScript.
 - Repositorio demo en memoria cuando no existen variables Supabase.
-- Repositorio Supabase aplicado al proyecto `zsljrjuebdgcyinexdlj`; el historial remoto contiene `0001`–`0013` en orden.
+- Repositorio Supabase aplicado al proyecto `zsljrjuebdgcyinexdlj`; el historial remoto contiene `0001`–`0017` en orden.
 - Validación server-side de PNG/JPEG/WEBP, máximo 20 MB y formato vertical 4:5.
 - Bucket privado `content-assets` creado y verificado como no público.
 - Organizaciones, membresías, roles y RLS definidos en migraciones.
@@ -28,6 +28,8 @@ SnapGad Content OS tiene una base local sólida para campañas, borradores, copy
 - Endpoint interno `GET /api/internal/worker/health` protegido por token de servicio y sin payloads de jobs; reporta sólo telemetría agregada cuando existe store durable configurado.
 - Runner persistente `worker/durable-runner.ts` y entrypoint `npm run worker` con polling, heartbeat, recuperación y configuración fail-closed; requiere un processor de copy explícito y no hace llamadas de proveedor por defecto.
 - API autenticada `/api/organizations/[id]/profile` con GET/PUT/PATCH, roles y límites de payload/profundidad; está conectada al formulario de onboarding/settings. La migración/RLS existe, pero falta el smoke test con usuarios y membresías reales.
+- Registro manual de entrega por destino: URL HTTPS, fecha y nota opcional con idempotencia, auditoría y tenant scope. La migración `0016_manual_publication_delivery.sql` ya está aplicada; falta el smoke con usuario Auth y publicación real.
+- Snapshots manuales de resultados por destino: alcance, impresiones, conversaciones, leads calificados, citas, gasto/ingreso MXN y nota opcional. La migración `0017_publication_result_snapshots.sql` ya está aplicada; el sistema conserva observaciones y no atribuye ROI automáticamente.
 
 ## Brecha adicional detectada
 

@@ -42,9 +42,9 @@ millón de tokens antes de iniciar el worker.
 
 ## 2. Aplicar migraciones con un operador
 
-La base remota tiene `0001`–`0013` verificados. Esta fase agrega `0014`,
-`0015` y `0016`, en ese orden. El operador debe exportar temporalmente una URL de base
-privada en su sesión local, revisar la lista y aplicar una sola vez:
+La base remota tiene `0001`–`0017` verificados. Para una instalación nueva, el
+operador debe exportar temporalmente una URL de base privada en su sesión
+local, revisar la lista y aplicar una sola vez:
 
 ```powershell
 npx supabase@2.117.0 migration list --db-url $env:ORBIT_OS_DATABASE_URL
@@ -53,7 +53,8 @@ npx supabase@2.117.0 migration list --db-url $env:ORBIT_OS_DATABASE_URL
 ```
 
 **Gate:** el último listado debe incluir `0014_copy_hashtags_and_ai_usage`,
-`0015_ai_usage_reservations` y `0016_manual_publication_delivery` en local y
+`0015_ai_usage_reservations`, `0016_manual_publication_delivery` y
+`0017_publication_result_snapshots` en local y
 remoto. Si hay divergencia, detenerse:
 no editar ni repetir migraciones aplicadas.
 
@@ -111,7 +112,7 @@ considerar OAuth/publicación como la siguiente fase.
 
 ## Evidencia de cierre
 
-- Captura o query de `migration list` con `0001`–`0016` alineadas.
+- Captura o query de `migration list` con `0001`–`0017` alineadas.
 - Un asset privado asociado a una organización.
 - Un job `COMPLETED` o un `ERROR` explicado, nunca un `GENERATING` huérfano.
 - Una reserva `SETTLED` y un evento de uso para el job, con costo menor o

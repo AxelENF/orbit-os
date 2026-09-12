@@ -26,6 +26,7 @@ const eventLabels: Record<DemoAuditEvent["type"], string> = {
   SENT_TO_REVIEW: "Enviado a revisión",
   TARGET_APPROVED: "Destino aprobado",
   MANUAL_PUBLICATION_RECORDED: "Publicación manual registrada",
+  PUBLICATION_RESULT_RECORDED: "Resultado de publicación registrado",
 };
 
 const eventTone: Record<DemoAuditEvent["status"], string> = {

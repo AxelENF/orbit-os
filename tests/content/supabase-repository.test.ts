@@ -312,6 +312,7 @@ describe("SupabaseContentRepository", () => {
       publication_targets: [targetRow],
       copy_drafts: [draftRow],
       audit_events: [auditRow],
+      publication_result_snapshots: [],
     };
     const from = vi.fn((table: string) => {
       const chain = {
@@ -332,6 +333,7 @@ describe("SupabaseContentRepository", () => {
       targets: [{ id: targetRow.id, status: "APPROVED" }],
       drafts: [{ id: draftRow.id, headline: draftRow.headline, hashtags: ["#Agenda", "#POS"] }],
       auditEvents: [{ type: "TARGET_APPROVED", status: "success" }],
+      publicationResults: [],
     });
     expect(from).toHaveBeenCalledWith("content_items");
   });

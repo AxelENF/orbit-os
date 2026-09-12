@@ -30,12 +30,8 @@ npm run lint
 The database schema is now applied to the connected Supabase project
 `zsljrjuebdgcyinexdlj`. The migration history contains
 `supabase/migrations/0001_content_os.sql` through
-`0013_automation_job_lifecycle.sql` (including the enum-only `0012` step),
-applied and verified in order with the Supabase CLI. The additive migrations
-`0014_copy_hashtags_and_ai_usage.sql` and
-`0015_ai_usage_reservations.sql` and `0016_manual_publication_delivery.sql`
-are committed but remain pending a reviewed
-staging apply. The migrations create
+`0017_publication_result_snapshots.sql` (including the enum-only `0012` step),
+applied and verified in order with the Supabase CLI. The migrations create
 organization-scoped tables, a private `content-assets` storage bucket,
 membership RLS policies, AIAS profiles, and portal-owned durable copy jobs.
 Migration `0013` adds the worker lifecycle RPCs used by
@@ -135,9 +131,8 @@ After a human publishes a previously approved destination directly in Meta,
 `POST /api/content/:id/targets/:targetId/manual-delivery` records its HTTPS
 URL, publication date and an optional internal note. It never invokes Meta or
 uses a Meta token. It is organization-scoped, idempotent and remains a manual
-evidence step until migration `0016` has been reviewed and applied. A content
-item becomes `PUBLISHED` only after every configured destination has its own
-recorded delivery.
+evidence step. A content item becomes `PUBLISHED` only after every configured
+destination has its own recorded delivery.
 
 ## Campaign control plane
 

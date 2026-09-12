@@ -41,6 +41,7 @@ function recordWithFinalCopy(id: string, body: string, state: "DRAFT" | "REVIEW"
     targets: [],
     drafts: [],
     auditEvents: [],
+    publicationResults: [],
     finalCopy: {
       id: `final-${id}`,
       contentItemId: id,

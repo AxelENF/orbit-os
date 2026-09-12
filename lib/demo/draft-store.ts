@@ -1,6 +1,7 @@
 import { transitionContentState } from "@/lib/content/state-machine";
 import type {
   ContentItem,
+  PublicationResult,
   PublicationTarget,
 } from "@/lib/content/repository";
 import { readDemoAssets, type DemoBrowserAsset } from "@/lib/demo/browser-assets";
@@ -26,7 +27,8 @@ export type DemoAuditEvent = {
     | "LOCAL_DRAFTS_CREATED"
     | "SENT_TO_REVIEW"
     | "TARGET_APPROVED"
-    | "MANUAL_PUBLICATION_RECORDED";
+    | "MANUAL_PUBLICATION_RECORDED"
+    | "PUBLICATION_RESULT_RECORDED";
   status: "info" | "success" | "warning";
   message: string;
   createdAt: string;
@@ -47,6 +49,7 @@ export type DemoDraftRecord = {
   finalCopy: DemoFinalCopy;
   warnings: string[];
   targets: PublicationTarget[];
+  publicationResults: PublicationResult[];
   auditEvents: DemoAuditEvent[];
   updatedAt: string;
 };
@@ -156,6 +159,7 @@ function createDraftRecord(asset: DemoBrowserAsset): DemoDraftRecord {
         status: "PENDING_REVIEW",
       },
     ],
+    publicationResults: [],
     auditEvents: [
       createAuditEvent(
         content.id,
@@ -307,6 +311,40 @@ export function recordDemoManualPublicationDelivery(
         "MANUAL_PUBLICATION_RECORDED",
         "success",
         `${target.platform === "FACEBOOK" ? "Facebook" : "Instagram"} registrado como publicado manualmente en modo demo local.${input.note ? " Incluye una nota de seguimiento." : ""}`,
+      ),
+    ],
+    updatedAt: new Date().toISOString(),
+  };
+  saveDemoDraft(nextRecord);
+  return nextRecord;
+}
+
+export function recordDemoPublicationResult(
+  contentItemId: string,
+  targetId: string,
+  input: Omit<PublicationResult, "id" | "contentItemId" | "publicationTargetId" | "createdAt">,
+): DemoDraftRecord | null {
+  const record = readDemoDraft(contentItemId);
+  const target = record?.targets.find((candidate) => candidate.id === targetId);
+  if (!record || !target || target.status !== "PUBLISHED") return null;
+
+  const result: PublicationResult = {
+    id: createId("result"),
+    contentItemId,
+    publicationTargetId: targetId,
+    ...input,
+    createdAt: new Date().toISOString(),
+  };
+  const nextRecord: DemoDraftRecord = {
+    ...record,
+    publicationResults: [result, ...(record.publicationResults ?? [])],
+    auditEvents: [
+      ...record.auditEvents,
+      createAuditEvent(
+        contentItemId,
+        "PUBLICATION_RESULT_RECORDED",
+        "success",
+        `${target.platform === "FACEBOOK" ? "Facebook" : "Instagram"} recibió un resultado de seguimiento en modo demo local.`,
       ),
     ],
     updatedAt: new Date().toISOString(),

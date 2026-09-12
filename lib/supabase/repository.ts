@@ -26,6 +26,8 @@ import {
   type ContentRecord,
   type ContentRepository,
   type ManualPublicationDeliveryInput,
+  type PublicationResult,
+  type PublicationResultInput,
   type CopyResultCallback,
   type CopyResultIngestion,
   type CopyResultRepository,
@@ -145,6 +147,22 @@ const auditEventRowSchema = z.object({
   created_at: z.string().datetime({ offset: true }),
 });
 
+const publicationResultRowSchema = z.object({
+  id: z.string().uuid(),
+  content_item_id: z.string().uuid(),
+  publication_target_id: z.string().uuid(),
+  observed_at: z.string().datetime({ offset: true }),
+  reach: z.number().int().nonnegative(),
+  impressions: z.number().int().nonnegative(),
+  conversations: z.number().int().nonnegative(),
+  qualified_leads: z.number().int().nonnegative(),
+  appointments: z.number().int().nonnegative(),
+  spend_mxn: z.coerce.number().nonnegative(),
+  revenue_mxn: z.coerce.number().nonnegative().nullable().optional(),
+  note: z.string().nullable().optional(),
+  created_at: z.string().datetime({ offset: true }),
+});
+
 const assetRowSchema = z.object({
   id: z.string().uuid(),
   filename: z.string().min(1),
@@ -260,6 +278,26 @@ function toPublicationTargets(rows: unknown): PublicationTarget[] {
     ...(row.remote_url ? { remoteUrl: row.remote_url } : {}),
     ...(row.published_at ? { publishedAt: row.published_at } : {}),
     ...(row.last_error ? { lastError: row.last_error } : {}),
+  }));
+}
+
+function toPublicationResults(rows: unknown): PublicationResult[] {
+  const parsedRows = z.array(publicationResultRowSchema).safeParse(rows);
+  if (!parsedRows.success) throw new Error("Supabase returned invalid publication results.");
+  return parsedRows.data.map((row) => ({
+    id: row.id,
+    contentItemId: row.content_item_id,
+    publicationTargetId: row.publication_target_id,
+    observedAt: row.observed_at,
+    reach: row.reach,
+    impressions: row.impressions,
+    conversations: row.conversations,
+    qualifiedLeads: row.qualified_leads,
+    appointments: row.appointments,
+    spendMxn: row.spend_mxn,
+    ...(row.revenue_mxn === null || row.revenue_mxn === undefined ? {} : { revenueMxn: row.revenue_mxn }),
+    ...(row.note ? { note: row.note } : {}),
+    createdAt: row.created_at,
   }));
 }
 
@@ -659,7 +697,7 @@ class SupabaseContentRepository
     const content = await this.getContentItem(contentItemId);
     if (!content) return null;
 
-    const [targetsResult, draftsResult, auditResult, finalCopyResult, assetResult] = await Promise.all([
+    const [targetsResult, draftsResult, auditResult, resultsResult, finalCopyResult, assetResult] = await Promise.all([
       this.client
         .from("publication_targets")
         .select("id, content_item_id, platform, status, remote_post_id, remote_url, published_at, last_error, updated_at")
@@ -678,6 +716,12 @@ class SupabaseContentRepository
         .eq("content_item_id", contentItemId)
         .eq("organization_id", this.organization.organizationId)
         .order("created_at", { ascending: true }),
+      this.client
+        .from("publication_result_snapshots")
+        .select("id, content_item_id, publication_target_id, observed_at, reach, impressions, conversations, qualified_leads, appointments, spend_mxn, revenue_mxn, note, created_at")
+        .eq("content_item_id", contentItemId)
+        .eq("organization_id", this.organization.organizationId)
+        .order("observed_at", { ascending: false }),
       content.selectedFinalCopyId
         ? this.client
             .from("final_copy_versions")
@@ -699,7 +743,7 @@ class SupabaseContentRepository
         : Promise.resolve({ data: null, error: null }),
     ]);
 
-    if (targetsResult.error || draftsResult.error || auditResult.error || finalCopyResult.error || assetResult.error) {
+    if (targetsResult.error || draftsResult.error || auditResult.error || resultsResult.error || finalCopyResult.error || assetResult.error) {
       throw new Error("Unable to read the content record.");
     }
 
@@ -722,6 +766,7 @@ class SupabaseContentRepository
       targets: toPublicationTargets(targetsResult.data),
       drafts: toCopyDrafts(draftsResult.data),
       auditEvents: toAuditEvents(auditResult.data),
+      publicationResults: toPublicationResults(resultsResult.data),
       ...(finalCopyResult.data ? { finalCopy: toFinalCopy(finalCopyResult.data) } : {}),
     };
   }
@@ -837,6 +882,32 @@ class SupabaseContentRepository
       throw new Error("Supabase returned an invalid manual publication delivery.");
     }
     return { ...target, status: "PUBLISHED" };
+  }
+
+  async recordPublicationResult(input: PublicationResultInput): Promise<PublicationResult> {
+    const { data, error } = await this.client.rpc("record_publication_result", {
+      p_organization_id: this.organization.organizationId,
+      p_owner_id: this.organization.userId,
+      p_content_item_id: input.contentItemId,
+      p_publication_target_id: input.publicationTargetId,
+      p_observed_at: input.observedAt,
+      p_reach: input.reach,
+      p_impressions: input.impressions,
+      p_conversations: input.conversations,
+      p_qualified_leads: input.qualifiedLeads,
+      p_appointments: input.appointments,
+      p_spend_mxn: input.spendMxn,
+      p_revenue_mxn: input.revenueMxn ?? null,
+      p_note: input.note ?? null,
+      p_idempotency_key: input.idempotencyKey,
+    });
+    if (error) {
+      if (error.message.startsWith("PUBLICATION_RESULT_")) throw new PublishTargetConflictError();
+      throw new Error("Unable to record the publication result.");
+    }
+    const result = toPublicationResults([data])[0];
+    if (!result) throw new Error("Supabase returned an invalid publication result.");
+    return result;
   }
 
   async getContentItem(contentItemId: string): Promise<ContentItem | null> {
