@@ -16,18 +16,29 @@ const validBrief = {
 };
 
 describe("contentBriefSchema", () => {
-  it("accepts a brief with controlled taxonomy and approved facts", () => {
+  it("accepts a brief with approved facts", () => {
     expect(parseContentBrief(validBrief)).toEqual(validBrief);
   });
 
+  it("accepts tenant-specific commercial taxonomy instead of a SnapGad-only catalog", () => {
+    const tenantBrief = {
+      ...validBrief,
+      businessLine: "Reservaciones y retención",
+      service: "Menú digital con pedidos por WhatsApp",
+      niche: "Restaurantes de especialidad",
+    };
+
+    expect(parseContentBrief(tenantBrief)).toEqual(tenantBrief);
+  });
+
   it.each([
-    ["business line", { ...validBrief, businessLine: "VENDER" }],
-    ["service", { ...validBrief, service: "seo" }],
-    ["niche", { ...validBrief, niche: "restaurantes" }],
+    ["blank business line", { ...validBrief, businessLine: " " }],
+    ["oversized service", { ...validBrief, service: "x".repeat(121) }],
+    ["oversized niche", { ...validBrief, niche: "x".repeat(121) }],
     ["content type", { ...validBrief, contentType: "meme" }],
     ["objective", { ...validBrief, objective: "viralidad" }],
     ["format", { ...validBrief, format: "story_9_16" }],
-  ])("rejects an unsupported %s", (_field, invalidBrief) => {
+  ])("rejects an invalid %s", (_field, invalidBrief) => {
     expect(contentBriefSchema.safeParse(invalidBrief).success).toBe(false);
   });
 

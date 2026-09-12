@@ -9,6 +9,15 @@ import { clearDemoDrafts, readDemoDrafts } from "@/lib/demo/draft-store";
 import { clearDemoAssets } from "@/lib/demo/browser-assets";
 
 const completeBriefFields = () => {
+  fireEvent.change(screen.getByLabelText("Área del negocio"), {
+    target: { value: "Captación y seguimiento" },
+  });
+  fireEvent.change(screen.getByLabelText("Oferta / servicio"), {
+    target: { value: "Automatización de agenda por WhatsApp" },
+  });
+  fireEvent.change(screen.getByLabelText("Rubro del negocio"), {
+    target: { value: "Clínicas dentales" },
+  });
   fireEvent.change(screen.getByLabelText("Nombre de campaña"), {
     target: { value: "Agenda clínica septiembre" },
   });
@@ -72,6 +81,9 @@ describe("ContentForm", () => {
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({
+      businessLine: "Captación y seguimiento",
+      service: "Automatización de agenda por WhatsApp",
+      niche: "Clínicas dentales",
       cta: "Solicita una demo",
       humanDescription: "Mostrar cómo el equipo atiende y agenda solicitudes.",
       allowedFacts: ["El equipo responde y agenda solicitudes."],

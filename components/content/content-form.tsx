@@ -72,9 +72,9 @@ const OBJECTIVE_LABELS: Record<(typeof CONTENT_OBJECTIVES)[number], string> = {
 };
 
 const initialState: FormState = {
-  businessLine: BUSINESS_LINES[0],
-  service: SERVICES[0],
-  niche: NICHES[0],
+  businessLine: "",
+  service: "",
+  niche: "",
   contentType: CONTENT_TYPES[0],
   objective: CONTENT_OBJECTIVES[0],
   format: "feed_4_5",
@@ -210,35 +210,38 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
         </div>
 
         <div className="grid gap-5 md:grid-cols-2">
-          <SelectField
+          <CatalogField
             id="business-line"
-            label="Línea"
+            label="Área del negocio"
             value={state.businessLine}
-            onChange={(value) => updateField("businessLine", value as FormState["businessLine"])}
+            onChange={(value) => updateField("businessLine", value)}
             options={BUSINESS_LINES.map((value) => ({
               value,
               label: BUSINESS_LINE_LABELS[value],
             }))}
+            placeholder="Ej. Captación y seguimiento"
           />
-          <SelectField
+          <CatalogField
             id="service"
-            label="Servicio"
+            label="Oferta / servicio"
             value={state.service}
-            onChange={(value) => updateField("service", value as FormState["service"])}
+            onChange={(value) => updateField("service", value)}
             options={SERVICES.map((value) => ({
               value,
               label: SERVICE_LABELS[value],
             }))}
+            placeholder="Ej. Automatización de agenda por WhatsApp"
           />
-          <SelectField
+          <CatalogField
             id="niche"
-            label="Nicho"
+            label="Rubro del negocio"
             value={state.niche}
-            onChange={(value) => updateField("niche", value as FormState["niche"])}
+            onChange={(value) => updateField("niche", value)}
             options={NICHES.map((value) => ({
               value,
               label: NICHE_LABELS[value],
             }))}
+            placeholder="Ej. Clínicas dentales"
           />
           <SelectField
             id="content-type"
@@ -495,6 +498,38 @@ function SelectField({ id, label, value, options, onChange }: SelectFieldProps) 
           </option>
         ))}
       </select>
+    </div>
+  );
+}
+
+type CatalogFieldProps = SelectFieldProps & {
+  placeholder: string;
+};
+
+function CatalogField({ id, label, value, options, onChange, placeholder }: CatalogFieldProps) {
+  const listId = `${id}-suggestions`;
+  return (
+    <div>
+      <label className="text-sm font-semibold text-slate-100" htmlFor={id}>
+        {label}
+      </label>
+      <input
+        aria-required="true"
+        className={inputClasses()}
+        id={id}
+        list={listId}
+        maxLength={120}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        required
+        value={value}
+      />
+      <datalist id={listId}>
+        {options.map((option) => (
+          <option key={option.value} value={option.label} />
+        ))}
+      </datalist>
+      <p className="mt-2 text-xs leading-5 text-slate-500">Puedes usar una sugerencia o escribir el lenguaje propio de esta organización.</p>
     </div>
   );
 }

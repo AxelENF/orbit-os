@@ -1,17 +1,19 @@
 import { z } from "zod";
 
 import {
-  BUSINESS_LINES,
   CONTENT_FORMATS,
   CONTENT_OBJECTIVES,
   CONTENT_TYPES,
-  NICHES,
-  SERVICES,
 } from "@/lib/content/constants";
 
-export const businessLineSchema = z.enum(BUSINESS_LINES);
-export const serviceSchema = z.enum(SERVICES);
-export const nicheSchema = z.enum(NICHES);
+// These labels used to be enums tied to SnapGad's own offer catalog. Content
+// rows are already text in Postgres, so a tenant-owned vocabulary is both
+// safer and more useful than forcing every customer into our internal names.
+const commercialTaxonomySchema = z.string().trim().min(1).max(120);
+
+export const businessLineSchema = commercialTaxonomySchema;
+export const serviceSchema = commercialTaxonomySchema;
+export const nicheSchema = commercialTaxonomySchema;
 export const contentTypeSchema = z.enum(CONTENT_TYPES);
 export const contentObjectiveSchema = z.enum(CONTENT_OBJECTIVES);
 export const contentFormatSchema = z.enum(CONTENT_FORMATS);

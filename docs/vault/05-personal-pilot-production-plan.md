@@ -42,7 +42,7 @@ después de que el flujo anterior complete una campaña real de punta a punta.
 | P1 | La IA leía presupuesto y registraba gasto como operaciones separadas. | Cerrado en código: `0015` reserva/conciliación atómica por job e intento. Falta apply y smoke concurrente. |
 | P1 | La cola podía dejar contenido creado sin job si fallaba el enqueue. | Cerrado en código: el asset se conserva y el borrador permite reintento idempotente. Falta smoke durable. |
 | P1 | Los hashtags permitían texto sin `#` en validación estructural. | Cerrado en código: TypeScript y `0014` validan formato. Falta apply y smoke de callback. |
-| P2 | Hay valores de catálogo fijos de SnapGad en el formulario. | Tomar taxonomía, voz, servicios y restricciones desde el perfil de cada organización. |
+| P2 | Había valores de catálogo fijos de SnapGad en el formulario. | Cerrado para la taxonomía: el alta acepta texto propio con sugerencias. Prefill desde el perfil AIAS queda como mejora posterior, no como requisito para el piloto. |
 
 ## Secuencia de implementación
 
