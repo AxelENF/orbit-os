@@ -5,8 +5,30 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ContentForm } from "@/components/content/content-form";
+import type { AiasOrganizationProfile } from "@/lib/aias/contracts";
 import { clearDemoDrafts, readDemoDrafts } from "@/lib/demo/draft-store";
 import { clearDemoAssets } from "@/lib/demo/browser-assets";
+
+const aiasProfile: AiasOrganizationProfile = {
+  businessName: "Clínica Aurora",
+  industry: "Salud privada",
+  subIndustry: "Clínicas dentales",
+  locations: ["Puebla"],
+  offerings: ["Agenda y atención por WhatsApp"],
+  idealCustomer: "Personas que buscan atención dental cerca de casa",
+  painPoints: ["Las solicitudes se pierden cuando nadie responde a tiempo"],
+  proofPoints: ["El equipo recibe solicitudes por WhatsApp"],
+  tone: "Claro y profesional",
+  forbiddenClaims: ["Resultados médicos garantizados"],
+  defaultCta: "Escribe para agendar",
+  timezone: "America/Mexico_City",
+  workflowPreferences: {
+    enabledWorkflows: ["copy_generation"],
+    approvalRequired: true,
+    defaultPlatforms: ["facebook"],
+    publishingWindows: [],
+  },
+};
 
 const completeBriefFields = () => {
   fireEvent.change(screen.getByLabelText("Área del negocio"), {
@@ -64,6 +86,19 @@ describe("ContentForm", () => {
     });
 
     expect(submit).toBeDisabled();
+  });
+
+  it("prefills editable commercial suggestions from the saved AIAS profile", async () => {
+    render(<ContentForm aiasProfile={aiasProfile} onSubmit={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Área del negocio")).toHaveValue("Salud privada");
+    });
+    expect(screen.getByLabelText("Oferta / servicio")).toHaveValue("Agenda y atención por WhatsApp");
+    expect(screen.getByLabelText("Rubro del negocio")).toHaveValue("Clínicas dentales");
+    expect(screen.getByLabelText("CTA")).toHaveValue("Escribe para agendar");
+    expect(screen.getByLabelText("Hechos permitidos")).toHaveValue("El equipo recibe solicitudes por WhatsApp");
+    expect(screen.getByText("Sugerencias cargadas desde el perfil AIAS. Revísalas antes de generar copy.")).toBeInTheDocument();
   });
 
   it("submits a complete brief and shows the local next step", async () => {

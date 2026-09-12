@@ -1,8 +1,14 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
+import {
+  parseAiasOrganizationProfile,
+  type AiasOrganizationProfile,
+} from "@/lib/aias/contracts";
+import { buildAiasContentDefaults } from "@/lib/aias/content-defaults";
+import { parseOrganizationsResponse } from "@/components/aias/organization-switcher";
 import { AssetDropzone } from "@/components/content/asset-dropzone";
 import {
   BUSINESS_LINES,
@@ -30,6 +36,8 @@ type FormState = Omit<CampaignBrief, "allowedFacts"> & {
 type ContentFormProps = {
   onSubmit?: (brief: CampaignBrief, file: File) => void | Promise<void>;
   repository?: Pick<ContentRepository, "createContentItem">;
+  /** Test/server injection; the live portal resolves this from the active org. */
+  aiasProfile?: AiasOrganizationProfile;
 };
 
 const BUSINESS_LINE_LABELS: Record<(typeof BUSINESS_LINES)[number], string> = {
@@ -100,7 +108,17 @@ function inputClasses(): string {
   return "mt-2 w-full rounded-xl border border-white/10 bg-[#091735] px-4 py-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-[#A8C7FF]/80 focus:ring-2 focus:ring-[#A8C7FF]/20";
 }
 
-export function ContentForm({ onSubmit, repository }: ContentFormProps) {
+function profileFromApiResponse(value: unknown): AiasOrganizationProfile | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as { profile?: { profile?: unknown } };
+  try {
+    return parseAiasOrganizationProfile(record.profile?.profile);
+  } catch {
+    return null;
+  }
+}
+
+export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormProps) {
   const [state, setState] = useState<FormState>(initialState);
   const [asset, setAsset] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -108,8 +126,63 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [createdItemId, setCreatedItemId] = useState<string | null>(null);
+  const [aiasSuggestionsLoaded, setAiasSuggestionsLoaded] = useState(false);
   const [demoRepository] = useState(() => createDemoRepository());
   const isProductionMode = hasSupabaseBrowserConfig();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    function applyProfile(profile: AiasOrganizationProfile) {
+      const defaults = buildAiasContentDefaults(profile);
+      setState((current) => ({
+        ...current,
+        businessLine: current.businessLine || defaults.businessLine,
+        service: current.service || defaults.service,
+        niche: current.niche || defaults.niche,
+        cta: current.cta || defaults.cta,
+        humanDescription: current.humanDescription || defaults.humanDescription,
+        allowedFactsText: current.allowedFactsText || defaults.allowedFacts.join("\n"),
+        forbiddenClaims: current.forbiddenClaims.length ? current.forbiddenClaims : defaults.forbiddenClaims,
+      }));
+      setAiasSuggestionsLoaded(true);
+    }
+
+    if (aiasProfile) {
+      applyProfile(aiasProfile);
+      return;
+    }
+    if (!isProductionMode) return;
+
+    void (async () => {
+      try {
+        const organizationsResponse = await fetch("/api/organizations", {
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        if (!organizationsResponse.ok || cancelled) return;
+        const organizations = parseOrganizationsResponse(await organizationsResponse.json());
+        const organizationId = organizations?.activeOrganizationId
+          ?? (organizations?.organizations.length === 1 ? organizations.organizations[0]?.id : null);
+        if (!organizationId) return;
+
+        const profileResponse = await fetch(`/api/organizations/${encodeURIComponent(organizationId)}/profile`, {
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        if (!profileResponse.ok || cancelled) return;
+        const profile = profileFromApiResponse(await profileResponse.json());
+        if (profile && !cancelled) applyProfile(profile);
+      } catch {
+        // Profile context is assistive. A content form must remain usable when
+        // the optional organization profile endpoint is unavailable.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [aiasProfile, isProductionMode]);
 
   const parsedBrief = useMemo(
     () =>
@@ -123,6 +196,7 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
         cta: state.cta,
         humanDescription: state.humanDescription,
         allowedFacts: splitAllowedFacts(state.allowedFactsText),
+        forbiddenClaims: state.forbiddenClaims,
         campaignName: state.campaignName,
         offer: state.offer,
         funnelStage: state.funnelStage,
@@ -276,6 +350,12 @@ export function ContentForm({ onSubmit, repository }: ContentFormProps) {
           </div>
         </div>
       </section>
+
+      {aiasSuggestionsLoaded ? (
+        <p className="rounded-xl border border-cyan-200/15 bg-cyan-200/[0.04] px-4 py-3 text-xs leading-5 text-cyan-100">
+          Sugerencias cargadas desde el perfil AIAS. Revísalas antes de generar copy.
+        </p>
+      ) : null}
 
       <section className="rounded-3xl border border-white/[0.08] bg-[#091735] p-5 shadow-2xl shadow-black/10 sm:p-7">
         <div className="mb-6 border-b border-white/10 pb-5">
