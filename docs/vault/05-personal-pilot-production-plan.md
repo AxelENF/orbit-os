@@ -1,7 +1,16 @@
 # Orbit OS by SnapGad — corte de producción para piloto personal
 
 **Estado auditado:** 2026-09-12
-**Objetivo inmediato:** que una campaña real atraviese el sistema sin inventar
+**Superseded parcialmente por ADR-008 (2026-09-12):** este documento se escribió
+bajo el modelo de ADR-005 ("sin publicación autónoma"). Axel confirmó después,
+el mismo día, que el objetivo real es publicación automática con el
+diagnóstico de `lib/aias/publication-diagnosis.ts` como red de seguridad — sólo
+se detiene para revisión humana cuando el diagnóstico marca un hallazgo de
+riesgo. Todo lo de este documento sobre persistencia real, worker, costo y
+smoke tests de Auth/RLS/Storage sigue vigente sin cambios; sólo la sección de
+"publicación" (más abajo) queda desactualizada y no debe seguirse tal cual.
+
+**Objetivo inmediato original (ver corrección arriba):** que una campaña real atraviese el sistema sin inventar
 claims ni publicar sin una decisión humana.
 
 ## Veredicto
@@ -61,12 +70,18 @@ después de que el flujo anterior complete una campaña real de punta a punta.
 - Un activo llega a Storage privado y genera dos alternativas de copy con
   hechos permitidos conservados.
 - El gasto de IA queda acotado e identificable por job.
-- Facebook e Instagram requieren aprobación independiente.
-- Se registra el resultado real, aunque la primera publicación sea manual.
+- Facebook e Instagram se publican automáticamente cuando el diagnóstico no
+  marca hallazgos de riesgo; cuando sí los marca, requieren aprobación
+  humana antes de continuar (ADR-008 — corrige el criterio anterior de
+  "aprobación independiente siempre").
+- Se registra el resultado real de cada publicación, automática o detenida.
 - La suite, tipos, lint y build pasan desde la raíz del repositorio.
 
-## Regla operativa
+## Regla operativa (actualizada por ADR-008, 2026-09-12)
 
-IA propone; una persona aprueba; la plataforma registra. No se automatizan
-presupuesto, promesas comerciales ni publicación sin una confirmación humana
-explícita.
+IA propone; el diagnóstico decide si publica solo o detiene para revisión
+humana; la plataforma registra siempre. No se automatiza el presupuesto ni se
+inventan promesas comerciales — eso lo siguen bloqueando los guardrails de
+claims existentes. Lo que cambia es que la publicación ya no espera una
+confirmación humana explícita por default: sólo la espera cuando el
+diagnóstico encuentra un riesgo real.
