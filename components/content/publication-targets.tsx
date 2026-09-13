@@ -11,11 +11,13 @@ import type {
 type PublicationTargetsProps = {
   targets: PublicationTarget[];
   onApprove: (targetId: string) => Promise<PublicationTarget & { status: "APPROVED" }>;
+  onRetry?: (targetId: string) => Promise<PublicationTarget & { status: "APPROVED" }>;
   onRecordManualDelivery?: (
     targetId: string,
     input: Pick<ManualPublicationDeliveryInput, "remoteUrl" | "publishedAt" | "note" | "idempotencyKey">,
   ) => Promise<PublicationTarget & { status: "PUBLISHED" }>;
   disabled?: boolean;
+  retryDisabled?: boolean;
 };
 
 function statusText(platform: PublicationTarget["platform"], status: PublicationTargetStatus): string {
@@ -35,7 +37,7 @@ function platformLabel(platform: PublicationTarget["platform"]): string {
   return platform === "FACEBOOK" ? "Facebook" : "Instagram";
 }
 
-export function PublicationTargets({ targets, onApprove, onRecordManualDelivery, disabled = false }: PublicationTargetsProps) {
+export function PublicationTargets({ targets, onApprove, onRetry, onRecordManualDelivery, disabled = false, retryDisabled = false }: PublicationTargetsProps) {
   const [pendingTargetId, setPendingTargetId] = useState<string | null>(null);
   const [confirmedTargetIds, setConfirmedTargetIds] = useState<Set<string>>(
     () => new Set(targets.filter((target) => target.status === "APPROVED").map((target) => target.id)),
@@ -49,6 +51,8 @@ export function PublicationTargets({ targets, onApprove, onRecordManualDelivery,
     () => new Set(targets.filter((target) => target.status === "PUBLISHED").map((target) => target.id)),
   );
   const [deliveryRetryKey, setDeliveryRetryKey] = useState<string | null>(null);
+  const [retriedTargetIds, setRetriedTargetIds] = useState<Set<string>>(new Set());
+  const [retryErrorTargetId, setRetryErrorTargetId] = useState<string | null>(null);
 
   async function handleApprove(target: PublicationTarget) {
     if (disabled || target.status === "APPROVED") return;
@@ -91,6 +95,21 @@ export function PublicationTargets({ targets, onApprove, onRecordManualDelivery,
     }
   }
 
+  async function handleRetry(target: PublicationTarget) {
+    if (!onRetry || retryDisabled || target.status !== "ERROR") return;
+    setPendingTargetId(target.id);
+    setRetryErrorTargetId(null);
+    try {
+      const result = await onRetry(target.id);
+      if (result.status !== "APPROVED") throw new Error("RETRY_NOT_CONFIRMED");
+      setRetriedTargetIds((current) => new Set(current).add(target.id));
+    } catch {
+      setRetryErrorTargetId(target.id);
+    } finally {
+      setPendingTargetId(null);
+    }
+  }
+
   return (
     <section className="rounded-2xl border border-white/[0.08] bg-[#0b1429] p-5" aria-labelledby="publication-targets-title">
       <div className="flex flex-col gap-2 border-b border-white/[0.08] pb-4 sm:flex-row sm:items-end sm:justify-between">
@@ -105,7 +124,7 @@ export function PublicationTargets({ targets, onApprove, onRecordManualDelivery,
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           {targets.map((target) => {
             const isDelivered = target.status === "PUBLISHED" || deliveredTargetIds.has(target.id);
-            const isApproved = !isDelivered && (target.status === "APPROVED" || confirmedTargetIds.has(target.id));
+            const isApproved = !isDelivered && (target.status === "APPROVED" || confirmedTargetIds.has(target.id) || retriedTargetIds.has(target.id));
             const isPending = pendingTargetId === target.id;
             return (
               <div key={target.id} className="rounded-xl border border-white/[0.08] bg-[#081127] p-4">
@@ -113,7 +132,7 @@ export function PublicationTargets({ targets, onApprove, onRecordManualDelivery,
                   <p className="text-sm font-semibold text-white">{statusText(target.platform, isApproved ? "APPROVED" : target.status)}</p>
                   <span className={`size-2 rounded-full ${isDelivered || isApproved ? "bg-emerald-300" : "bg-orange-300"}`} aria-hidden="true" />
                 </div>
-                {!isApproved && !isDelivered ? <button
+                {!isApproved && !isDelivered && target.status !== "ERROR" ? <button
                   className="mt-4 inline-flex min-h-10 w-full items-center justify-center rounded-lg border border-orange-200/25 px-3 py-2 text-sm font-semibold text-orange-100 transition hover:bg-orange-200/10 focus:outline-none focus:ring-2 focus:ring-orange-200/50 disabled:cursor-not-allowed disabled:border-emerald-200/20 disabled:text-emerald-200/80"
                   type="button"
                   disabled={disabled || isPending}
@@ -121,7 +140,16 @@ export function PublicationTargets({ targets, onApprove, onRecordManualDelivery,
                 >
                   {isPending ? "Registrando aprobación…" : `Aprobar ${platformLabel(target.platform)}`}
                 </button> : null}
+                {!isApproved && !isDelivered && target.status === "ERROR" && onRetry ? <button
+                  className="mt-4 inline-flex min-h-10 w-full items-center justify-center rounded-lg border border-orange-200/25 px-3 py-2 text-sm font-semibold text-orange-100 transition hover:bg-orange-200/10 focus:outline-none focus:ring-2 focus:ring-orange-200/50 disabled:cursor-not-allowed disabled:opacity-50"
+                  type="button"
+                  disabled={retryDisabled || isPending}
+                  onClick={() => void handleRetry(target)}
+                >
+                  {isPending ? "Reintentando publicación…" : "Reintentar"}
+                </button> : null}
                 {approvalErrorTargetId === target.id ? <p className="mt-3 text-xs leading-5 text-orange-100" role="alert">No se pudo registrar la aprobación de {platformLabel(target.platform)}. Inténtalo de nuevo.</p> : null}
+                {retryErrorTargetId === target.id ? <p className="mt-3 text-xs leading-5 text-orange-100" role="alert">No se pudo reintentar la publicación de {platformLabel(target.platform)}. Inténtalo de nuevo.</p> : null}
                 {isApproved && onRecordManualDelivery ? <div className="mt-4 border-t border-white/[0.08] pt-4">
                   {deliveryTargetId === target.id ? <>
                     <label className="block text-xs font-semibold text-slate-200" htmlFor={`delivery-url-${target.id}`}>URL publicada

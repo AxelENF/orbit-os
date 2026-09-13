@@ -926,6 +926,34 @@ class SupabaseContentRepository
     return { ...target, status: "APPROVED" };
   }
 
+  async retryPublicationTarget(
+    contentItemId: string,
+    publicationTargetId: string,
+  ): Promise<PublicationTarget & { status: "APPROVED" }> {
+    const { data, error } = await this.client.rpc("retry_publish_target", {
+      p_organization_id: this.organization.organizationId,
+      p_actor_id: this.organization.userId,
+      p_publication_target_id: publicationTargetId,
+    });
+
+    if (error) {
+      if (
+        error.message === "RETRY_TARGET_NOT_FOUND" ||
+        error.message === "RETRY_TARGET_NOT_IN_ERROR" ||
+        error.message === "ORGANIZATION_ACTOR_FORBIDDEN"
+      ) {
+        throw new PublishTargetConflictError();
+      }
+      throw new Error("Unable to retry the publication target.");
+    }
+
+    const target = toPublicationTargets([data])[0];
+    if (!target || target.contentItemId !== contentItemId || target.status !== "APPROVED") {
+      throw new PublishTargetConflictError();
+    }
+    return { ...target, status: "APPROVED" };
+  }
+
   async recordManualPublicationDelivery(
     input: ManualPublicationDeliveryInput,
   ): Promise<PublicationTarget & { status: "PUBLISHED" }> {

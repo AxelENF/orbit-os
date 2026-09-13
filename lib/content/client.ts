@@ -60,6 +60,18 @@ export async function approveContentTarget(
   return payload.target;
 }
 
+export async function retryContentTarget(
+  contentItemId: string,
+  targetId: string,
+): Promise<PublicationTarget> {
+  const response = await fetch(
+    `/api/content/${contentItemId}/targets/${targetId}/retry`,
+    { method: "POST", credentials: "same-origin" },
+  );
+  const payload = await readJson<{ target: PublicationTarget }>(response);
+  return payload.target;
+}
+
 export async function recordManualPublicationDelivery(
   input: ManualPublicationDeliveryInput,
 ): Promise<PublicationTarget> {

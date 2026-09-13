@@ -361,6 +361,23 @@ export class DemoContentRepository
     return { ...approved, status: "APPROVED" };
   }
 
+  async retryPublicationTarget(
+    contentItemId: string,
+    publicationTargetId: string,
+  ): Promise<PublicationTarget & { status: "APPROVED" }> {
+    const targets = this.targetsByContentItem.get(contentItemId);
+    const target = targets?.find((candidate) => candidate.id === publicationTargetId);
+    if (!target || target.status !== "ERROR") throw new PublishTargetConflictError();
+
+    const retried: PublicationTarget = { ...target, status: "APPROVED" };
+    delete retried.lastError;
+    this.targetsByContentItem.set(
+      contentItemId,
+      targets!.map((candidate) => candidate.id === publicationTargetId ? retried : candidate),
+    );
+    return { ...retried, status: "APPROVED" };
+  }
+
   async recordManualPublicationDelivery(
     input: ManualPublicationDeliveryInput,
   ): Promise<PublicationTarget & { status: "PUBLISHED" }> {

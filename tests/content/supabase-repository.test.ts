@@ -411,6 +411,31 @@ describe("SupabaseContentRepository", () => {
     });
   });
 
+  it("retries an error target through the authenticated organization actor", async () => {
+    const targetRow = {
+      id: "8ab76cc5-f59a-48ed-8bc8-186cc7007533",
+      content_item_id: createdRow.id,
+      platform: "FACEBOOK",
+      status: "APPROVED",
+      remote_post_id: null,
+      remote_url: null,
+      published_at: null,
+      last_error: null,
+      updated_at: "2026-09-02T18:02:00.000Z",
+    };
+    const rpc = vi.fn().mockResolvedValue({ data: targetRow, error: null });
+    const repository = createSupabaseRepository({ rpc } as never, organizationA);
+
+    await expect(
+      repository.retryPublicationTarget(createdRow.id, targetRow.id),
+    ).resolves.toMatchObject({ id: targetRow.id, contentItemId: createdRow.id, status: "APPROVED" });
+    expect(rpc).toHaveBeenCalledWith("retry_publish_target", {
+      p_organization_id: organizationA.organizationId,
+      p_actor_id: organizationA.userId,
+      p_publication_target_id: targetRow.id,
+    });
+  });
+
   it("enqueues a copy job atomically in the trusted organization", async () => {
     const jobId = "d32c92ce-9e2b-4aa2-9c39-5c5d97746156";
     const idempotencyKey = "4a150496-852d-46d4-8f25-951f6512db73";

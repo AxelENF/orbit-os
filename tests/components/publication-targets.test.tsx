@@ -66,6 +66,24 @@ describe("PublicationTargets", () => {
     expect(screen.getByRole("button", { name: "Aprobar Facebook" })).toBeEnabled();
   });
 
+  it("offers retry only for an errored target and marks it approved after success", async () => {
+    const erroredTargets: PublicationTarget[] = [{
+      ...pendingTargets[0],
+      status: "ERROR",
+      lastError: "Meta token expired",
+    }];
+    const onRetry = vi.fn().mockResolvedValue({ ...erroredTargets[0], status: "APPROVED" });
+
+    render(<PublicationTargets targets={erroredTargets} onApprove={vi.fn()} onRetry={onRetry} />);
+
+    expect(screen.getByRole("button", { name: "Reintentar" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Aprobar Facebook" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reintentar" }));
+
+    expect(onRetry).toHaveBeenCalledWith("facebook-target-id");
+    expect(await screen.findByText("Facebook: aprobado")).toBeInTheDocument();
+  });
+
   it("explains an empty target list without creating an approval", () => {
     render(<PublicationTargets targets={[]} onApprove={vi.fn()} />);
 

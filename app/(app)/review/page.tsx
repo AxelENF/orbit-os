@@ -9,7 +9,7 @@ import {
   readDemoDrafts,
   type DemoDraftRecord,
 } from "@/lib/demo/draft-store";
-import { approveContentTarget, getContentRecord, listContentItems } from "@/lib/content/client";
+import { approveContentTarget, getContentRecord, listContentItems, retryContentTarget } from "@/lib/content/client";
 import type { ContentRecord } from "@/lib/content/repository";
 import { hasSupabaseBrowserConfig } from "@/lib/supabase/client";
 
@@ -61,6 +61,17 @@ export default function ReviewPage() {
     return { ...approvedTarget, status: "APPROVED" as const };
   }
 
+  async function handleProductionRetry(contentItemId: string, targetId: string) {
+    const retriedTarget = await retryContentTarget(contentItemId, targetId);
+    const refreshed = await getContentRecord(contentItemId);
+    setProductionRecords((current) => current.map((candidate) => candidate.content.id === contentItemId ? refreshed : candidate));
+    return { ...retriedTarget, status: "APPROVED" as const };
+  }
+
+  function hasActionableTarget(record: ContentRecord): boolean {
+    return record.targets.some((target) => target.status === "PENDING_REVIEW" || target.status === "ERROR");
+  }
+
   const pendingRecords = records.filter((record) =>
     record.targets.some((target) => target.status === "PENDING_REVIEW"),
   );
@@ -82,7 +93,7 @@ export default function ReviewPage() {
 
       {!isLoading && isProductionMode ? (
         <section className="mt-8 space-y-5">
-          {productionRecords.filter((record) => record.targets.some((target) => target.status === "PENDING_REVIEW")).map((record) => {
+          {productionRecords.filter(hasActionableTarget).map((record) => {
             const latestDraft = record.drafts.at(-1);
             return (
               <article key={record.content.id} className="rounded-3xl border border-white/[0.08] bg-[#0b1429] p-5 sm:p-6">
@@ -91,13 +102,19 @@ export default function ReviewPage() {
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">{latestDraft?.body ?? "Solicita el análisis a n8n desde el borrador antes de aprobar un destino."}</p>
                 {latestDraft ? <p className="mt-3 text-xs text-cyan-100/75">CTA: {latestDraft.cta}</p> : null}
                 <div className="mt-5">
-                  <PublicationTargets targets={record.targets} disabled={!latestDraft || record.content.state !== "REVIEW"} onApprove={(targetId) => handleProductionApprove(record.content.id, targetId)} />
+                  <PublicationTargets
+                    targets={record.targets}
+                    disabled={!latestDraft || record.content.state !== "REVIEW"}
+                    retryDisabled={!latestDraft}
+                    onApprove={(targetId) => handleProductionApprove(record.content.id, targetId)}
+                    onRetry={(targetId) => handleProductionRetry(record.content.id, targetId)}
+                  />
                 </div>
                 <p className="mt-4 rounded-xl border border-orange-200/15 bg-orange-200/[0.035] p-4 text-xs leading-5 text-slate-400">La aprobación se registra en Supabase por destino. Publicar sigue requiriendo una orden separada y no se ejecuta aquí.</p>
               </article>
             );
           })}
-          {productionRecords.every((record) => !record.targets.some((target) => target.status === "PENDING_REVIEW")) ? (
+          {productionRecords.every((record) => !hasActionableTarget(record)) ? (
             <section className="rounded-3xl border border-dashed border-cyan-200/20 bg-cyan-200/[0.025] px-6 py-14 text-center sm:px-10"><p className="font-mono text-[0.65rem] uppercase tracking-[0.22em] text-cyan-200/75">Nada pendiente</p><h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">La cola real está vacía.</h2><p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-slate-400">Cuando un copy llegue a revisión, sus destinos aparecerán aquí de forma independiente.</p></section>
           ) : null}
         </section>

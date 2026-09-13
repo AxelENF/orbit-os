@@ -9,11 +9,32 @@ import {
   type OrganizationOption,
 } from "@/components/aias/organization-switcher";
 import { AiasProfileForm } from "@/components/aias/profile-form";
+import { canManageConnections } from "@/lib/organizations/permissions";
 import { hasSupabaseBrowserConfig } from "@/lib/supabase/client";
 
 type OrganizationsResponse = {
   organizations: OrganizationOption[];
   activeOrganizationId: string | null;
+};
+
+type MetaConnectionStatusCode = "NOT_CONNECTED" | "ACTIVE" | "REVOKED" | "ERROR";
+
+type MetaConnectionStatus = {
+  status: MetaConnectionStatusCode;
+  facebookPageName?: string;
+  hasInstagram: boolean;
+};
+
+type MetaConnectionState = {
+  status: MetaConnectionStatus;
+  isLoading?: boolean;
+  isDisconnecting?: boolean;
+  error?: boolean;
+};
+
+const disconnectedMetaStatus: MetaConnectionStatus = {
+  status: "NOT_CONNECTED",
+  hasInstagram: false,
 };
 
 const roleLabels: Record<OrganizationOption["role"], string> = {
@@ -31,11 +52,44 @@ async function loadOrganizations(): Promise<OrganizationsResponse> {
   return payload;
 }
 
+function parseMetaConnectionStatus(value: unknown): MetaConnectionStatus | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as {
+    status?: unknown;
+    facebookPageName?: unknown;
+    hasInstagram?: unknown;
+  };
+  if (
+    candidate.status !== "NOT_CONNECTED" &&
+    candidate.status !== "ACTIVE" &&
+    candidate.status !== "REVOKED" &&
+    candidate.status !== "ERROR"
+  ) return null;
+  return {
+    status: candidate.status,
+    ...(typeof candidate.facebookPageName === "string" ? { facebookPageName: candidate.facebookPageName } : {}),
+    hasInstagram: candidate.hasInstagram === true,
+  };
+}
+
+async function loadMetaConnectionStatus(organizationId: string): Promise<MetaConnectionStatus> {
+  const response = await fetch(
+    `/api/integrations/meta/status?organizationId=${encodeURIComponent(organizationId)}`,
+    { cache: "no-store", credentials: "same-origin" },
+  );
+  if (!response.ok) throw new Error("META_STATUS_LOOKUP_FAILED");
+  const status = parseMetaConnectionStatus(await response.json());
+  if (!status) throw new Error("INVALID_META_STATUS_RESPONSE");
+  return status;
+}
+
 export default function OrganizationsSettingsPage() {
   const [organizations, setOrganizations] = useState<OrganizationOption[]>([]);
   const [activeOrganizationId, setActiveOrganizationId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [metaConnectionStates, setMetaConnectionStates] = useState<Record<string, MetaConnectionState>>({});
+  const isProductionMode = hasSupabaseBrowserConfig();
 
   useEffect(() => {
     let cancelled = false;
@@ -56,6 +110,65 @@ export default function OrganizationsSettingsPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!isProductionMode || organizations.length === 0) return () => {
+      cancelled = true;
+    };
+
+    Promise.all(
+      organizations.map(async (organization): Promise<[string, MetaConnectionState]> => {
+        try {
+          return [organization.id, { status: await loadMetaConnectionStatus(organization.id) }];
+        } catch {
+          return [organization.id, { status: disconnectedMetaStatus, error: true }];
+        }
+      }),
+    ).then((entries) => {
+      if (!cancelled) setMetaConnectionStates(Object.fromEntries(entries));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isProductionMode, organizations]);
+
+  async function handleDisconnect(organizationId: string) {
+    setMetaConnectionStates((current) => ({
+      ...current,
+      [organizationId]: {
+        ...(current[organizationId] ?? { status: disconnectedMetaStatus }),
+        isDisconnecting: true,
+        error: undefined,
+      },
+    }));
+
+    try {
+      const response = await fetch("/api/integrations/meta/disconnect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ organizationId }),
+      });
+      if (!response.ok) throw new Error("META_DISCONNECT_FAILED");
+      const status = await loadMetaConnectionStatus(organizationId);
+      setMetaConnectionStates((current) => ({
+        ...current,
+        [organizationId]: { status },
+      }));
+    } catch {
+      setMetaConnectionStates((current) => ({
+        ...current,
+        [organizationId]: {
+          ...(current[organizationId] ?? { status: disconnectedMetaStatus }),
+          isDisconnecting: false,
+          error: true,
+        },
+      }));
+    }
+  }
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -141,6 +254,12 @@ export default function OrganizationsSettingsPage() {
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             {organizations.map((organization) => {
               const isActive = organization.id === activeOrganizationId;
+              const connection = metaConnectionStates[organization.id] ?? {
+                status: disconnectedMetaStatus,
+                isLoading: isProductionMode,
+              };
+              const isConnected = connection.status.status === "ACTIVE";
+              const isConnectionError = connection.status.status === "ERROR";
               return (
                 <article
                   key={organization.id}
@@ -168,6 +287,20 @@ export default function OrganizationsSettingsPage() {
                   <p className="mt-5 border-t border-white/[0.08] pt-4 text-xs leading-5 text-slate-500">
                     Los cambios de perfil y publicación respetan este espacio de trabajo.
                   </p>
+                  <div className="mt-4 border-t border-white/[0.08] pt-4" aria-label={`Conexión Meta de ${organization.name}`}>
+                    <p className="font-mono text-[0.6rem] uppercase tracking-[0.16em] text-[#A8C7FF]/70">Meta</p>
+                    {connection.isLoading ? <p className="mt-2 text-sm text-slate-400">Consultando conexión…</p> : null}
+                    {!connection.isLoading && connection.error ? <p className="mt-2 text-sm text-orange-100">No se pudo consultar la conexión.</p> : null}
+                    {!connection.isLoading && !connection.error && isConnectionError ? <p className="mt-2 text-sm text-orange-100">Conexión con error</p> : null}
+                    {!connection.isLoading && !connection.error && isConnected ? <p className="mt-2 text-sm text-emerald-100">Conectado como {connection.status.facebookPageName ?? "página de Facebook"}</p> : null}
+                    {!connection.isLoading && !connection.error && !isConnected && !isConnectionError ? <p className="mt-2 text-sm text-slate-300">No conectado</p> : null}
+                    {!connection.isLoading && !connection.error ? <p className="mt-2 flex items-center gap-2 text-xs text-slate-400"><span className={`size-2 rounded-full ${connection.status.hasInstagram ? "bg-emerald-300" : "bg-slate-600"}`} aria-hidden="true" /> <span aria-label={connection.status.hasInstagram ? "Instagram conectado" : "Instagram no conectado"}>Instagram: {connection.status.hasInstagram ? "conectado" : "no conectado"}</span></p> : null}
+                    {canManageConnections(organization.role) ? <div className="mt-4 flex flex-wrap gap-2">
+                      {isConnectionError ? <Link href={`/api/integrations/meta/connect?organizationId=${organization.id}`} className="inline-flex min-h-10 items-center justify-center rounded-lg bg-orange-300 px-3 py-2 text-xs font-bold text-[#17110a]">Reconectar</Link> : null}
+                      {!isConnected && !isConnectionError ? <Link href={`/api/integrations/meta/connect?organizationId=${organization.id}`} className="inline-flex min-h-10 items-center justify-center rounded-lg bg-orange-300 px-3 py-2 text-xs font-bold text-[#17110a]">Conectar Facebook</Link> : null}
+                      {isConnected || isConnectionError ? <button type="button" onClick={() => void handleDisconnect(organization.id)} disabled={connection.isDisconnecting} className="inline-flex min-h-10 items-center justify-center rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-50">{connection.isDisconnecting ? "Desconectando…" : "Desconectar"}</button> : null}
+                    </div> : null}
+                  </div>
                 </article>
               );
             })}

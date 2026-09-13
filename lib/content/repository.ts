@@ -319,6 +319,10 @@ export interface ContentRepository
     contentItemId: string,
     publicationTargetId: string,
   ): Promise<PublicationTarget & { status: "APPROVED" }>;
+  retryPublicationTarget(
+    contentItemId: string,
+    publicationTargetId: string,
+  ): Promise<PublicationTarget & { status: "APPROVED" }>;
   recordManualPublicationDelivery(
     input: ManualPublicationDeliveryInput,
   ): Promise<PublicationTarget & { status: "PUBLISHED" }>;
