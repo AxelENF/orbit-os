@@ -1,6 +1,7 @@
 # Meta publisher real: OAuth + adaptador Graph API — diseño
 
-**Fecha:** 2026-09-13 (revisión 3, tras dos rondas de revisión con Codex CLI)
+**Fecha:** 2026-09-13 (revisión 4 — tres rondas de revisión con Codex CLI
+más una corrección manual final; lista para revisión humana)
 **Estado:** Borrador para revisión
 **Roadmap:** Item 1 de `docs/vault/06-marketing-automation-handoff.md` (bloqueador de los items 2-4)
 **Decisión de producto asumida:** ADR-008 (`docs/vault/02-decisions.md`) — publicación automática con el diagnóstico determinista como red de seguridad.
@@ -20,18 +21,25 @@ Este documento diseña el publisher real: conexión OAuth de Meta por
 organización y un adaptador que publica de verdad en Facebook e Instagram,
 gateado por el diagnóstico de ADR-008.
 
-**Historial de revisión:** este spec pasó por dos rondas de revisión con
+**Historial de revisión:** este spec pasó por tres rondas de revisión con
 Codex CLI en modo solo-lectura, verificando cada afirmación contra el
-código real, no solo la consistencia del texto. La ronda 1 encontró 8
-problemas (modelo de assets, preflight, despacho del worker, ciclo de vida
-de jobs, contrato de finalización, predicado de diagnóstico, sesión OAuth,
-bug de `approve_publication_target`). La ronda 2 verificó esas 8
-correcciones y encontró que la mayoría estaban solo parcialmente resueltas,
-más 8 problemas nuevos introducidos por los propios arreglos. Esta versión
-(revisión 3) corrige todo lo anterior. Por la disciplina de este proyecto
-(máximo 3 rondas automatizadas antes de escalar a revisión humana), esta es
-la última ronda antes de pedirle a Axel que revise el documento él mismo,
-sea cual sea el resultado de la tercera pasada por Codex.
+código real, no solo la consistencia del texto. Ronda 1: 8 problemas
+(modelo de assets, preflight, despacho del worker, ciclo de vida de jobs,
+contrato de finalización, predicado de diagnóstico, sesión OAuth, bug de
+`approve_publication_target`). Ronda 2: la mayoría de esas correcciones
+estaban solo parcialmente resueltas, más 8 problemas nuevos introducidos
+por los propios arreglos (integridad de tenant en la tabla nueva, CSRF real
+en OAuth, conexión por plataforma, bug de conteo agregado, mismatch de rol,
+entre otros). Ronda 3 (última automatizada por política del proyecto — 3
+rondas máximo): 6 de 8 correcciones verificadas como completas, 2
+parciales, y 3 problemas nuevos (invariante de portada no aplicaba al
+camino de creación sin asset, faltaba dropear el `check` viejo de
+`automation_jobs.kind`, orden de locks inconsistente con
+`approve_publication_target` con riesgo real de deadlock, más ausencia de
+un camino de reintento tras un fallo terminal). Esta versión (revisión 4)
+corrige esos 5 puntos restantes a mano, sin una cuarta ronda de Codex — a
+partir de aquí, la revisión que sigue es la de Axel, no otra pasada
+automatizada.
 
 ### Alternativa considerada y descartada: Postiz
 
@@ -105,11 +113,23 @@ Esto hace imposible a nivel de base de datos que una fila mezcle
 `unique (content_item_id, position)` y `unique (content_item_id, asset_id)`
 se mantienen. RLS: mismos lectores que `assets`/`content_items`.
 
-**Invariante "siempre existe una portada":** no es expresable como un
-`check` de fila (es una propiedad de conjunto). Se garantiza
-procedimentalmente: la función de intake inserta el `content_item` y su
-fila `content_item_assets` en `position = 0` **en la misma transacción**;
-no existe ningún camino que cree un `content_item` sin su portada.
+**Invariante "siempre existe una portada" — alcance real (corregido en
+revisión 4):** no aplica a *todo* `content_item`. `create_content_item_with_targets`
+(vía `createContentItem` en `lib/supabase/repository.ts`) crea
+deliberadamente un content item sin asset — es el primer paso de un flujo
+de "crear el brief, subir la imagen después", ya usado y probado hoy. Este
+spec no lo toca ni le exige una portada inmediata. La garantía real que
+importa ya existe de forma independiente: `enqueue_copy_automation_job`
+(migración `0010`) rechaza encolar generación de copy si
+`item.asset_id is null` (`COPY_JOB_ASSET_REQUIRED`) — un content item sin
+asset nunca puede avanzar a `GENERATING`/`REVIEW`, y por lo tanto nunca
+llega al punto donde el diagnóstico o la publicación lo tocan. La
+invariante de este spec se acota entonces a: *todo content item que llega
+a tener copy final sometido tiene, en ese momento, al menos una fila en
+`content_item_assets` en `position = 0`* — garantizado porque
+`create_content_item_with_asset_in_organization` (el único camino que sí
+asigna un `asset_id`, usado por `POST /api/content`) inserta esa fila en la
+misma transacción, tal como se describe abajo.
 
 **Backfill:** la migración `0018` incluye, tras crear la tabla:
 ```sql
@@ -144,7 +164,14 @@ Storage. Si cualquiera falla, no se sube nada. Esto evita el problema de
 
 **Límite de tamaño del request:** hoy `MAX_MULTIPART_BYTES = MAX_ASSET_BYTES + 64_000`
 asume un solo archivo. Cambia a `MAX_ASSET_BYTES * 10 + 640_000` (10
-archivos al tamaño máximo más el overhead proporcional de multipart).
+archivos al tamaño máximo más el overhead proporcional de multipart) — unos
+~210 MB en el peor caso. La ruta actual ya bufferea todo el `request.formData()`
+en memoria antes de procesar (no hace streaming), así que 10 archivos de 20
+MB simultáneos sí pueden acercarse a varios cientos de MB de uso de
+memoria del proceso. Se acepta explícitamente para v1: está dentro de los
+límites de memoria normales de una función serverless (Vercel: 1-3 GB según
+plan), y reducir el máximo de 10 imágenes sería arbitrario dado que 10 es
+el límite real del carrusel de Meta, no una elección nuestra.
 
 Una vez validados: se sube cada uno a Storage, se crea su fila en `assets`,
 se crea el `content_item` con `asset_id` = el de `position = 0`, y se
@@ -304,7 +331,17 @@ bajo, evento raro).
 
 ### `automation_jobs` — columnas y kind nuevos
 
-Se reemplaza `check (kind = 'COPY')` por `check (kind in ('COPY', 'PUBLISH'))`.
+`0010_automation_jobs.sql` declara `kind text not null check (kind = 'COPY')`
+como restricción **inline sin nombre explícito** — Postgres la nombra
+automáticamente `automation_jobs_kind_check`. La migración `0018` debe
+**dropearla por ese nombre antes de agregar la nueva** (revisión 3 de
+Codex: si no se dropea la vieja, todo `insert` con `kind = 'PUBLISH'`
+sigue fallando):
+```sql
+alter table public.automation_jobs drop constraint if exists automation_jobs_kind_check;
+alter table public.automation_jobs add constraint automation_jobs_kind_check
+  check (kind in ('COPY', 'PUBLISH'));
+```
 
 **Nuevo (hallazgo de revisión 2):** `automation_jobs` solo tenía
 `content_item_id` — no distingue Facebook de Instagram para el mismo
@@ -363,17 +400,46 @@ código base):
 
 ### Contrato atómico de `complete_publish_automation_job`
 
-Orden de locks: `automation_jobs` (por idempotency key) → `publication_targets`
-→ `content_items` — mismo orden que ya usan las funciones existentes.
+**Orden de locks (corregido en revisión 4):** la ronda 3 de Codex encontró
+que la versión anterior (`job → target → item`) no coincide con el orden
+que ya usan `record_manual_publication_delivery` y `approve_publication_target`
+(`item → target`), lo que puede producir un deadlock real entre una
+aprobación manual concurrente y la finalización automática del mismo
+content item. Se unifica al orden ya establecido: `automation_jobs` (por
+idempotency key) → `content_items` → `publication_targets`. El job nunca
+es contendido por ninguna otra función (solo el worker lo toca), así que
+su posición en el orden no genera conflicto — lo que importa es que
+`content_items` siempre se bloquea antes que `publication_targets` en
+*cualquier* función que toque ambos, y ahora es consistente en las tres.
+
 `p_result` shape: `{ remotePostId: text, remoteUrl: text, publishedAt: timestamptz }`.
 En una transacción:
-1. Verifica lease.
-2. `publication_targets`: `status = 'PUBLISHED'`, `remote_post_id`,
-   `remote_url`, `published_at = p_result.publishedAt`, `last_error = null`.
-3. `audit_events` `TARGET_PUBLISHED` (`platform`, `source: 'automated'`, `jobId`).
-4. Recalcula agregado de `content_items` (mismo patrón que
+1. Verifica lease del job.
+2. Bloquea `content_items` (`for update`).
+3. Bloquea y actualiza `publication_targets`: `status = 'PUBLISHED'`,
+   `remote_post_id`, `remote_url`, `published_at = p_result.publishedAt`,
+   `last_error = null`.
+4. `audit_events` `TARGET_PUBLISHED` (`platform`, `source: 'automated'`, `jobId`).
+5. Recalcula agregado de `content_items` (mismo patrón que
    `record_manual_publication_delivery`: todos `PUBLISHED` → `content_items.state = 'PUBLISHED'`).
-5. Marca el job `COMPLETED`.
+6. Marca el job `COMPLETED`.
+
+### Reintentar un target fallido
+
+La ronda 3 de Codex notó que un target que termina en `ERROR` (token
+inválido, contenido rechazado, timeout ambiguo) no tiene camino de vuelta:
+la idempotency key del job es determinística por `publication_target_id`,
+así que simplemente volver a llamar `enqueue_publish_automation_job` solo
+devolvería el job ya `FAILED`/`DEAD_LETTER` existente, no crea uno nuevo.
+Se agrega `retry_publish_target(p_organization_id, p_actor_id,
+p_publication_target_id)` (`service_role`-only, invocada desde una acción
+explícita "Reintentar" en la UI, rol `owner`/`editor`): valida que el
+target esté en `ERROR`, lo regresa a `APPROVED` (ya pasó el diagnóstico o
+la aprobación humana antes; reconectar Meta o corregir el asset no
+invalida esa aprobación), y encola un job nuevo con una idempotency key que
+incorpora un contador de intento (`gen_random_uuid()`, no determinística
+por target — a diferencia del encolado automático, un reintento explícito
+de un humano *debe* poder crear un job nuevo cada vez que se invoca).
 
 ## Despacho del worker (COPY vs. PUBLISH)
 
