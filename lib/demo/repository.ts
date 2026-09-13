@@ -297,6 +297,14 @@ export class DemoContentRepository
     return structuredClone(finalCopy);
   }
 
+  async applyPublicationDiagnosisForContentItem(
+    contentItemId: string,
+    finalCopy: FinalCopy,
+  ): Promise<void> {
+    void contentItemId;
+    void finalCopy;
+  }
+
   async approvePublicationTarget(
     contentItemId: string,
     publicationTargetId: string,

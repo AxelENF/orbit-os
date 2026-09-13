@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import "server-only";
 
@@ -8,6 +8,8 @@ import { z } from "zod";
 import { contentBriefSchema } from "@/lib/content/contracts";
 import { buildCampaignCode, campaignBriefSchema } from "@/lib/content/campaign";
 import { validateFinalCopy } from "@/lib/content/final-copy";
+import { aiasOrganizationProfileSchema, type AiasPlatform } from "@/lib/aias/contracts";
+import { diagnosePublication } from "@/lib/aias/publication-diagnosis";
 import {
   CopyResultConflictError,
   type CopyRequestPreparation,
@@ -47,6 +49,10 @@ import type {
   CopyJobEnqueue,
   CopyJobWorkerRepository,
 } from "@/lib/automation/jobs";
+
+function createId(): string {
+  return randomUUID();
+}
 
 const contentItemRowSchema = z.object({
   id: z.string().uuid(),
@@ -855,6 +861,40 @@ class SupabaseContentRepository
       throw new Error("Unable to submit final copy for review.");
     }
     return toFinalCopy(data);
+  }
+
+  async applyPublicationDiagnosisForContentItem(contentItemId: string, finalCopy: FinalCopy): Promise<void> {
+    const { data: brandProfile, error: brandProfileError } = await this.client
+      .from("organization_brand_profiles")
+      .select("aias_profile")
+      .eq("organization_id", this.organization.organizationId)
+      .maybeSingle();
+    if (brandProfileError) throw new Error("Unable to read the organization's AIAS profile.");
+    const organizationProfile = aiasOrganizationProfileSchema.parse(brandProfile?.aias_profile ?? {});
+    const signal = [finalCopy.headline, finalCopy.body, finalCopy.cta, ...finalCopy.hashtags].join(" ");
+
+    const { data: targets, error: targetsError } = await this.client
+      .from("publication_targets")
+      .select("id, platform")
+      .eq("content_item_id", contentItemId);
+    if (targetsError) throw new Error("Unable to read publication targets for diagnosis.");
+
+    for (const target of targets ?? []) {
+      const diagnosis = diagnosePublication({
+        profile: organizationProfile,
+        signal,
+        channel: target.platform.toLowerCase() as AiasPlatform,
+      });
+      const { error: diagnosisError } = await this.client.rpc("apply_publication_diagnosis", {
+        p_organization_id: this.organization.organizationId,
+        p_content_item_id: contentItemId,
+        p_publication_target_id: target.id,
+        p_quality_level: diagnosis.qualityLevel,
+        p_findings: diagnosis.findings,
+        p_idempotency_key: createId(),
+      });
+      if (diagnosisError) throw new Error(`Unable to apply publication diagnosis for target ${target.id}.`);
+    }
   }
 
   async approvePublicationTarget(

@@ -79,6 +79,196 @@ describe("POST /api/content/[id]/final-copy", () => {
     );
   });
 
+  it("calls repository.applyPublicationDiagnosisForContentItem once after successful submission", async () => {
+    const repository = createDemoRepository();
+    const item = await repository.createContentItem(campaign);
+    const submitFinalCopyForReview = vi.spyOn(repository, "submitFinalCopyForReview");
+    const applyPublicationDiagnosisForContentItem = vi.spyOn(
+      repository,
+      "applyPublicationDiagnosisForContentItem",
+    );
+    const handler = createFinalCopySubmissionHandler({
+      getRepository: async () => repository,
+    });
+
+    const response = await handler(
+      new Request("http://localhost/api/content/final-copy", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          headline: "Tu WhatsApp también puede agendar",
+          body: "El bot puede atender, calificar y agendar citas.",
+          cta: "Escribe AGENDA por WhatsApp",
+          hashtags: ["#AutomatizacionWhatsApp"],
+        }),
+      }),
+      { params: Promise.resolve({ id: item.id }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(applyPublicationDiagnosisForContentItem).toHaveBeenCalledTimes(1);
+    expect(applyPublicationDiagnosisForContentItem.mock.invocationCallOrder[0]).toBeGreaterThan(
+      submitFinalCopyForReview.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("passes the final copy signal fields to the injected diagnosis repository method", async () => {
+    const repository = createDemoRepository();
+    const item = await repository.createContentItem(campaign);
+    const applyPublicationDiagnosisForContentItem = vi.spyOn(
+      repository,
+      "applyPublicationDiagnosisForContentItem",
+    );
+    const handler = createFinalCopySubmissionHandler({
+      getRepository: async () => repository,
+    });
+
+    const response = await handler(
+      new Request("http://localhost/api/content/final-copy", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          headline: "Titular final verificable",
+          body: "Cuerpo final verificable.",
+          cta: "Escribe AGENDA por WhatsApp",
+          hashtags: ["#FinalUno", "#FinalDos"],
+        }),
+      }),
+      { params: Promise.resolve({ id: item.id }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(applyPublicationDiagnosisForContentItem).toHaveBeenCalledWith(
+      item.id,
+      expect.objectContaining({
+        headline: "Titular final verificable",
+        body: "Cuerpo final verificable.",
+        cta: "Escribe AGENDA por WhatsApp",
+        hashtags: ["#FinalUno", "#FinalDos"],
+      }),
+    );
+    expect(applyPublicationDiagnosisForContentItem.mock.calls[0]?.[1]).not.toHaveProperty(
+      "humanDescription",
+    );
+  });
+
+  it("returns conflict without diagnosis when repository final copy validation fails", async () => {
+    const repository = createDemoRepository();
+    const item = await repository.createContentItem(campaign);
+    const submitFinalCopyForReview = vi.spyOn(repository, "submitFinalCopyForReview");
+    const applyPublicationDiagnosisForContentItem = vi.spyOn(
+      repository,
+      "applyPublicationDiagnosisForContentItem",
+    );
+    const handler = createFinalCopySubmissionHandler({
+      getRepository: async () => repository,
+    });
+
+    const response = await handler(
+      new Request("http://localhost/api/content/final-copy", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          headline: "Duplica ventas hoy",
+          body: "Sin explicación.",
+          cta: "Escribe AGENDA",
+        }),
+      }),
+      { params: Promise.resolve({ id: item.id }) },
+    );
+
+    expect(response.status).toBe(409);
+    expect(submitFinalCopyForReview).toHaveBeenCalledTimes(1);
+    expect(applyPublicationDiagnosisForContentItem).not.toHaveBeenCalled();
+  });
+
+  it("logs a diagnosis failure and still returns 201 after the final copy was saved", async () => {
+    const repository = createDemoRepository();
+    const item = await repository.createContentItem(campaign);
+    vi.spyOn(repository, "applyPublicationDiagnosisForContentItem").mockRejectedValue(
+      new Error("diagnosis unavailable"),
+    );
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const handler = createFinalCopySubmissionHandler({
+      getRepository: async () => repository,
+    });
+
+    try {
+      const response = await handler(
+        new Request("http://localhost/api/content/final-copy", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            headline: "Tu WhatsApp también puede agendar",
+            body: "El bot puede atender, calificar y agendar citas.",
+            cta: "Escribe AGENDA por WhatsApp",
+          }),
+        }),
+        { params: Promise.resolve({ id: item.id }) },
+      );
+
+      expect(response.status).toBe(201);
+      await expect(response.json()).resolves.toMatchObject({
+        finalCopy: { contentItemId: item.id, version: 1 },
+      });
+      expect(consoleError).toHaveBeenCalledWith(
+        JSON.stringify({
+          message: "publication diagnosis failed",
+          contentItemId: item.id,
+          error: "Error: diagnosis unavailable",
+        }),
+      );
+      expect((await repository.getContentRecord(item.id))?.content.state).toBe("REVIEW");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it.each([
+    [
+      "publication_targets",
+      new Error("Unable to read publication targets for diagnosis."),
+    ],
+    [
+      "RPC apply_publication_diagnosis",
+      new Error("Unable to apply publication diagnosis for target target-id."),
+    ],
+  ])("logs a propagated Supabase %s diagnosis error without changing the 201 boundary", async (_source, error) => {
+    const repository = createDemoRepository();
+    const item = await repository.createContentItem(campaign);
+    vi.spyOn(repository, "applyPublicationDiagnosisForContentItem").mockRejectedValue(error);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const handler = createFinalCopySubmissionHandler({
+      getRepository: async () => repository,
+    });
+
+    try {
+      const response = await handler(
+        new Request("http://localhost/api/content/final-copy", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            headline: "Tu WhatsApp también puede agendar",
+            body: "El bot puede atender, calificar y agendar citas.",
+            cta: "Escribe AGENDA por WhatsApp",
+          }),
+        }),
+        { params: Promise.resolve({ id: item.id }) },
+      );
+
+      expect(response.status).toBe(201);
+      expect(consoleError).toHaveBeenCalledWith(
+        JSON.stringify({
+          message: "publication diagnosis failed",
+          contentItemId: item.id,
+          error: String(error),
+        }),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("fails closed when the final copy is not grounded in the brief", async () => {
     const repository = createDemoRepository();
     const item = await repository.createContentItem(campaign);

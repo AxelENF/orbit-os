@@ -22,7 +22,14 @@ const finalCopySchema = z.object({
 const MAX_REQUEST_BYTES = 16_000;
 
 type FinalCopyHandlerDependencies = {
-  getRepository?: () => Promise<Pick<ContentRepository, "getContentRecord" | "submitFinalCopyForReview">>;
+  getRepository?: () => Promise<
+    Pick<
+      ContentRepository,
+      | "getContentRecord"
+      | "submitFinalCopyForReview"
+      | "applyPublicationDiagnosisForContentItem"
+    >
+  >;
 };
 
 function jsonError(error: string, status: number): Response {
@@ -84,6 +91,15 @@ export function createFinalCopySubmissionHandler(
         contentItemId.data,
         finalCopy.data,
       );
+      try {
+        await repository.applyPublicationDiagnosisForContentItem(contentItemId.data, result);
+      } catch (diagnosisError) {
+        console.error(JSON.stringify({
+          message: "publication diagnosis failed",
+          contentItemId: contentItemId.data,
+          error: String(diagnosisError),
+        }));
+      }
       return Response.json({ finalCopy: result }, { status: 201 });
     } catch (error) {
       if (error instanceof ContentConfigurationError) {

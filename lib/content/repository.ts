@@ -327,4 +327,8 @@ export interface ContentRepository
     contentItemId: string,
     input: FinalCopySubmission,
   ): Promise<FinalCopy>;
+  applyPublicationDiagnosisForContentItem(
+    contentItemId: string,
+    finalCopy: FinalCopy,
+  ): Promise<void>;
 }
