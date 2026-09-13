@@ -176,11 +176,15 @@ git commit -m "feat: add content_item_assets for multi-image carousel support"
 
 ```typescript
 describe("organization_meta_connections", () => {
-  it("no tiene ninguna policy RLS para authenticated/anon, y revoca el acceso directo a la tabla", async () => {
+  it("habilita RLS y revoca el acceso directo a la tabla para authenticated/anon", async () => {
     const sql = await readMigration();
     expect(sql).toMatch(/alter table public\.organization_meta_connections enable row level security/i);
     expect(sql).toMatch(/revoke all on public\.organization_meta_connections from public, anon, authenticated/i);
-    expect(sql).not.toMatch(/create policy[\s\S]*on public\.organization_meta_connections[\s\S]*to authenticated/i);
+    // Nota: no se agrega un `not.toMatch` genérico de "no existe ninguna
+    // policy" — con [\s\S]* eso hace match voraz contra CUALQUIER policy de
+    // cualquier otra tabla en el mismo archivo y da falsos positivos/negativos
+    // (hallazgo de revisión Codex ronda 2). Las dos aserciones positivas de
+    // arriba ya cubren el contrato real.
   });
 
   it("get_meta_connection_status no selecciona ni regresa page_access_token", async () => {
@@ -502,17 +506,24 @@ describe("PUBLISH job lifecycle SQL", () => {
     const fn = sql.match(/create function public\.enqueue_publish_automation_job[\s\S]*?\$\$;/i)![0];
     expect(fn).toMatch(/md5\(p_publication_target_id::text\)::uuid/i);
   });
-  it("claim_next_publish_automation_job toma un advisory lock por target antes de seleccionar el job", async () => {
+  it("claim_next_publish_automation_job bloquea la fila del target (for update) antes de decidir si lo reclama, para serializar dos claims concurrentes del mismo target", async () => {
     const sql = await readMigration();
     const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
-    expect(fn).toMatch(/pg_advisory_xact_lock/i);
+    expect(fn).toMatch(/select \* into target\s+from public\.publication_targets\s+where id = job\.publication_target_id and organization_id = job\.organization_id\s+for update/i);
   });
-  it("claim_next_publish_automation_job pone el target en ERROR (no solo el job) cuando falla por conexión ausente/Instagram no conectado/aprobación/copy/assets faltantes", async () => {
+  it("claim_next_publish_automation_job re-verifica jobs PROCESSING concurrentes para el mismo target DESPUÉS de bloquear el target, no antes", async () => {
     const sql = await readMigration();
     const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
-    const failBranches = fn.match(/status = 'FAILED', sanitized_error[\s\S]*?updated_at = now\(\)/gi) ?? [];
-    expect(failBranches.length).toBeGreaterThan(0);
-    expect(fn).toMatch(/update public\.publication_targets\s+set status = 'ERROR'::public\.publication_status/i);
+    const targetLockIndex = fn.search(/for update;\s*\n\s*if not found or target\.status/i);
+    const concurrentCheckIndex = fn.search(/active\.status = 'PROCESSING'/i);
+    expect(targetLockIndex).toBeGreaterThan(-1);
+    expect(concurrentCheckIndex).toBeGreaterThan(targetLockIndex);
+  });
+  it("claim_next_publish_automation_job llama fail_claim_publish_job (que pone el target en ERROR, no solo el job) en cada rama de falla temprana", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const failCalls = fn.match(/perform public\.fail_claim_publish_job/gi) ?? [];
+    expect(failCalls.length).toBe(5); // target no aprobado, sin conexión, IG no conectado, sin copy final, sin assets
   });
   it("recover_expired_publish_automation_jobs pone en ERROR los targets de los jobs que terminan en DEAD_LETTER", async () => {
     const sql = await readMigration();
@@ -653,24 +664,16 @@ declare
   assets_json jsonb;
   token uuid := gen_random_uuid();
 begin
-  -- Advisory lock por target: sin esto, dos claims concurrentes podrían
-  -- tomar dos jobs QUEUED distintos para el MISMO target (p. ej. uno
-  -- automático y uno de retry_publish_target) y ambos pasarían el "not
-  -- exists" de abajo antes de que ninguno llegara a PROCESSING — dos
-  -- publicaciones reales para el mismo target. El lock se libera solo al
-  -- terminar la transacción (xact), así que cubre todo el claim.
-  perform pg_advisory_xact_lock(hashtext('publish_target:' || (
-    select queued.publication_target_id::text
-    from public.automation_jobs as queued
-    where queued.kind = 'PUBLISH'
-      and (p_provider is null or queued.provider = p_provider)
-      and (p_organization_id is null or queued.organization_id = p_organization_id)
-      and queued.status in ('QUEUED', 'RETRY_WAIT')
-      and queued.run_at <= now() and queued.next_attempt_at <= now()
-    order by queued.next_attempt_at asc, queued.created_at asc
-    limit 1
-  )));
-
+  -- No se usa un advisory lock por target (la ronda 2 de revisión de Codex
+  -- encontró que la versión anterior con pg_advisory_xact_lock era en sí
+  -- misma vulnerable a una carrera: la subconsulta que elegía "el target a
+  -- lockear" podía evaluar distinto al SELECT real de abajo bajo commits
+  -- concurrentes). En vez de eso, se usa el lock de fila estándar de
+  -- Postgres: se bloquea la fila de publication_targets con `for update`
+  -- (ver abajo), y solo DESPUÉS de tener ese lock se revisa si ya hay otro
+  -- job PROCESSING para el mismo target. Una segunda transacción que
+  -- intente lockear la MISMA fila de target se bloquea hasta que la
+  -- primera termine — ahí es donde ocurre la serialización real, no antes.
   select queued.* into job
   from public.automation_jobs as queued
   where queued.kind = 'PUBLISH'
@@ -679,13 +682,6 @@ begin
     and queued.status in ('QUEUED', 'RETRY_WAIT')
     and queued.run_at <= now()
     and queued.next_attempt_at <= now()
-    and not exists (
-      select 1 from public.automation_jobs as active
-      where active.publication_target_id = queued.publication_target_id
-        and active.kind = 'PUBLISH'
-        and active.status = 'PROCESSING'
-        and active.lease_expires_at > now()
-    )
   order by queued.next_attempt_at asc, queued.created_at asc
   limit 1
   for update skip locked;
@@ -694,12 +690,32 @@ begin
     return jsonb_build_object('state', 'NOT_CLAIMABLE');
   end if;
 
+  -- El lock de esta fila es lo que serializa dos claims concurrentes sobre
+  -- el mismo target: la segunda transacción bloquea aquí hasta que la
+  -- primera libere (commit/rollback), y para entonces la re-verificación
+  -- de abajo ya ve el job de la primera como PROCESSING.
   select * into target
   from public.publication_targets
-  where id = job.publication_target_id and organization_id = job.organization_id;
+  where id = job.publication_target_id and organization_id = job.organization_id
+  for update;
   if not found or target.status <> 'APPROVED' then
     perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_TARGET_NOT_APPROVED');
     return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
+  end if;
+
+  if exists (
+    select 1 from public.automation_jobs as active
+    where active.publication_target_id = target.id
+      and active.kind = 'PUBLISH'
+      and active.status = 'PROCESSING'
+      and active.lease_expires_at > now()
+      and active.id <> job.id
+  ) then
+    -- Otro job para el mismo target ya está en curso (típicamente: este
+    -- job fue el candidato de una transacción que perdió la carrera de
+    -- arriba). No es un fallo del job -- simplemente no es su turno
+    -- todavía; el próximo poll del worker lo vuelve a intentar.
+    return jsonb_build_object('state', 'NOT_CLAIMABLE');
   end if;
 
   select * into connection
@@ -1363,6 +1379,7 @@ TypeScript y no vuelven a tocar `0018`.
 - Modify: `app/api/content/route.ts`
 - Modify: `lib/content/repository.ts` (firma de `createContentItemWithAsset` o el método equivalente — revisa el nombre exacto antes de tocarlo)
 - Modify: `lib/supabase/repository.ts`
+- Modify: `components/content/content-form.tsx` (hallazgo de revisión Codex ronda 2: este es el componente real que arma el `FormData` con el campo `asset` — sin tocarlo, el intake multi-asset del backend queda inalcanzable desde la UI)
 - Test: `tests/api/content-create.test.ts` (ya existe — extiéndelo)
 
 - [ ] **Step 1: Escribir los tests que fallan**
@@ -1415,11 +1432,11 @@ separada — avísale al humano antes de crearla, no está en el spec original
 como una migración aparte y merece confirmarse).
 
 - [ ] **Step 4: Correr, confirmar que pasan**
-- [ ] **Step 5: Actualizar el formulario de intake** (componente cliente que arma el `FormData`) para mandar `assets` (múltiple) en vez de `asset`.
+- [ ] **Step 5: Actualizar `components/content/content-form.tsx`** para mandar `assets` (múltiple, input file con `multiple`) en vez de `asset` en el `FormData` que arma antes de hacer `fetch("/api/content", ...)`.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/api/content/route.ts lib/supabase/repository.ts lib/content/repository.ts tests/api/content-create.test.ts
+git add app/api/content/route.ts lib/supabase/repository.ts lib/content/repository.ts components/content/content-form.tsx tests/api/content-create.test.ts
 git commit -m "feat: accept 1-10 assets per content item for carousel support"
 ```
 
@@ -1722,66 +1739,100 @@ git commit -m "feat: implement real Instagram publish adapter (single image + ca
 
 ## Task 13: Puerta de diagnóstico en el API route de copy final
 
+**Corrección tras revisión de Codex CLI (dos problemas reales en la
+versión anterior de esta tarea):** el pseudocódigo original inventaba un
+cliente `supabase` crudo dentro de la ruta HTTP — pero la ruta real
+(`app/api/content/[id]/final-copy/route.ts`) solo recibe un `repository:
+Pick<ContentRepository, "getContentRecord" | "submitFinalCopyForReview">`
+inyectado (léela antes de tocarla); no tiene acceso directo a Supabase. Y
+si la construcción del diagnóstico lanzaba (perfil de marca ausente/mal
+formado), el error se propagaba SIN atrapar — como esto ocurre después de
+que `submitFinalCopyForReview` ya comprometió el copy final y transicionó
+`content_items.state = 'REVIEW'`, el resultado era un 500 al cliente sobre
+una sumisión que en realidad **sí tuvo éxito**, dejando al usuario sin
+saber que su copy sí se guardó.
+
 **Files:**
-- Modify: la ruta que llama `submit_final_copy_for_review` hoy (búscala — es la que expone `POST` para someter el copy final; revisa `lib/supabase/repository.ts:submitFinalCopyForReview` para encontrar su caller HTTP)
-- Test: el test existente de esa ruta, extendido
+- Modify: `app/api/content/[id]/final-copy/route.ts`
+- Modify: `lib/content/repository.ts` (agregar `applyPublicationDiagnosis` a la interfaz `ContentRepository`, y extender `FinalCopyHandlerDependencies`/`getRepository` en la ruta para incluirlo en el `Pick`)
+- Modify: `lib/supabase/repository.ts` (implementación real: fetch del perfil de marca + llamada a la RPC de la Tarea 6, por cada target)
+- Modify: `lib/demo/repository.ts` (equivalente sin red, mismo estilo que ya usa para simular `submitFinalCopyForReview`)
+- Test: `tests/api/final-copy.test.ts` (ya existe — extiéndelo)
 
 - [ ] **Step 1: Tests**
 
 ```typescript
-it("tras someter copy final, corre diagnosePublication por cada target y llama apply_publication_diagnosis", async () => {});
+it("tras someter copy final con éxito, llama repository.applyPublicationDiagnosis una vez por publication_target", async () => {});
 it("la señal del diagnóstico se construye del copy final (headline+body+cta+hashtags), no de la descripción original del intake", async () => {});
 it("si validateFinalCopy falla, no llega a llamar submit_final_copy_for_review ni el diagnóstico (regresión del guardrail existente)", async () => {});
+it("si applyPublicationDiagnosis lanza para un target, la ruta sigue devolviendo 201 con el final copy ya guardado -- el error se registra, no se propaga al cliente", async () => {});
 ```
 
 - [ ] **Step 2: Correr, confirmar que falla**
 
 - [ ] **Step 3: Implementar**
 
-**`organizationProfile` y el casing de `channel` (corregido tras revisión
-de Codex CLI — el pseudocódigo original dejaba `organizationProfile`
-indefinido y pasaba `target.platform` en mayúsculas, que
-`aiasPlatformSchema` rechaza):**
+En `lib/supabase/repository.ts`, el nuevo método `applyPublicationDiagnosis`
+(no la ruta HTTP) es quien hace el fetch del perfil de marca y llama
+`diagnosePublication` — mismo query que `getOrganizationForbiddenClaims`
+en `worker/providers/copy-processor.ts:100-114`, pero parseando el perfil
+completo:
 
 ```typescript
 // aiasPlatformSchema = z.enum(["facebook", "instagram"]) — minúsculas.
 // publication_targets.platform (Postgres) es 'FACEBOOK' | 'INSTAGRAM' — mayúsculas.
 // Nunca pases target.platform directo a diagnosePublication sin convertir.
 
-const { data: brandProfile, error: brandProfileError } = await supabase
-  .from("organization_brand_profiles")
-  .select("aias_profile")
-  .eq("organization_id", organizationId)
-  .maybeSingle();
-if (brandProfileError) throw new Error("Unable to read the organization's AIAS profile.");
-const organizationProfile = aiasOrganizationProfileSchema.parse(brandProfile?.aias_profile ?? {});
+async applyPublicationDiagnosisForContentItem(contentItemId: string, finalCopy: FinalCopy): Promise<void> {
+  const { data: brandProfile, error: brandProfileError } = await this.client
+    .from("organization_brand_profiles")
+    .select("aias_profile")
+    .eq("organization_id", this.organization.organizationId)
+    .maybeSingle();
+  if (brandProfileError) throw new Error("Unable to read the organization's AIAS profile.");
+  const organizationProfile = aiasOrganizationProfileSchema.parse(brandProfile?.aias_profile ?? {});
+  const signal = [finalCopy.headline, finalCopy.body, finalCopy.cta, ...finalCopy.hashtags].join(" ");
+
+  const { data: targets } = await this.client
+    .from("publication_targets")
+    .select("id, platform")
+    .eq("content_item_id", contentItemId);
+
+  for (const target of targets ?? []) {
+    const diagnosis = diagnosePublication({
+      profile: organizationProfile,
+      signal,
+      channel: target.platform.toLowerCase() as AiasPlatform,
+    });
+    await this.client.rpc("apply_publication_diagnosis", {
+      p_organization_id: this.organization.organizationId,
+      p_content_item_id: contentItemId,
+      p_publication_target_id: target.id,
+      p_quality_level: diagnosis.qualityLevel,
+      p_findings: diagnosis.findings,
+      p_idempotency_key: createId(),
+    });
+  }
+}
 ```
 
-(mismo query que `getOrganizationForbiddenClaims` en
-`worker/providers/copy-processor.ts:100-114`, pero parseando el perfil
-completo en vez de extraer solo `forbiddenClaims` — `diagnosePublication`
-necesita el objeto `profile` entero, no un array).
-
-Después de que `submitFinalCopyForReview` resuelve con éxito, para cada
-`publication_target` del content item (`FACEBOOK`, `INSTAGRAM`):
+En la ruta (`app/api/content/[id]/final-copy/route.ts`), **después** de que
+`submitFinalCopyForReview` resuelve con éxito y **dentro de su propio
+try/catch separado** (no el mismo que envuelve la sumisión):
 ```typescript
-const signal = [finalCopy.headline, finalCopy.body, finalCopy.cta, ...finalCopy.hashtags].join(" ");
-const diagnosis = diagnosePublication({
-  profile: organizationProfile,
-  signal,
-  channel: target.platform.toLowerCase() as AiasPlatform, // FACEBOOK -> facebook
-});
-await repository.applyPublicationDiagnosis({
-  contentItemId, publicationTargetId: target.id,
-  qualityLevel: diagnosis.qualityLevel, findings: diagnosis.findings,
-  idempotencyKey: createId(),
-});
+const result = await repository.submitFinalCopyForReview(contentItemId.data, finalCopy.data);
+try {
+  await repository.applyPublicationDiagnosisForContentItem(contentItemId.data, result);
+} catch (diagnosisError) {
+  // El copy final ya se guardó -- un fallo del diagnóstico no debe
+  // convertir una sumisión exitosa en un 500. El target simplemente se
+  // queda en PENDING_REVIEW (el default seguro de la máquina de estados)
+  // y un humano lo revisa manualmente, igual que si el diagnóstico nunca
+  // se hubiera ejecutado.
+  console.error(JSON.stringify({ message: "publication diagnosis failed", contentItemId: contentItemId.data, error: String(diagnosisError) }));
+}
+return Response.json({ finalCopy: result }, { status: 201 });
 ```
-Agrega `applyPublicationDiagnosis` al `ContentRepository` (interfaz +
-implementación Supabase, llamando la RPC de la Tarea 6) y a su equivalente
-demo (`lib/demo/repository.ts` — revisa cómo el demo simula
-`submitFinalCopyForReview` hoy y sigue el mismo estilo, sin llamar Supabase
-de verdad).
 
 - [ ] **Step 4: Correr, confirmar que pasan**
 - [ ] **Step 5: Commit**
@@ -1904,24 +1955,31 @@ git commit -m "feat: add meta publish processor with reconnect-on-error handling
 - Modify: `worker/entrypoint.ts`
 - Modify: el test existente de `worker/entrypoint.ts`
 
-**Corrección tras revisión de Codex CLI:** este repo ya tiene un
-interruptor de seguridad existente,
-`SNAPGAD_PUBLISH_WORKER_ENABLED` (usado hoy por
-`lib/integrations/n8n-client.ts` para mantener el camino de publicación
-viejo fallando cerrado — ver `docs/vault/06-staging-pilot-runbook.md`). El
-runner nuevo de `PUBLISH` debe respetar el **mismo** flag: si no es
+**Corrección tras revisión de Codex CLI (dos rondas):** este repo ya tiene
+un interruptor existente, `SNAPGAD_PUBLISH_WORKER_ENABLED`, usado por
+`lib/integrations/n8n-client.ts` (línea ~191) — pero ahí, cuando el flag
+**es** `"true"`, es la ruta n8n vieja la que queda *desbloqueada* para
+intentar publicar de verdad (si además tiene sus propias variables `N8N_*`
+configuradas). Reusar exactamente ese mismo flag para el runner nuevo, como
+proponía la ronda 1 de este plan, tenía el efecto contrario al buscado:
+activar el publisher nuevo también habría desbloqueado el camino n8n viejo
+al mismo tiempo — la colisión de doble publicación que el spec ya
+advertía como riesgo, pero convertida en inmediata en vez de hipotética.
+
+Corrección: el runner de `PUBLISH` usa su **propio** flag dedicado,
+`SNAPGAD_META_PUBLISH_WORKER_ENABLED`, sin tocar ni leer
+`SNAPGAD_PUBLISH_WORKER_ENABLED` en ningún punto de este código. Si no es
 exactamente `"true"`, el proceso arranca solo el runner de `COPY` (el
-comportamiento de hoy, sin cambios) y el de `PUBLISH` ni se construye. Esto
-evita que desplegar este código por sí solo empiece a publicar de verdad
-sin que alguien lo active a propósito.
+comportamiento de hoy, sin cambios) y el de `PUBLISH` ni se construye.
 
 - [ ] **Step 1: Tests**
 
 ```typescript
 it("isPublishJobRetryable regresa false para MetaPublishError con retryable=false", async () => {});
 it("isPublishJobRetryable regresa true para un error genérico (no MetaPublishError)", async () => {});
-it("main() con SNAPGAD_PUBLISH_WORKER_ENABLED!=='true' solo corre el runner de COPY", async () => {});
-it("main() con SNAPGAD_PUBLISH_WORKER_ENABLED==='true' construye y corre ambos runners con Promise.all", async () => {
+it("main() con SNAPGAD_META_PUBLISH_WORKER_ENABLED!=='true' solo corre el runner de COPY", async () => {});
+it("main() nunca lee SNAPGAD_PUBLISH_WORKER_ENABLED (ese es del camino n8n viejo, no de este runner)", async () => {});
+it("main() con SNAPGAD_META_PUBLISH_WORKER_ENABLED==='true' construye y corre ambos runners con Promise.all", async () => {
   // mockear ambos runners/stores, verificar que runUntilStopped se llama en ambos
 });
 ```
@@ -1936,13 +1994,18 @@ export function isPublishJobRetryable(error: unknown): boolean {
 }
 ```
 
-Extiende `main()`:
+Extiende `main()`. **Ojo con el tipo del arreglo** (hallazgo de revisión
+Codex ronda 2: `const runners = [copyRunner]` infiere el tipo genérico
+específico de `copyRunner`, y hacer `push` de un `DurableJobRunner` con
+otros parámetros de tipo falla en `tsc`) — anota explícitamente
+`DurableJobRunner<unknown, unknown>[]` o el tipo base sin parámetros
+genéricos concretos:
+
 ```typescript
-const publishWorkerEnabled = process.env.SNAPGAD_PUBLISH_WORKER_ENABLED === "true";
-const runners = [copyRunner];
-let publishRunner: DurableJobRunner | undefined;
+const publishWorkerEnabled = process.env.SNAPGAD_META_PUBLISH_WORKER_ENABLED === "true";
+const runners: DurableJobRunner<unknown, unknown>[] = [copyRunner];
 if (publishWorkerEnabled) {
-  publishRunner = new DurableJobRunner(publishStore, publishProcessor, { /* ...opciones, isRetryable: isPublishJobRetryable */ });
+  const publishRunner = new DurableJobRunner(publishStore, publishProcessor, { /* ...opciones, isRetryable: isPublishJobRetryable */ });
   runners.push(publishRunner);
 }
 const shutdown = () => runners.forEach((runner) => runner.stop());
