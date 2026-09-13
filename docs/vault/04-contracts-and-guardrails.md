@@ -42,6 +42,14 @@
 - Antes de aceptar una imagen, revisar proporción de pantalla, teclado, biseles, grosor y perspectiva contra una laptop real. Si parece un monitor gigante, una maqueta o elimina el espacio negativo del copy, se regenera aunque el resto de la composición sea buena.
 - Regla de prompt obligatoria: `Laptop físicamente realista de 13–14 pulgadas, escala moderada sobre escritorio, máximo 42 % del área visual, pantalla no mayor a 46 % de la altura, márgenes visibles; evitar laptop gigante, monitor, close-up desproporcionado o teclado sobredimensionado.`
 
+## Generación visual: sistema tipográfico SnapGad
+
+- Toda creatividad SnapGad debe usar **una sola familia sans-serif formal, no condensada y consistente**. La referencia de marca para la edición final es **Montserrat Arabic**; si la herramienta de generación no la reproduce fielmente, se usa una equivalencia limpia tipo **Arial/Helvetica**, nunca una segunda fuente decorativa.
+- Jerarquía fija: *eyebrow* en peso Medium/500, mayúsculas con espaciado moderado; titular en Bold/800–900; apoyo en Regular/400–500; y CTA/footer en Bold/700. El footer y el botón CTA deben compartir exactamente la misma familia y el mismo lenguaje de peso que el resto de la pieza.
+- Se prohíben fuentes condensadas de póster, serif, script, itálicas, tipografías "tech" ornamentales y mezclas de familias dentro del mismo arte. El color naranja define énfasis, no un cambio de fuente.
+- Antes de aceptar una imagen, revisar que titular, texto de apoyo, footer y CTA tengan anchura de letra, altura de x, espaciado y peso visual coherentes. Si el generador mezcla estilos o vuelve el CTA más condensado/diferente que el copy, se regenera o se corrige en Canva antes de publicar.
+- Regla de prompt obligatoria: `Tipografía única y consistente: sans-serif formal no condensada, equivalente a Montserrat Arabic (fallback Arial/Helvetica). Titular Bold 800–900, apoyo Regular 400–500 y CTA/footer Bold 700; no mezclar familias, no usar fuente condensada, serif, script ni itálica.`
+
 ## Publication
 
 - Facebook e Instagram tienen estados y errores independientes.

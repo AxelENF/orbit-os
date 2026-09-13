@@ -1,5 +1,11 @@
 # Bitácora de ejecución
 
+## 2026-09-10 — Guardrail visual: sistema tipográfico unificado
+
+- Auditoría de los carruseles recientes: el generador conserva bien composición, paleta y jerarquía, pero alterna la fuente del copy y del CTA/footer; esa inconsistencia puede disminuir la percepción de una marca tecnológica madura.
+- Añadida regla obligatoria a `04-contracts-and-guardrails.md`: Montserrat Arabic es referencia de edición final y Arial/Helvetica el fallback visual permitido; cada pieza usa una sola familia sans-serif no condensada con pesos fijos por jerarquía (500 eyebrow, 800–900 titular, 400–500 apoyo, 700 CTA/footer).
+- A partir de ahora, un CTA/footer con fuente distinta, condensada o decorativa es criterio de regeneración o corrección en Canva antes de que un creativo se considere final.
+
 ## 2026-09-10 — Migraciones Supabase aplicadas y verificadas
 
 - `npx supabase@2.117.0 db push --db-url ...` aplicó `0012_automation_job_status_values.sql` y `0013_automation_job_lifecycle.sql`; `0001`–`0011` ya estaban aplicadas. El primer intento de `0013` se detuvo por el uso del enum nuevo en la misma transacción; se corrigió separando `0012` antes de reintentar.
