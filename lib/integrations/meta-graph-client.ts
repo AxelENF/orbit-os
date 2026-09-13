@@ -180,3 +180,77 @@ export async function publishToFacebook(
   const remoteUrl = requiredString(permalink, "permalink_url", "Meta no devolvió el enlace permanente.");
   return { remotePostId: postId, remoteUrl, publishedAt: new Date().toISOString() };
 }
+
+async function pollContainerUntilReady(
+  fetchFn: typeof fetch,
+  containerId: string,
+  accessToken: string,
+): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const status = await callGraphApi(
+      fetchFn,
+      `${containerId}?fields=status_code&access_token=${encodeURIComponent(accessToken)}`,
+      null,
+      "GET",
+    );
+    if (status.status_code === "FINISHED") return;
+    if (status.status_code === "ERROR") {
+      throw new MetaPublishError("Instagram no pudo procesar el contenedor de medios.", false, false);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new MetaPublishError("Timeout esperando que Instagram procese el contenedor.", true, false);
+}
+
+export async function publishToInstagram(
+  input: FacebookPublishInput & { igUserId: string },
+  fetchFn: typeof fetch = fetch,
+): Promise<MetaPublishResult> {
+  const sorted = [...input.assets].sort((a, b) => a.position - b.position);
+  if (sorted.length === 0) {
+    throw invalidResponse("Meta no puede publicar sin imágenes.");
+  }
+
+  let creationId: string;
+  if (sorted.length === 1) {
+    const container = await callGraphApi(fetchFn, `${input.igUserId}/media`, {
+      image_url: sorted[0]!.signedUrl,
+      caption: input.caption,
+      access_token: input.pageAccessToken,
+    });
+    creationId = requiredString(container, "id", "Meta no devolvió el ID del contenedor de Instagram.");
+  } else {
+    const childIds: string[] = [];
+    for (const asset of sorted) {
+      const child = await callGraphApi(fetchFn, `${input.igUserId}/media`, {
+        image_url: asset.signedUrl,
+        is_carousel_item: "true",
+        access_token: input.pageAccessToken,
+      });
+      childIds.push(requiredString(child, "id", "Meta no devolvió el ID del contenedor hijo de Instagram."));
+    }
+    const parent = await callGraphApi(fetchFn, `${input.igUserId}/media`, {
+      media_type: "CAROUSEL",
+      children: childIds.join(","),
+      caption: input.caption,
+      access_token: input.pageAccessToken,
+    });
+    creationId = requiredString(parent, "id", "Meta no devolvió el ID del contenedor de carrusel de Instagram.");
+  }
+
+  await pollContainerUntilReady(fetchFn, creationId, input.pageAccessToken);
+  const published = await callGraphApi(fetchFn, `${input.igUserId}/media_publish`, {
+    creation_id: creationId,
+    access_token: input.pageAccessToken,
+  });
+  const mediaId = requiredString(published, "id", "Meta no devolvió el ID de la publicación de Instagram.");
+  const permalink = await callGraphApi(
+    fetchFn,
+    `${mediaId}?fields=permalink&access_token=${encodeURIComponent(input.pageAccessToken)}`,
+    null,
+    "GET",
+  );
+  const remoteUrl = requiredString(permalink, "permalink", "Meta no devolvió el enlace permanente de Instagram.");
+  return { remotePostId: mediaId, remoteUrl, publishedAt: new Date().toISOString() };
+}
