@@ -2,25 +2,23 @@ import "server-only";
 
 type MetaEnvironment = Record<string, string | undefined>;
 
-const REQUIRED_META_VARIABLES = [
+const REQUIRED_APP_VARIABLES = [
   "META_APP_ID",
   "META_APP_SECRET",
-  "META_PAGE_ID",
-  "META_PAGE_ACCESS_TOKEN",
 ] as const;
 
-export type MetaPreflight =
+export type MetaAppPreflight =
   | { status: "READY" }
-  | { status: "NOT_CONFIGURED"; missing: Array<(typeof REQUIRED_META_VARIABLES)[number]> };
+  | { status: "NOT_CONFIGURED"; missing: Array<(typeof REQUIRED_APP_VARIABLES)[number]> };
 
 /**
- * Deliberately a configuration boundary, not a publisher. The page token is
- * server-only and no Meta SDK/network client is constructed by this module.
+ * Deliberately an app configuration boundary, not a publisher. Organization
+ * page credentials live in the database and are not checked here.
  */
 export function createMetaPublisher(environment: MetaEnvironment = process.env) {
   return {
-    async preflight(): Promise<MetaPreflight> {
-      const missing = REQUIRED_META_VARIABLES.filter((key) => !environment[key]?.trim());
+    async preflightApp(): Promise<MetaAppPreflight> {
+      const missing = REQUIRED_APP_VARIABLES.filter((key) => !environment[key]?.trim());
       return missing.length > 0 ? { status: "NOT_CONFIGURED", missing } : { status: "READY" };
     },
   };
