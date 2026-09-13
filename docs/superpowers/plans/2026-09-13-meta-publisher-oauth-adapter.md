@@ -519,11 +519,19 @@ describe("PUBLISH job lifecycle SQL", () => {
     expect(targetLockIndex).toBeGreaterThan(-1);
     expect(concurrentCheckIndex).toBeGreaterThan(targetLockIndex);
   });
-  it("claim_next_publish_automation_job llama fail_claim_publish_job (que pone el target en ERROR, no solo el job) en cada rama de falla temprana", async () => {
+  it("claim_next_publish_automation_job llama fail_claim_publish_job (que pone el target en ERROR, no solo el job) en cada rama de falla temprana genuina", async () => {
     const sql = await readMigration();
     const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
     const failCalls = fn.match(/perform public\.fail_claim_publish_job/gi) ?? [];
-    expect(failCalls.length).toBe(5); // target no aprobado, sin conexión, IG no conectado, sin copy final, sin assets
+    // target no encontrado, target no APPROVED (tras descartar PUBLISHED),
+    // sin conexión, IG no conectado, sin copy final, sin assets.
+    expect(failCalls.length).toBe(6);
+  });
+  it("un target ya PUBLISHED con un job duplicado obsoleto se cancela el job SIN llamar fail_claim_publish_job (no sobrescribe el estado bueno con ERROR)", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/if target\.status = 'PUBLISHED' then/i);
+    expect(fn).toMatch(/'PUBLISH_JOB_TARGET_ALREADY_PUBLISHED'/i);
   });
   it("recover_expired_publish_automation_jobs pone en ERROR los targets de los jobs que terminan en DEAD_LETTER", async () => {
     const sql = await readMigration();
@@ -698,7 +706,24 @@ begin
   from public.publication_targets
   where id = job.publication_target_id and organization_id = job.organization_id
   for update;
-  if not found or target.status <> 'APPROVED' then
+  if not found then
+    perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_TARGET_NOT_APPROVED');
+    return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
+  end if;
+  if target.status = 'PUBLISHED' then
+    -- Job duplicado obsoleto: otro job ya publicó este target con éxito
+    -- (p. ej. dos jobs QUEUED para el mismo target por una carrera previa
+    -- a la Tarea 5, o un reintento manual que llegó tarde). No es un
+    -- error -- NO se debe llamar fail_claim_publish_job aquí, porque eso
+    -- sobrescribiría un target PUBLISHED (un estado bueno) con ERROR
+    -- (hallazgo de revisión Codex ronda 3). Se cierra el job sin tocar el
+    -- target.
+    update public.automation_jobs set status = 'CANCELLED', cancelled_at = now(),
+      sanitized_error = 'PUBLISH_JOB_TARGET_ALREADY_PUBLISHED', updated_at = now()
+    where id = job.id;
+    return jsonb_build_object('state', 'CANCELLED', 'jobId', job.id);
+  end if;
+  if target.status <> 'APPROVED' then
     perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_TARGET_NOT_APPROVED');
     return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
   end if;
@@ -1432,12 +1457,74 @@ separada — avísale al humano antes de crearla, no está en el spec original
 como una migración aparte y merece confirmarse).
 
 - [ ] **Step 4: Correr, confirmar que pasan**
-- [ ] **Step 5: Actualizar `components/content/content-form.tsx`** para mandar `assets` (múltiple, input file con `multiple`) en vez de `asset` en el `FormData` que arma antes de hacer `fetch("/api/content", ...)`.
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit** (backend solo — el frontend es la Tarea 8B, separada a propósito por su tamaño)
 
 ```bash
-git add app/api/content/route.ts lib/supabase/repository.ts lib/content/repository.ts components/content/content-form.tsx tests/api/content-create.test.ts
+git add app/api/content/route.ts lib/supabase/repository.ts lib/content/repository.ts tests/api/content-create.test.ts
 git commit -m "feat: accept 1-10 assets per content item for carousel support"
+```
+
+---
+
+## Task 8B: `AssetDropzone` multi-archivo + wiring en `content-form.tsx`
+
+**Corrección tras revisión de Codex CLI ronda 3:** la Tarea 8 original solo
+mencionaba `content-form.tsx`, pero el componente real que maneja el
+archivo (`components/content/asset-dropzone.tsx`) está construido
+enteramente alrededor de `value: File | null` / `onChange: (file: File |
+null) => void`, un `<input type="file">` sin `multiple`, y
+`event.target.files?.[0]` — cambiar solo `content-form.tsx` no alcanza,
+hay que rediseñar este componente.
+
+**Files:**
+- Modify: `components/content/asset-dropzone.tsx`
+- Modify: `components/content/content-form.tsx`
+- Test: el test de componente existente de `AssetDropzone` (búscalo — probablemente `tests/components/asset-dropzone.test.ts(x)`)
+
+- [ ] **Step 1: Escribir los tests que fallan**
+
+```typescript
+it("acepta hasta 10 archivos, onChange recibe el arreglo completo en orden de selección", async () => {});
+it("el input file tiene el atributo multiple", async () => {});
+it("el drop de varios archivos a la vez los agrega todos (hasta el máximo de 10)", async () => {});
+it("seleccionar más de 10 archivos muestra un error y no llama onChange con más de 10", async () => {});
+it("permite quitar un archivo individual del arreglo antes de subir (para poder reordenar/corregir sin reiniciar todo)", async () => {});
+it("valida cada archivo con las mismas reglas de tipo/tamaño de hoy, individualmente", async () => {});
+```
+
+- [ ] **Step 2: Correr, confirmar que fallan**
+
+- [ ] **Step 3: Implementar**
+
+Cambia la interfaz del componente:
+```typescript
+type AssetDropzoneProps = {
+  value: File[];
+  onChange: (files: File[]) => void;
+  isProductionMode?: boolean;
+};
+```
+`acceptFile` pasa a `acceptFiles(fileList: FileList | File[])`: valida cada
+archivo con `isAcceptedImage`/tamaño (sin cambios en esas dos funciones),
+junta los válidos con los ya existentes en `value` respetando el máximo de
+10, y llama `onChange` con el arreglo resultante. El `<input>` gana
+`multiple`, y `onDrop`/`onChange` iteran `event.dataTransfer.files`/
+`event.target.files` completos en vez de tomar solo el índice `0`. La
+previsualización (`value ? ... : ...`) pasa a listar los `N` archivos
+(nombre + botón "Quitar" por archivo) en vez de mostrar uno solo.
+
+En `content-form.tsx`: el estado que hoy es `File | null` pasa a `File[]`
+(inicial `[]`), y el armado del `FormData` antes del `fetch("/api/content")`
+cambia de `formData.set("asset", file)` a
+`files.forEach((file) => formData.append("assets", file))` — coincide con
+`formData.getAll("assets")` que ya espera la Tarea 8 en el backend.
+
+- [ ] **Step 4: Correr, confirmar que pasan**
+- [ ] **Step 5: Commit**
+
+```bash
+git add components/content/asset-dropzone.tsx components/content/content-form.tsx <test file>
+git commit -m "feat: support selecting up to 10 assets for carousel in the intake form"
 ```
 
 ---
@@ -1754,7 +1841,7 @@ saber que su copy sí se guardó.
 
 **Files:**
 - Modify: `app/api/content/[id]/final-copy/route.ts`
-- Modify: `lib/content/repository.ts` (agregar `applyPublicationDiagnosis` a la interfaz `ContentRepository`, y extender `FinalCopyHandlerDependencies`/`getRepository` en la ruta para incluirlo en el `Pick`)
+- Modify: `lib/content/repository.ts` (agregar `applyPublicationDiagnosisForContentItem` a la interfaz `ContentRepository`, y extender `FinalCopyHandlerDependencies`/`getRepository` en la ruta para incluirlo en el `Pick`. **Un solo nombre en todo el archivo** — la ronda 3 de revisión de Codex encontró que una versión anterior de esta tarea mezclaba `applyPublicationDiagnosis` y `applyPublicationDiagnosisForContentItem` entre la interfaz, los tests y la implementación; usa `applyPublicationDiagnosisForContentItem` en los tres lugares.)
 - Modify: `lib/supabase/repository.ts` (implementación real: fetch del perfil de marca + llamada a la RPC de la Tarea 6, por cada target)
 - Modify: `lib/demo/repository.ts` (equivalente sin red, mismo estilo que ya usa para simular `submitFinalCopyForReview`)
 - Test: `tests/api/final-copy.test.ts` (ya existe — extiéndelo)
@@ -1762,21 +1849,27 @@ saber que su copy sí se guardó.
 - [ ] **Step 1: Tests**
 
 ```typescript
-it("tras someter copy final con éxito, llama repository.applyPublicationDiagnosis una vez por publication_target", async () => {});
+it("tras someter copy final con éxito, llama repository.applyPublicationDiagnosisForContentItem una vez (que internamente cubre todos los publication_targets)", async () => {});
 it("la señal del diagnóstico se construye del copy final (headline+body+cta+hashtags), no de la descripción original del intake", async () => {});
 it("si validateFinalCopy falla, no llega a llamar submit_final_copy_for_review ni el diagnóstico (regresión del guardrail existente)", async () => {});
-it("si applyPublicationDiagnosis lanza para un target, la ruta sigue devolviendo 201 con el final copy ya guardado -- el error se registra, no se propaga al cliente", async () => {});
+it("si applyPublicationDiagnosisForContentItem lanza, la ruta sigue devolviendo 201 con el final copy ya guardado -- el error se registra, no se propaga al cliente", async () => {});
+it("un error de Supabase al leer publication_targets o al llamar la RPC apply_publication_diagnosis lanza (no se ignora en silencio) para que el catch de la ruta lo registre", async () => {});
 ```
 
 - [ ] **Step 2: Correr, confirmar que falla**
 
 - [ ] **Step 3: Implementar**
 
-En `lib/supabase/repository.ts`, el nuevo método `applyPublicationDiagnosis`
-(no la ruta HTTP) es quien hace el fetch del perfil de marca y llama
-`diagnosePublication` — mismo query que `getOrganizationForbiddenClaims`
-en `worker/providers/copy-processor.ts:100-114`, pero parseando el perfil
-completo:
+En `lib/supabase/repository.ts`, el nuevo método
+`applyPublicationDiagnosisForContentItem` (no la ruta HTTP) es quien hace
+el fetch del perfil de marca y llama `diagnosePublication` — mismo query
+que `getOrganizationForbiddenClaims` en
+`worker/providers/copy-processor.ts:100-114`, pero parseando el perfil
+completo. **Cada llamada a Supabase revisa su propio `error` y lanza
+explícitamente** (corrección tras revisión de Codex ronda 3 — la versión
+anterior ignoraba `error` en la consulta de targets y en la RPC, así que un
+fallo real de base de datos habría avanzado en silencio con un arreglo
+vacío o sin más efecto, y el `catch` de la ruta nunca se habría enterado):
 
 ```typescript
 // aiasPlatformSchema = z.enum(["facebook", "instagram"]) — minúsculas.
@@ -1793,10 +1886,11 @@ async applyPublicationDiagnosisForContentItem(contentItemId: string, finalCopy: 
   const organizationProfile = aiasOrganizationProfileSchema.parse(brandProfile?.aias_profile ?? {});
   const signal = [finalCopy.headline, finalCopy.body, finalCopy.cta, ...finalCopy.hashtags].join(" ");
 
-  const { data: targets } = await this.client
+  const { data: targets, error: targetsError } = await this.client
     .from("publication_targets")
     .select("id, platform")
     .eq("content_item_id", contentItemId);
+  if (targetsError) throw new Error("Unable to read publication targets for diagnosis.");
 
   for (const target of targets ?? []) {
     const diagnosis = diagnosePublication({
@@ -1804,7 +1898,7 @@ async applyPublicationDiagnosisForContentItem(contentItemId: string, finalCopy: 
       signal,
       channel: target.platform.toLowerCase() as AiasPlatform,
     });
-    await this.client.rpc("apply_publication_diagnosis", {
+    const { error: diagnosisError } = await this.client.rpc("apply_publication_diagnosis", {
       p_organization_id: this.organization.organizationId,
       p_content_item_id: contentItemId,
       p_publication_target_id: target.id,
@@ -1812,6 +1906,7 @@ async applyPublicationDiagnosisForContentItem(contentItemId: string, finalCopy: 
       p_findings: diagnosis.findings,
       p_idempotency_key: createId(),
     });
+    if (diagnosisError) throw new Error(`Unable to apply publication diagnosis for target ${target.id}.`);
   }
 }
 ```
@@ -1995,15 +2090,21 @@ export function isPublishJobRetryable(error: unknown): boolean {
 ```
 
 Extiende `main()`. **Ojo con el tipo del arreglo** (hallazgo de revisión
-Codex ronda 2: `const runners = [copyRunner]` infiere el tipo genérico
-específico de `copyRunner`, y hacer `push` de un `DurableJobRunner` con
-otros parámetros de tipo falla en `tsc`) — anota explícitamente
-`DurableJobRunner<unknown, unknown>[]` o el tipo base sin parámetros
-genéricos concretos:
+Codex, rondas 2 y 3: `const runners = [copyRunner]` infiere el tipo
+genérico específico de `copyRunner`, y ni `push`-ear otro
+`DurableJobRunner` a ese arreglo ni anotarlo como
+`DurableJobRunner<unknown, unknown>[]` compila bajo `strict` — el
+parámetro `processor` es contravariante en `Payload`, así que un
+`DurableJobRunner<Specific, ...>` no es asignable a
+`DurableJobRunner<unknown, unknown>`). La solución correcta no es forzar
+el tipo genérico de la clase — es programar contra una interfaz mínima
+estructural que solo pida los dos métodos que este loop realmente usa:
 
 ```typescript
+type StoppableRunner = { stop(): void; runUntilStopped(): Promise<void> };
+
 const publishWorkerEnabled = process.env.SNAPGAD_META_PUBLISH_WORKER_ENABLED === "true";
-const runners: DurableJobRunner<unknown, unknown>[] = [copyRunner];
+const runners: StoppableRunner[] = [copyRunner];
 if (publishWorkerEnabled) {
   const publishRunner = new DurableJobRunner(publishStore, publishProcessor, { /* ...opciones, isRetryable: isPublishJobRetryable */ });
   runners.push(publishRunner);
@@ -2012,6 +2113,9 @@ const shutdown = () => runners.forEach((runner) => runner.stop());
 // ...
 await Promise.all(runners.map((runner) => runner.runUntilStopped()));
 ```
+Cualquier `DurableJobRunner<P, R>` concreto satisface `StoppableRunner`
+por tipado estructural, sin importar sus parámetros genéricos — esto
+evita el problema de varianza por completo en vez de pelear contra él.
 
 - [ ] **Step 4: Correr, confirmar que pasan**
 - [ ] **Step 5: Commit**
@@ -2173,11 +2277,14 @@ git commit -m "feat: add Meta connection status, disconnect, and target retry UI
 
 ## Nota para quien despache esto a Codex CLI
 
-Cada tarea (1-21) es una unidad de trabajo independiente para un `codex
-exec` — no dispaches dos tareas en paralelo si una depende del archivo que
-la otra está tocando (las Tareas 1-7 son secuenciales sobre el mismo
-archivo de migración; 8-13 pueden dispacharse con más libertad una vez que
-1-7 estén mergeadas; 14-16 dependen de 11-12; 17-20 dependen de 9). Incluye
+Cada tarea (1-21, más 8B) es una unidad de trabajo independiente para un
+`codex exec` — no dispaches dos tareas en paralelo si una depende del
+archivo que la otra está tocando (las Tareas 1-7 son secuenciales sobre el
+mismo archivo de migración; 8 y 8B pueden ir en paralelo entre sí (backend
+vs. frontend, archivos distintos) una vez que 1-7 estén mergeadas, pero
+ambas antes de dar por completo el intake multi-asset; 9-13 pueden
+dispacharse con más libertad; 14-16 dependen de 10-12; 17-20 dependen de 9).
+Incluye
 en cada prompt de Codex la regla de seguridad de git (no `reset --hard`,
 no `checkout --`, no `clean`) y pide que verifique con `tasklist`/`ps` que
 no quede un proceso de Codex anterior corriendo antes de asumir que uno
