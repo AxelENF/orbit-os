@@ -83,3 +83,18 @@ describe("organization_meta_oauth_sessions", () => {
     expect(sql).toMatch(/discovered_pages jsonb not null check \(jsonb_typeof\(discovered_pages\) = 'array'\)/i);
   });
 });
+
+describe("automation_jobs PUBLISH kind", () => {
+  it("dropea el check viejo automation_jobs_kind_check antes de agregar el nuevo", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.automation_jobs drop constraint if exists automation_jobs_kind_check/i);
+    expect(sql).toMatch(/add constraint automation_jobs_kind_check check \(kind in \('COPY', 'PUBLISH'\)\)/i);
+  });
+
+  it("publication_target_id es obligatorio solo para kind='PUBLISH'", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/add column publication_target_id uuid references public\.publication_targets\(id\)/i);
+    expect(sql).toMatch(/\(kind = 'COPY' and publication_target_id is null\)/i);
+    expect(sql).toMatch(/\(kind = 'PUBLISH' and publication_target_id is not null\)/i);
+  });
+});

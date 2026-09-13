@@ -185,3 +185,24 @@ create table public.organization_meta_oauth_sessions (
 );
 alter table public.organization_meta_oauth_sessions enable row level security;
 revoke all on public.organization_meta_oauth_sessions from public, anon, authenticated;
+
+-- ============================================================
+-- Task 4: automation_jobs — kind PUBLISH + publication_target_id
+-- ============================================================
+
+-- 0010_automation_jobs.sql declaró `kind text not null check (kind = 'COPY')`
+-- inline, sin nombre — Postgres la nombró automation_jobs_kind_check. Hay
+-- que dropearla por ese nombre antes de agregar la nueva, o todo insert con
+-- kind='PUBLISH' sigue fallando contra la restricción vieja.
+alter table public.automation_jobs drop constraint if exists automation_jobs_kind_check;
+alter table public.automation_jobs
+  add constraint automation_jobs_kind_check check (kind in ('COPY', 'PUBLISH'));
+
+alter table public.automation_jobs
+  add column publication_target_id uuid references public.publication_targets(id);
+alter table public.automation_jobs
+  add constraint automation_jobs_publish_target_check
+  check (
+    (kind = 'COPY' and publication_target_id is null)
+    or (kind = 'PUBLISH' and publication_target_id is not null)
+  );
