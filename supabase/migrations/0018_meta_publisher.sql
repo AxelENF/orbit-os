@@ -779,3 +779,108 @@ $$;
 
 revoke all on function public.apply_publication_diagnosis(uuid, uuid, uuid, text, jsonb, uuid) from public, anon, authenticated;
 grant execute on function public.apply_publication_diagnosis(uuid, uuid, uuid, text, jsonb, uuid) to service_role;
+
+-- ============================================================
+-- Task 7: approve_publication_target (fix) + retry_publish_target
+-- ============================================================
+
+create or replace function public.approve_publication_target(
+  p_organization_id uuid, p_owner_id uuid, p_content_item_id uuid, p_publication_target_id uuid
+)
+returns public.publication_targets
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  item public.content_items;
+  target public.publication_targets;
+  approved_target public.publication_targets;
+  remaining_pending integer;
+begin
+  perform public.assert_organization_actor(
+    p_organization_id, p_owner_id, array['owner', 'reviewer']::public.organization_role[]
+  );
+  select * into item from public.content_items as content
+  where content.id = p_content_item_id and content.organization_id = p_organization_id for update;
+  if not found or item.state <> 'REVIEW' then
+    raise exception using errcode = 'P0001', message = 'CONTENT_NOT_REVIEWABLE';
+  end if;
+  select * into target from public.publication_targets as publication_target
+  where publication_target.id = p_publication_target_id
+    and publication_target.content_item_id = p_content_item_id
+    and publication_target.organization_id = p_organization_id for update;
+  if not found then raise exception using errcode = 'P0001', message = 'TARGET_NOT_FOUND'; end if;
+  if target.status not in ('PENDING_REVIEW', 'APPROVED') then
+    raise exception using errcode = 'P0001', message = 'TARGET_NOT_REVIEWABLE';
+  end if;
+
+  if target.status = 'APPROVED' then
+    -- Corrección: antes retornaba aquí sin encolar nada. Ahora se apoya en
+    -- la idempotencia de enqueue_publish_automation_job — si ya hay un job
+    -- para este target, esta llamada no crea uno nuevo.
+    perform public.enqueue_publish_automation_job(p_organization_id, p_content_item_id, target.id);
+    return target;
+  end if;
+
+  update public.publication_targets set status = 'APPROVED'::public.publication_status
+  where id = target.id and organization_id = p_organization_id returning * into approved_target;
+  insert into public.audit_events (organization_id, owner_id, actor_id, content_item_id, publication_target_id, event_type, metadata)
+  values (p_organization_id, item.owner_id, p_owner_id, p_content_item_id, target.id, 'TARGET_APPROVED', jsonb_build_object('platform', target.platform));
+
+  perform public.enqueue_publish_automation_job(p_organization_id, p_content_item_id, target.id);
+
+  -- Corrección: status <> 'APPROVED' no contaba un target ya PUBLISHED como
+  -- también-aprobado, dejando el content item atorado en REVIEW.
+  select count(*) into remaining_pending from public.publication_targets as publication_target
+  where publication_target.content_item_id = p_content_item_id
+    and publication_target.organization_id = p_organization_id
+    and publication_target.status not in ('APPROVED', 'PUBLISHED');
+  if remaining_pending = 0 then
+    update public.content_items set state = 'APPROVED'::public.content_state
+    where id = p_content_item_id and organization_id = p_organization_id and state = 'REVIEW';
+  end if;
+
+  return approved_target;
+end;
+$$;
+
+create function public.retry_publish_target(
+  p_organization_id uuid, p_actor_id uuid, p_publication_target_id uuid
+)
+returns public.publication_targets
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  target public.publication_targets%rowtype;
+  updated_target public.publication_targets%rowtype;
+begin
+  perform public.assert_organization_actor(
+    p_organization_id, p_actor_id, array['owner', 'editor']::public.organization_role[]
+  );
+  select * into target from public.publication_targets
+  where id = p_publication_target_id and organization_id = p_organization_id for update;
+  if not found then raise exception using errcode = 'P0001', message = 'RETRY_TARGET_NOT_FOUND'; end if;
+  if target.status <> 'ERROR' then
+    raise exception using errcode = 'P0001', message = 'RETRY_TARGET_NOT_IN_ERROR';
+  end if;
+
+  update public.publication_targets set status = 'APPROVED'::public.publication_status, last_error = null
+  where id = target.id returning * into updated_target;
+
+  -- A diferencia del encolado automático (idempotency key determinística
+  -- por target), un reintento explícito de un humano SÍ debe poder crear un
+  -- job nuevo cada vez -- el anterior ya terminó en FAILED/DEAD_LETTER.
+  insert into public.automation_jobs (organization_id, content_item_id, publication_target_id, kind, status, idempotency_key)
+  values (p_organization_id, target.content_item_id, target.id, 'PUBLISH', 'QUEUED', gen_random_uuid());
+
+  return updated_target;
+end;
+$$;
+
+revoke all on function public.approve_publication_target(uuid, uuid, uuid, uuid) from public, anon, authenticated;
+revoke all on function public.retry_publish_target(uuid, uuid, uuid) from public, anon, authenticated;
+grant execute on function public.approve_publication_target(uuid, uuid, uuid, uuid) to service_role;
+grant execute on function public.retry_publish_target(uuid, uuid, uuid) to service_role;

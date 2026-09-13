@@ -182,3 +182,26 @@ describe("apply_publication_diagnosis SQL", () => {
     expect(targetUpdateIndex).toBeGreaterThan(itemLockIndex);
   });
 });
+
+describe("approve_publication_target fixes (regex sobre la migración)", () => {
+  it("encola el job PUBLISH tanto en el camino de retorno anticipado como en el de recién-aprobado", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create or replace function public\.approve_publication_target[\s\S]*?\$\$;/i)![0];
+    const calls = fn.match(/perform public\.enqueue_publish_automation_job/gi) ?? [];
+    expect(calls.length).toBe(2);
+  });
+  it("el conteo de pendientes excluye APPROVED y PUBLISHED, no solo APPROVED", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create or replace function public\.approve_publication_target[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/status not in \('APPROVED', 'PUBLISHED'\)/i);
+  });
+});
+
+describe("retry_publish_target (regex sobre la migración)", () => {
+  it("exige status='ERROR' y usa gen_random_uuid (no una key determinística) para el reintento", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.retry_publish_target[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/if target\.status <> 'ERROR' then/i);
+    expect(fn).toMatch(/'PUBLISH', 'QUEUED', gen_random_uuid\(\)/i);
+  });
+});
