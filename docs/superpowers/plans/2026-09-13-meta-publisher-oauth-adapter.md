@@ -10,6 +10,9 @@
 
 **Spec de referencia:** `docs/superpowers/specs/2026-09-13-meta-publisher-oauth-adapter-design.md` (revisión 4). Este plan asume que ya se leyó — no repite el "por qué", solo el "cómo" y el orden exacto.
 
+**Corrección tras revisión de Codex CLI (importante, léela antes de empezar):**
+el entorno local de este repo no tiene Postgres/Docker corriendo (`docs/vault/01-current-state.md`) — los tests de migración existentes (p. ej. `tests/content/copy-hashtags-migration.test.ts`) **no ejecutan SQL contra una base real**: leen el archivo `.sql` con `readFile` y hacen aserciones por regex sobre el texto. Las Tareas 1-7 de este plan se corrigieron para seguir ese mismo patrón — no "insertar una fila y verificar que falla", sino "verificar que el texto de la migración contiene el `check`/la función esperada". El comportamiento en vivo de las RPCs se verifica de dos formas separadas, no con tests de migración: (a) tests unitarios que mockean `SupabaseClient.rpc(...)` en la capa de repositorio/worker (Tareas 8+), y (b) `npx supabase db push --dry-run` contra staging antes de aplicar (Task 7, Step 5).
+
 **Rama:** `feat/meta-publisher-oauth-adapter` (ya creada sobre `feat/personal-pilot-hardening`).
 
 **Migraciones aplicadas hasta hoy:** `0001`–`0017`. Este plan crea `0018_meta_publisher.sql` — una sola migración, dividida en Tareas 1-7 por claridad, pero se aplica como un solo archivo (no se hace `db push` intermedio entre esas tareas; el archivo se va extendiendo y cada tarea corre sus tests contra el archivo completo hasta ese punto).
@@ -33,37 +36,49 @@
 - Create: `supabase/migrations/0018_meta_publisher.sql`
 - Test: `tests/content/meta-publisher-migration.test.ts`
 
-Referencia de estilo de test: `tests/content/copy-hashtags-migration.test.ts` (usa un cliente Supabase real contra la base de test, no mocks — sigue exactamente ese patrón de setup/teardown).
+Referencia de estilo de test: `tests/content/copy-hashtags-migration.test.ts` — lee el `.sql` con `readFile` y hace aserciones por regex sobre el texto (no hay Postgres local; ver la nota al inicio de este plan). Sigue ese mismo patrón exacto, no uno con cliente en vivo.
 
 - [ ] **Step 1: Escribir los tests que deben fallar**
 
 ```typescript
 // tests/content/meta-publisher-migration.test.ts (arranca el archivo aquí; más tareas le agregan tests)
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-// import el mismo helper de cliente de test que usa copy-hashtags-migration.test.ts
+
+async function readMigration(): Promise<string> {
+  const path = fileURLToPath(new URL("../../supabase/migrations/0018_meta_publisher.sql", import.meta.url));
+  return readFile(path, "utf8");
+}
 
 describe("content_item_assets", () => {
-  it("acepta hasta 10 posiciones por content item, rechaza la 11", async () => {
-    // crear un content_item real (usar el helper existente de fixtures)
-    // insertar 10 filas con position 0..9 → debe pasar
-    // insertar una 11ª con position 10 → debe fallar por el check (0-9)
+  it("declara la tabla con position acotada entre 0 y 9", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/create table public\.content_item_assets/i);
+    expect(sql).toMatch(/position smallint not null check \(position >= 0 and position <= 9\)/i);
   });
 
-  it("rechaza duplicar la misma position dos veces para el mismo content item", async () => {
-    // insertar position=0 dos veces → viola unique(content_item_id, position)
+  it("declara unique\\(content_item_id, position\\) y unique\\(content_item_id, asset_id\\)", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/unique \(content_item_id, position\)/i);
+    expect(sql).toMatch(/unique \(content_item_id, asset_id\)/i);
   });
 
-  it("rechaza un asset_id de otra organización aunque el content_item_id sea válido", async () => {
-    // crear organization A con su content_item, organization B con su asset
-    // intentar insertar content_item_assets con content_item de A y asset de B
-    // debe fallar por la FK compuesta (asset_id, organization_id)
+  it("declara FKs compuestas por (content_item_id/asset_id, organization_id) para evitar mezclar tenants", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/foreign key \(content_item_id, organization_id\)\s*references public\.content_items \(id, organization_id\)/i);
+    expect(sql).toMatch(/foreign key \(asset_id, organization_id\)\s*references public\.assets \(id, organization_id\)/i);
   });
 
-  it("el backfill crea position=0 para content_items existentes con asset_id", async () => {
-    // Este test solo tiene sentido corrido contra una base con datos previos a
-    // la migración 0018 — si el entorno de test recrea el esquema desde cero
-    // cada vez, documenta explícitamente que este caso se verifica manualmente
-    // en staging antes de aplicar 0018 ahí (ver Task 1, Step 5).
+  it("incluye el backfill de position=0 para content_items con asset_id existente", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/insert into public\.content_item_assets \(organization_id, content_item_id, asset_id, position\)/i);
+    expect(sql).toMatch(/where asset_id is not null/i);
+  });
+
+  it("habilita RLS sin policy de escritura para authenticated", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.content_item_assets enable row level security/i);
   });
 });
 ```
@@ -161,23 +176,31 @@ git commit -m "feat: add content_item_assets for multi-image carousel support"
 
 ```typescript
 describe("organization_meta_connections", () => {
-  it("authenticated no puede hacer select directo, ni con RLS ni sin ella", async () => {
-    // usar el cliente de test autenticado como un miembro real de la org
-    // select * from organization_meta_connections where organization_id = ...
-    // debe regresar error de permisos (no solo 0 filas)
+  it("no tiene ninguna policy RLS para authenticated/anon, y revoca el acceso directo a la tabla", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.organization_meta_connections enable row level security/i);
+    expect(sql).toMatch(/revoke all on public\.organization_meta_connections from public, anon, authenticated/i);
+    expect(sql).not.toMatch(/create policy[\s\S]*on public\.organization_meta_connections[\s\S]*to authenticated/i);
   });
 
-  it("get_meta_connection_status expone status/nombre/instagram pero nunca el token", async () => {
-    // insertar una conexión vía el helper service_role
-    // llamar la RPC como el miembro autenticado
-    // el objeto resultado no debe tener ninguna clave que contenga el token
+  it("get_meta_connection_status no selecciona ni regresa page_access_token", async () => {
+    const sql = await readMigration();
+    const fnMatch = sql.match(/create function public\.get_meta_connection_status[\s\S]*?\$\$;/i);
+    expect(fnMatch).not.toBeNull();
+    expect(fnMatch![0]).not.toMatch(/page_access_token/i);
   });
 
-  it("get_meta_connection_status rechaza a un no-miembro de la organización", async () => {
+  it("get_meta_connection_status se otorga a authenticated; upsert/revoke/mark-error solo a service_role", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/grant execute on function public\.get_meta_connection_status\(uuid, uuid\) to authenticated/i);
+    expect(sql).toMatch(/grant execute on function public\.upsert_meta_connection\([^)]*\) to service_role/i);
+    expect(sql).toMatch(/grant execute on function public\.revoke_meta_connection\(uuid\) to service_role/i);
+    expect(sql).toMatch(/grant execute on function public\.mark_meta_connection_error\(uuid\) to service_role/i);
   });
 
-  it("upsert_meta_connection y revoke_meta_connection solo son ejecutables por service_role", async () => {
-    // intentar client.rpc(...) como authenticated → debe fallar por falta de grant
+  it("el CHECK de page_access_token no exige texto no-vacío cuando status no es ACTIVE (para que revoke pueda limpiarlo)", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/check \(status <> 'ACTIVE' or length\(btrim\(page_access_token\)\) > 0\)/i);
   });
 });
 ```
@@ -199,8 +222,10 @@ create table public.organization_meta_connections (
   facebook_page_id text not null check (length(btrim(facebook_page_id)) > 0),
   facebook_page_name text not null check (length(btrim(facebook_page_name)) > 0),
   instagram_business_account_id text,
-  page_access_token text not null check (length(btrim(page_access_token)) > 0),
+  page_access_token text not null,
   status text not null default 'ACTIVE' check (status in ('ACTIVE', 'REVOKED', 'ERROR')),
+  constraint organization_meta_connections_token_nonempty_when_active
+    check (status <> 'ACTIVE' or length(btrim(page_access_token)) > 0),
   connected_by uuid not null references public.profiles(id) on delete restrict,
   connected_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -343,8 +368,15 @@ git commit -m "feat: add organization_meta_connections storage and status RPC"
 
 ```typescript
 describe("organization_meta_oauth_sessions", () => {
-  it("authenticated no puede leer la tabla directamente", async () => {});
-  it("una fila con expires_at en el pasado no debe usarse (verificar en la app, no aquí — este test solo confirma que la columna existe y acepta timestamps pasados sin error)", async () => {});
+  it("revoca el acceso directo a authenticated/anon", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.organization_meta_oauth_sessions enable row level security/i);
+    expect(sql).toMatch(/revoke all on public\.organization_meta_oauth_sessions from public, anon, authenticated/i);
+  });
+  it("discovered_pages exige un array jsonb", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/discovered_pages jsonb not null check \(jsonb_typeof\(discovered_pages\) = 'array'\)/i);
+  });
 });
 ```
 
@@ -396,10 +428,17 @@ git commit -m "feat: add temporary OAuth page-selection session table"
 
 ```typescript
 describe("automation_jobs PUBLISH kind", () => {
-  it("acepta insertar un job kind='PUBLISH' con publication_target_id", async () => {});
-  it("rechaza un job kind='PUBLISH' sin publication_target_id", async () => {});
-  it("rechaza un job kind='COPY' que traiga publication_target_id", async () => {});
-  it("sigue aceptando kind='COPY' sin publication_target_id (regresión)", async () => {});
+  it("dropea el check viejo automation_jobs_kind_check antes de agregar el nuevo", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.automation_jobs drop constraint if exists automation_jobs_kind_check/i);
+    expect(sql).toMatch(/add constraint automation_jobs_kind_check check \(kind in \('COPY', 'PUBLISH'\)\)/i);
+  });
+  it("publication_target_id es obligatorio solo para kind='PUBLISH'", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/add column publication_target_id uuid references public\.publication_targets\(id\)/i);
+    expect(sql).toMatch(/\(kind = 'COPY' and publication_target_id is null\)/i);
+    expect(sql).toMatch(/\(kind = 'PUBLISH' and publication_target_id is not null\)/i);
+  });
 });
 ```
 
@@ -457,21 +496,63 @@ fail terminal). La única que difiere de verdad en su cuerpo es
 - [ ] **Step 1: Tests**
 
 ```typescript
-describe("PUBLISH job lifecycle", () => {
-  it("enqueue_publish_automation_job crea un job QUEUED con idempotency key derivada del target", async () => {});
-  it("enqueue_publish_automation_job es idempotente: llamarlo dos veces con el mismo target no crea un segundo job", async () => {});
-  it("claim_next_publish_automation_job regresa FAILED (no lanza excepción) si la organización no tiene conexión ACTIVE", async () => {});
-  it("claim_next_publish_automation_job regresa FAILED si el target es INSTAGRAM y la organización no tiene instagram_business_account_id", async () => {});
-  it("claim_next_publish_automation_job con conexión válida regresa CLAIMED con el copy final, los assets ordenados y el token de página", async () => {});
-  it("renew_publish_automation_job extiende el lease de un job PROCESSING con el token correcto", async () => {});
-  it("fail_publish_automation_job con p_retryable=false transiciona a FAILED, audita PUBLISH_JOB_FAILED y pone el target en ERROR", async () => {});
-  it("fail_publish_automation_job con p_requires_reconnect=true además marca la conexión de la organización como ERROR", async () => {});
-  it("fail_publish_automation_job con p_retryable=true y attempt_count < max_attempts transiciona a RETRY_WAIT sin tocar el target", async () => {});
-  it("cancel_publish_automation_job cancela un job QUEUED", async () => {});
-  it("recover_expired_publish_automation_jobs recupera un job PROCESSING con lease vencido", async () => {});
-  it("summarize_publish_automation_jobs cuenta solo jobs kind='PUBLISH', no mezcla con COPY", async () => {});
+describe("PUBLISH job lifecycle SQL", () => {
+  it("enqueue_publish_automation_job deriva la idempotency key con md5(...)::uuid, no gen_random_uuid", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.enqueue_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/md5\(p_publication_target_id::text\)::uuid/i);
+  });
+  it("claim_next_publish_automation_job toma un advisory lock por target antes de seleccionar el job", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/pg_advisory_xact_lock/i);
+  });
+  it("claim_next_publish_automation_job pone el target en ERROR (no solo el job) cuando falla por conexión ausente/Instagram no conectado/aprobación/copy/assets faltantes", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const failBranches = fn.match(/status = 'FAILED', sanitized_error[\s\S]*?updated_at = now\(\)/gi) ?? [];
+    expect(failBranches.length).toBeGreaterThan(0);
+    expect(fn).toMatch(/update public\.publication_targets\s+set status = 'ERROR'::public\.publication_status/i);
+  });
+  it("recover_expired_publish_automation_jobs pone en ERROR los targets de los jobs que terminan en DEAD_LETTER", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.recover_expired_publish_automation_jobs[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/'ERROR'::public\.publication_status/i);
+  });
+  it("fail_publish_automation_job audita PUBLISH_JOB_FAILED y marca ERROR solo en transición terminal", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.fail_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/'PUBLISH_JOB_FAILED'/i);
+    expect(fn).toMatch(/next_status in \('FAILED', 'DEAD_LETTER'\)/i);
+  });
+  it("fail_publish_automation_job con p_requires_reconnect llama mark_meta_connection_error", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.fail_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/if p_requires_reconnect then/i);
+    expect(fn).toMatch(/perform public\.mark_meta_connection_error/i);
+  });
+  it("las seis funciones están revocadas de public/anon/authenticated y otorgadas solo a service_role", async () => {
+    const sql = await readMigration();
+    for (const name of [
+      "enqueue_publish_automation_job", "claim_next_publish_automation_job", "renew_publish_automation_job",
+      "complete_publish_automation_job", "fail_publish_automation_job", "cancel_publish_automation_job",
+      "recover_expired_publish_automation_jobs", "summarize_publish_automation_jobs",
+    ]) {
+      expect(sql).toMatch(new RegExp(`revoke all on function public\\.${name}\\([^)]*\\) from public, anon, authenticated`, "i"));
+      expect(sql).toMatch(new RegExp(`grant execute on function public\\.${name}\\([^)]*\\) to service_role`, "i"));
+    }
+  });
 });
 ```
+
+**Comportamiento en vivo de estas seis funciones** (no verificable sin
+Postgres local) se confirma en Task 7, Step 5 (`db push --dry-run` contra
+staging) y, más importante, en las Tareas 14-16, donde el worker store real
+las llama y esos tests sí corren contra la base de staging conectada por
+`SUPABASE_SERVICE_ROLE_KEY` (revisa cómo `tests/worker/*.test.ts`, si
+existen, resuelven ese acceso hoy — si no hay ninguno, este es el primer
+test de ese tipo en el repo y hay que confirmarlo con el humano antes de
+asumir que hay credenciales de test disponibles en CI).
 
 - [ ] **Step 2: Correr, confirmar que falla**
 
@@ -493,10 +574,10 @@ as $$
 declare
   -- Idempotency key determinística: un mismo target nunca produce dos jobs
   -- distintos vía este camino. gen_random_uuid() aquí sería un bug.
-  derived_key uuid := public.uuid_generate_v5(
-    'a3f1e9c0-6b3d-4f7e-8c1a-1d2e3f4a5b6c'::uuid,
-    p_publication_target_id::text
-  );
+  -- Solo pgcrypto está habilitado en este proyecto (no uuid-ossp), así que
+  -- se deriva con md5 en vez de uuid_generate_v5 — md5(...)::uuid es SQL
+  -- válido en Postgres (el hash hex de 32 caracteres se parsea como UUID).
+  derived_key uuid := md5(p_publication_target_id::text)::uuid;
   existing_job public.automation_jobs%rowtype;
   created_job public.automation_jobs%rowtype;
 begin
@@ -525,14 +606,36 @@ end;
 $$;
 ```
 
-**Si `uuid_generate_v5` no está disponible** (revisa si `uuid-ossp` está
-habilitado en este proyecto Supabase antes de asumirlo — busca
-`create extension` en `0001_content_os.sql`): usa en su lugar
-`md5(p_publication_target_id::text)::uuid` como key determinística — menos
-elegante pero no depende de una extensión adicional. Documenta cuál usaste
-en el comentario de la función.
+PL/pgSQL no permite declarar una función/procedimiento anidado dentro de
+otra función — `fail_claim_publish_job` se declara aparte, **antes** de
+`claim_next_publish_automation_job` en el archivo, y se invoca con
+`perform` (no `call`, eso es solo para objetos `PROCEDURE` reales, y esto
+es una función):
 
 ```sql
+-- Marca el job FAILED y, a diferencia de claim_next_copy_automation_job
+-- (que no tiene un "target" que actualizar), también pone el
+-- publication_target en ERROR con el mismo motivo. Sin esto,
+-- retry_publish_target nunca encuentra nada que reintentar: el job queda
+-- muerto pero el target sigue APPROVED para siempre.
+create function public.fail_claim_publish_job(
+  p_job_id uuid, p_target_id uuid, p_organization_id uuid, p_reason text
+)
+returns void
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  update public.automation_jobs set status = 'FAILED', sanitized_error = p_reason, updated_at = now()
+  where id = p_job_id;
+  update public.publication_targets set status = 'ERROR'::public.publication_status, last_error = p_reason
+  where id = p_target_id and organization_id = p_organization_id;
+end;
+$$;
+revoke all on function public.fail_claim_publish_job(uuid, uuid, uuid, text) from public, anon, authenticated;
+grant execute on function public.fail_claim_publish_job(uuid, uuid, uuid, text) to service_role;
+
 create function public.claim_next_publish_automation_job(
   p_provider text default null,
   p_organization_id uuid default null
@@ -550,6 +653,24 @@ declare
   assets_json jsonb;
   token uuid := gen_random_uuid();
 begin
+  -- Advisory lock por target: sin esto, dos claims concurrentes podrían
+  -- tomar dos jobs QUEUED distintos para el MISMO target (p. ej. uno
+  -- automático y uno de retry_publish_target) y ambos pasarían el "not
+  -- exists" de abajo antes de que ninguno llegara a PROCESSING — dos
+  -- publicaciones reales para el mismo target. El lock se libera solo al
+  -- terminar la transacción (xact), así que cubre todo el claim.
+  perform pg_advisory_xact_lock(hashtext('publish_target:' || (
+    select queued.publication_target_id::text
+    from public.automation_jobs as queued
+    where queued.kind = 'PUBLISH'
+      and (p_provider is null or queued.provider = p_provider)
+      and (p_organization_id is null or queued.organization_id = p_organization_id)
+      and queued.status in ('QUEUED', 'RETRY_WAIT')
+      and queued.run_at <= now() and queued.next_attempt_at <= now()
+    order by queued.next_attempt_at asc, queued.created_at asc
+    limit 1
+  )));
+
   select queued.* into job
   from public.automation_jobs as queued
   where queued.kind = 'PUBLISH'
@@ -577,9 +698,7 @@ begin
   from public.publication_targets
   where id = job.publication_target_id and organization_id = job.organization_id;
   if not found or target.status <> 'APPROVED' then
-    update public.automation_jobs set status = 'FAILED',
-      sanitized_error = 'PUBLISH_JOB_TARGET_NOT_APPROVED', updated_at = now()
-    where id = job.id;
+    perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_TARGET_NOT_APPROVED');
     return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
   end if;
 
@@ -587,15 +706,11 @@ begin
   from public.organization_meta_connections
   where organization_id = job.organization_id and status = 'ACTIVE';
   if not found then
-    update public.automation_jobs set status = 'FAILED',
-      sanitized_error = 'PUBLISH_JOB_CONNECTION_NOT_FOUND', updated_at = now()
-    where id = job.id;
+    perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_CONNECTION_NOT_FOUND');
     return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
   end if;
   if target.platform = 'INSTAGRAM' and connection.instagram_business_account_id is null then
-    update public.automation_jobs set status = 'FAILED',
-      sanitized_error = 'PUBLISH_JOB_INSTAGRAM_NOT_CONNECTED', updated_at = now()
-    where id = job.id;
+    perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_INSTAGRAM_NOT_CONNECTED');
     return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
   end if;
 
@@ -604,9 +719,7 @@ begin
   where content_item_id = job.content_item_id and organization_id = job.organization_id
   order by version desc limit 1;
   if not found then
-    update public.automation_jobs set status = 'FAILED',
-      sanitized_error = 'PUBLISH_JOB_FINAL_COPY_NOT_FOUND', updated_at = now()
-    where id = job.id;
+    perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_FINAL_COPY_NOT_FOUND');
     return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
   end if;
 
@@ -618,9 +731,7 @@ begin
   join public.assets as a on a.id = cia.asset_id and a.organization_id = cia.organization_id
   where cia.content_item_id = job.content_item_id and cia.organization_id = job.organization_id;
   if assets_json is null or jsonb_array_length(assets_json) = 0 then
-    update public.automation_jobs set status = 'FAILED',
-      sanitized_error = 'PUBLISH_JOB_ASSETS_NOT_FOUND', updated_at = now()
-    where id = job.id;
+    perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_ASSETS_NOT_FOUND');
     return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
   end if;
 
@@ -841,22 +952,49 @@ language plpgsql
 security definer
 set search_path = pg_catalog
 as $$
-declare recovered_count integer := 0;
+declare
+  recovered_count integer := 0;
+  job_row record;
 begin
   if p_limit < 1 or p_limit > 1000 then
     raise exception using errcode = 'P0001', message = 'PUBLISH_JOB_RECOVERY_LIMIT_INVALID';
   end if;
-  with expired as (
-    select id, attempt_count, max_attempts from public.automation_jobs
-    where kind = 'PUBLISH' and status = 'PROCESSING' and lease_expires_at <= now()
-    order by lease_expires_at asc for update skip locked limit p_limit
-  )
-  update public.automation_jobs as job
-  set status = case when expired.attempt_count >= expired.max_attempts then 'DEAD_LETTER'::public.automation_job_status else 'RETRY_WAIT'::public.automation_job_status end,
-      next_attempt_at = now(), sanitized_error = coalesce(job.sanitized_error, 'Lease expired before completion'),
-      lease_token = null, lease_expires_at = null, updated_at = now()
-  from expired where job.id = expired.id;
-  get diagnostics recovered_count = row_count;
+
+  -- FOR ... IN <update ... returning> es un loop válido en PL/pgSQL sobre
+  -- las filas devueltas por un UPDATE. Se usa (en vez de una segunda
+  -- sentencia aparte) para poder, por cada job recién recuperado, decidir
+  -- si también hay que tocar su publication_target — a diferencia de COPY,
+  -- un PUBLISH que cae en DEAD_LETTER por recuperación de lease (no por
+  -- fail_publish_automation_job) también debe dejar el target en ERROR, o
+  -- retry_publish_target nunca tiene nada que reintentar.
+  for job_row in
+    update public.automation_jobs as job
+    set status = case when expired.attempt_count >= expired.max_attempts
+                    then 'DEAD_LETTER'::public.automation_job_status
+                    else 'RETRY_WAIT'::public.automation_job_status end,
+        next_attempt_at = now(),
+        sanitized_error = coalesce(job.sanitized_error, 'Lease expired before completion'),
+        lease_token = null, lease_expires_at = null, updated_at = now()
+    from (
+      select id, attempt_count, max_attempts
+      from public.automation_jobs
+      where kind = 'PUBLISH' and status = 'PROCESSING' and lease_expires_at <= now()
+      order by lease_expires_at asc
+      for update skip locked
+      limit p_limit
+    ) as expired
+    where job.id = expired.id
+    returning job.id, job.status, job.publication_target_id, job.organization_id
+  loop
+    recovered_count := recovered_count + 1;
+    if job_row.status = 'DEAD_LETTER' then
+      update public.publication_targets
+      set status = 'ERROR'::public.publication_status,
+          last_error = coalesce(last_error, 'Lease expired before completion')
+      where id = job_row.publication_target_id and organization_id = job_row.organization_id;
+    end if;
+  end loop;
+
   return jsonb_build_object('recovered', recovered_count);
 end;
 $$;
@@ -916,11 +1054,25 @@ git commit -m "feat: add PUBLISH automation job lifecycle RPCs"
 - [ ] **Step 1: Tests**
 
 ```typescript
-describe("apply_publication_diagnosis", () => {
-  it("quality_level='promising' con findings solo info -> APPROVED + job PUBLISH encolado + TARGET_AUTO_APPROVED", async () => {});
-  it("quality_level='promising' con un finding severity='warning' -> se queda PENDING_REVIEW, no encola job", async () => {});
-  it("quality_level='needs_review' -> PENDING_REVIEW con TARGET_HELD_FOR_REVIEW y los findings en la metadata", async () => {});
-  it("es idempotente por idempotency_key: llamarlo dos veces no duplica el evento ni el job", async () => {});
+describe("apply_publication_diagnosis SQL", () => {
+  it("automation_runs.kind se extiende para aceptar PUBLISH_DIAGNOSIS", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.automation_runs drop constraint if exists automation_runs_kind_check/i);
+    expect(sql).toMatch(/'PUBLISH_DIAGNOSIS'/i);
+  });
+  it("is_safe exige quality_level='promising' Y que TODOS los findings tengan severity='info' (fail-closed ante severity nula/desconocida)", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.apply_publication_diagnosis[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/coalesce\(finding->>'severity', ''\) <> 'info'/i);
+  });
+  it("bloquea con lock en content_items antes que en publication_targets (mismo orden que approve_publication_target)", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.apply_publication_diagnosis[\s\S]*?\$\$;/i)![0];
+    const itemLockIndex = fn.search(/select \* into item from public\.content_items[\s\S]*?for update/i);
+    const targetUpdateIndex = fn.search(/update public\.publication_targets set status = 'APPROVED'/i);
+    expect(itemLockIndex).toBeGreaterThan(-1);
+    expect(targetUpdateIndex).toBeGreaterThan(itemLockIndex);
+  });
 });
 ```
 
@@ -933,6 +1085,13 @@ describe("apply_publication_diagnosis", () => {
 -- Task 6: apply_publication_diagnosis
 -- ============================================================
 
+-- automation_runs.kind (0001_content_os.sql) declaró un check inline
+-- cerrado a 4 valores, sin PUBLISH_DIAGNOSIS. Mismo patrón que la Tarea 4:
+-- dropear por el nombre auto-generado antes de agregar el nuevo.
+alter table public.automation_runs drop constraint if exists automation_runs_kind_check;
+alter table public.automation_runs add constraint automation_runs_kind_check
+  check (kind in ('COPY_REQUEST', 'COPY_CALLBACK', 'PUBLISH_REQUEST', 'PUBLISH_CALLBACK', 'PUBLISH_DIAGNOSIS'));
+
 create function public.apply_publication_diagnosis(
   p_organization_id uuid, p_content_item_id uuid, p_publication_target_id uuid,
   p_quality_level text, p_findings jsonb, p_idempotency_key uuid
@@ -943,8 +1102,8 @@ security definer
 set search_path = pg_catalog
 as $$
 declare
-  target public.publication_targets%rowtype;
   item public.content_items%rowtype;
+  target public.publication_targets%rowtype;
   is_safe boolean;
   prior_run public.automation_runs%rowtype;
 begin
@@ -959,6 +1118,14 @@ begin
   where kind = 'PUBLISH_DIAGNOSIS' and idempotency_key = p_idempotency_key;
   if found then return jsonb_build_object('created', false); end if;
 
+  -- Orden de locks: content_items primero, publication_targets después —
+  -- mismo orden que approve_publication_target y
+  -- complete_publish_automation_job, para no crear un deadlock si alguna de
+  -- las tres corre al mismo tiempo sobre el mismo content item.
+  select * into item from public.content_items
+  where id = p_content_item_id and organization_id = p_organization_id for update;
+  if not found then raise exception using errcode = 'P0001', message = 'DIAGNOSIS_CONTENT_NOT_FOUND'; end if;
+
   select * into target from public.publication_targets
   where id = p_publication_target_id and content_item_id = p_content_item_id
     and organization_id = p_organization_id for update;
@@ -967,14 +1134,13 @@ begin
     return jsonb_build_object('created', false, 'reason', 'TARGET_NOT_PENDING');
   end if;
 
-  select * into item from public.content_items
-  where id = p_content_item_id and organization_id = p_organization_id for update;
-
-  -- La regla vive acá, no en TypeScript: "promising" y ningún finding con
-  -- severity distinto de "info" es lo único que cuenta como seguro.
+  -- La regla vive acá, no en TypeScript: "promising" y CADA finding con
+  -- severity EXACTAMENTE "info" es lo único que cuenta como seguro. coalesce
+  -- a '' hace esto fail-closed: un finding con severity nula, ausente, o un
+  -- valor no reconocido NUNCA pasa como seguro, solo 'info' explícito.
   is_safe := p_quality_level = 'promising' and not exists (
     select 1 from jsonb_array_elements(p_findings) as finding
-    where finding->>'severity' in ('warning', 'error')
+    where coalesce(finding->>'severity', '') <> 'info'
   );
 
   insert into public.automation_runs (organization_id, owner_id, content_item_id, publication_target_id, kind, idempotency_key, status, response_payload)
@@ -1025,21 +1191,35 @@ git commit -m "feat: add apply_publication_diagnosis RPC for ADR-008 auto-approv
 - [ ] **Step 1: Tests**
 
 ```typescript
-describe("approve_publication_target fixes", () => {
-  it("aprobar manualmente un target PENDING_REVIEW encola un job PUBLISH", async () => {});
-  it("llamarlo de nuevo sobre un target ya APPROVED no crea un segundo job (idempotencia por target)", async () => {});
-  it("el content_item llega a state=APPROVED aunque otro target del mismo item ya esté PUBLISHED", async () => {
-    // Regresión directa del bug encontrado en revisión: crear 2 targets,
-    // llevar uno a PUBLISHED (vía complete_publish_automation_job),
-    // aprobar el segundo manualmente, verificar que content_items.state pasa a APPROVED.
+describe("approve_publication_target fixes (regex sobre la migración)", () => {
+  it("encola el job PUBLISH tanto en el camino de retorno anticipado como en el de recién-aprobado", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create or replace function public\.approve_publication_target[\s\S]*?\$\$;/i)![0];
+    const calls = fn.match(/perform public\.enqueue_publish_automation_job/gi) ?? [];
+    expect(calls.length).toBe(2);
+  });
+  it("el conteo de pendientes excluye APPROVED y PUBLISHED, no solo APPROVED", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create or replace function public\.approve_publication_target[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/status not in \('APPROVED', 'PUBLISHED'\)/i);
   });
 });
 
-describe("retry_publish_target", () => {
-  it("un target en ERROR vuelve a APPROVED y encola un job nuevo con idempotency key distinta", async () => {});
-  it("rechaza reintentar un target que no está en ERROR", async () => {});
+describe("retry_publish_target (regex sobre la migración)", () => {
+  it("exige status='ERROR' y usa gen_random_uuid (no una key determinística) para el reintento", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.retry_publish_target[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/if target\.status <> 'ERROR' then/i);
+    expect(fn).toMatch(/'PUBLISH', 'QUEUED', gen_random_uuid\(\)/i);
+  });
 });
 ```
+
+**Comportamiento en vivo** de ambas funciones (el bug del conteo agregado,
+el que un target `PUBLISHED` no bloquee el agregado, que el reintento
+realmente vuelva a `APPROVED`) se verifica en Tarea 13+ cuando la capa de
+repositorio las llama con un cliente Supabase real contra staging — no
+hay forma de probarlo con Postgres local en este entorno.
 
 - [ ] **Step 2: Correr, confirmar que falla**
 
@@ -1247,8 +1427,29 @@ git commit -m "feat: accept 1-10 assets per content item for carousel support"
 
 ## Task 9: `lib/integrations/meta-publisher.ts` — split de preflight
 
+**Corrección tras revisión de Codex CLI:** `lib/integrations/meta-publisher.ts`
+tiene `import "server-only"` en la línea 1 — ese paquete lanza una excepción
+en tiempo de ejecución si se importa fuera del bundler de Next.js. El
+worker standalone (`worker/entrypoint.ts`, corrido con `tsx`/Node directo,
+no por Next.js) va a importar las funciones de publicación reales
+(Tareas 11-12) — si viven en este mismo archivo, el worker truena al
+arrancar. Por eso esta tarea **separa dos archivos**, no uno:
+
+- `lib/integrations/meta-graph-client.ts` (nuevo, **sin** `import "server-only"`):
+  las funciones de bajo nivel que hablan con Graph API directamente
+  (`callGraphApi`, `publishToFacebook`, `publishToInstagram`,
+  `pollContainerUntilReady`). Importable tanto por rutas de Next.js como
+  por el worker standalone. Las Tareas 11 y 12 escriben aquí, no en
+  `meta-publisher.ts`.
+- `lib/integrations/meta-publisher.ts` (existente, conserva
+  `import "server-only"`): solo `preflightApp()` y `getConnectionStatus()`
+  — funciones que solo tiene sentido llamar desde una ruta de Next.js
+  autenticada, nunca desde el worker. Puede reexportar tipos de
+  `meta-graph-client.ts` si conviene, pero no funciones ejecutables.
+
 **Files:**
 - Modify: `lib/integrations/meta-publisher.ts`
+- Create: `lib/integrations/meta-graph-client.ts` (vacío por ahora, salvo el export de `GRAPH_API_VERSION`/`GRAPH_API_BASE` — las Tareas 11-12 lo llenan)
 - Modify: `tests/content/meta-publisher.test.ts` (o el path real del test existente — búscalo primero)
 - Modify: `.env.example`
 
@@ -1335,8 +1536,8 @@ git commit -m "feat: add MetaPublishError with retryable/requiresReconnect class
 ## Task 11: Adaptador Facebook
 
 **Files:**
-- Modify: `lib/integrations/meta-publisher.ts`
-- Modify: `tests/content/meta-publisher.test.ts`
+- Modify: `lib/integrations/meta-graph-client.ts` (no `meta-publisher.ts` — ver la nota de server-only en Task 9)
+- Modify: `tests/integrations/meta-graph-client.test.ts` (nuevo — no es `tests/content/meta-publisher.test.ts`, que sigue probando solo el preflight/status de Task 9)
 
 - [ ] **Step 1: Tests** (fetch mockeado — sigue el patrón de inyección de dependencias de `worker/providers/copy-processor.ts` para el `fetchFn`)
 
@@ -1366,7 +1567,10 @@ export type FacebookPublishInput = {
   assets: Array<{ signedUrl: string; position: number }>; // ya ordenados
 };
 
-export type MetaPublishResult = { remotePostId: string; remoteUrl: string };
+// publishedAt se captura al momento de la respuesta exitosa de Meta, no se
+// deriva después — complete_publish_automation_job (Task 5) lo exige junto
+// con remotePostId/remoteUrl; sin este campo la finalización del job falla.
+export type MetaPublishResult = { remotePostId: string; remoteUrl: string; publishedAt: string };
 
 async function publishToFacebook(
   input: FacebookPublishInput,
@@ -1405,7 +1609,7 @@ async function publishToFacebook(
     fetchFn, `${postId}?fields=permalink_url&access_token=${encodeURIComponent(input.pageAccessToken)}`,
     null, "GET",
   );
-  return { remotePostId: postId, remoteUrl: permalink.permalink_url as string };
+  return { remotePostId: postId, remoteUrl: permalink.permalink_url as string, publishedAt: new Date().toISOString() };
 }
 ```
 
@@ -1421,7 +1625,7 @@ caso ambiguo del spec.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lib/integrations/meta-publisher.ts tests/content/meta-publisher.test.ts
+git add lib/integrations/meta-graph-client.ts tests/integrations/meta-graph-client.test.ts
 git commit -m "feat: implement real Facebook publish adapter (single image + carousel)"
 ```
 
@@ -1430,8 +1634,8 @@ git commit -m "feat: implement real Facebook publish adapter (single image + car
 ## Task 12: Adaptador Instagram
 
 **Files:**
-- Modify: `lib/integrations/meta-publisher.ts`
-- Modify: `tests/content/meta-publisher.test.ts`
+- Modify: `lib/integrations/meta-graph-client.ts`
+- Modify: `tests/integrations/meta-graph-client.test.ts`
 
 - [ ] **Step 1: Tests**
 
@@ -1502,7 +1706,7 @@ async function publishToInstagram(
     fetchFn, `${mediaId}?fields=permalink&access_token=${encodeURIComponent(input.pageAccessToken)}`,
     null, "GET",
   );
-  return { remotePostId: mediaId, remoteUrl: permalink.permalink as string };
+  return { remotePostId: mediaId, remoteUrl: permalink.permalink as string, publishedAt: new Date().toISOString() };
 }
 ```
 
@@ -1510,7 +1714,7 @@ async function publishToInstagram(
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lib/integrations/meta-publisher.ts tests/content/meta-publisher.test.ts
+git add lib/integrations/meta-graph-client.ts tests/integrations/meta-graph-client.test.ts
 git commit -m "feat: implement real Instagram publish adapter (single image + carousel)"
 ```
 
@@ -1534,11 +1738,39 @@ it("si validateFinalCopy falla, no llega a llamar submit_final_copy_for_review n
 
 - [ ] **Step 3: Implementar**
 
+**`organizationProfile` y el casing de `channel` (corregido tras revisión
+de Codex CLI — el pseudocódigo original dejaba `organizationProfile`
+indefinido y pasaba `target.platform` en mayúsculas, que
+`aiasPlatformSchema` rechaza):**
+
+```typescript
+// aiasPlatformSchema = z.enum(["facebook", "instagram"]) — minúsculas.
+// publication_targets.platform (Postgres) es 'FACEBOOK' | 'INSTAGRAM' — mayúsculas.
+// Nunca pases target.platform directo a diagnosePublication sin convertir.
+
+const { data: brandProfile, error: brandProfileError } = await supabase
+  .from("organization_brand_profiles")
+  .select("aias_profile")
+  .eq("organization_id", organizationId)
+  .maybeSingle();
+if (brandProfileError) throw new Error("Unable to read the organization's AIAS profile.");
+const organizationProfile = aiasOrganizationProfileSchema.parse(brandProfile?.aias_profile ?? {});
+```
+
+(mismo query que `getOrganizationForbiddenClaims` en
+`worker/providers/copy-processor.ts:100-114`, pero parseando el perfil
+completo en vez de extraer solo `forbiddenClaims` — `diagnosePublication`
+necesita el objeto `profile` entero, no un array).
+
 Después de que `submitFinalCopyForReview` resuelve con éxito, para cada
 `publication_target` del content item (`FACEBOOK`, `INSTAGRAM`):
 ```typescript
 const signal = [finalCopy.headline, finalCopy.body, finalCopy.cta, ...finalCopy.hashtags].join(" ");
-const diagnosis = diagnosePublication({ profile: organizationProfile, signal, channel: target.platform });
+const diagnosis = diagnosePublication({
+  profile: organizationProfile,
+  signal,
+  channel: target.platform.toLowerCase() as AiasPlatform, // FACEBOOK -> facebook
+});
 await repository.applyPublicationDiagnosis({
   contentItemId, publicationTargetId: target.id,
   qualityLevel: diagnosis.qualityLevel, findings: diagnosis.findings,
@@ -1603,7 +1835,11 @@ git commit -m "feat: add Supabase-backed durable store for PUBLISH jobs"
 - Test: `tests/worker/meta-publish-processor.test.ts`
 
 Mismo patrón de inyección de dependencias que
-`worker/providers/copy-processor.ts` — léelo primero.
+`worker/providers/copy-processor.ts` — léelo primero. Importa
+`publishToFacebook`/`publishToInstagram`/`buildCaption` desde
+`@/lib/integrations/meta-graph-client` (Tareas 11-12), **no** desde
+`meta-publisher.ts` — ese archivo tiene `import "server-only"` y este
+processor lo corre el worker standalone (`tsx`, no Next.js).
 
 - [ ] **Step 1: Tests**
 
@@ -1668,12 +1904,24 @@ git commit -m "feat: add meta publish processor with reconnect-on-error handling
 - Modify: `worker/entrypoint.ts`
 - Modify: el test existente de `worker/entrypoint.ts`
 
+**Corrección tras revisión de Codex CLI:** este repo ya tiene un
+interruptor de seguridad existente,
+`SNAPGAD_PUBLISH_WORKER_ENABLED` (usado hoy por
+`lib/integrations/n8n-client.ts` para mantener el camino de publicación
+viejo fallando cerrado — ver `docs/vault/06-staging-pilot-runbook.md`). El
+runner nuevo de `PUBLISH` debe respetar el **mismo** flag: si no es
+exactamente `"true"`, el proceso arranca solo el runner de `COPY` (el
+comportamiento de hoy, sin cambios) y el de `PUBLISH` ni se construye. Esto
+evita que desplegar este código por sí solo empiece a publicar de verdad
+sin que alguien lo active a propósito.
+
 - [ ] **Step 1: Tests**
 
 ```typescript
 it("isPublishJobRetryable regresa false para MetaPublishError con retryable=false", async () => {});
 it("isPublishJobRetryable regresa true para un error genérico (no MetaPublishError)", async () => {});
-it("main() construye dos DurableJobRunner (uno COPY, uno PUBLISH) y los corre con Promise.all", async () => {
+it("main() con SNAPGAD_PUBLISH_WORKER_ENABLED!=='true' solo corre el runner de COPY", async () => {});
+it("main() con SNAPGAD_PUBLISH_WORKER_ENABLED==='true' construye y corre ambos runners con Promise.all", async () => {
   // mockear ambos runners/stores, verificar que runUntilStopped se llama en ambos
 });
 ```
@@ -1688,17 +1936,19 @@ export function isPublishJobRetryable(error: unknown): boolean {
 }
 ```
 
-Extiende `main()` para construir `SupabasePublishWorkerStore` +
-`createMetaPublishProcessor` + un segundo `DurableJobRunner`, y correr
-ambos:
+Extiende `main()`:
 ```typescript
-await Promise.all([
-  copyRunner.runUntilStopped(),
-  publishRunner.runUntilStopped(),
-]);
+const publishWorkerEnabled = process.env.SNAPGAD_PUBLISH_WORKER_ENABLED === "true";
+const runners = [copyRunner];
+let publishRunner: DurableJobRunner | undefined;
+if (publishWorkerEnabled) {
+  publishRunner = new DurableJobRunner(publishStore, publishProcessor, { /* ...opciones, isRetryable: isPublishJobRetryable */ });
+  runners.push(publishRunner);
+}
+const shutdown = () => runners.forEach((runner) => runner.stop());
+// ...
+await Promise.all(runners.map((runner) => runner.runUntilStopped()));
 ```
-El `shutdown` (`SIGTERM`/`SIGINT`) debe detener ambos (`copyRunner.stop()`
-y `publishRunner.stop()`).
 
 - [ ] **Step 4: Correr, confirmar que pasan**
 - [ ] **Step 5: Commit**
@@ -1716,11 +1966,17 @@ git commit -m "feat: dispatch COPY and PUBLISH jobs from a single worker process
 - Create: `app/api/integrations/meta/connect/route.ts`
 - Test: `tests/api/meta-oauth-connect.test.ts`
 
+**Corrección tras revisión de Codex CLI:** el helper existente
+`canManageConnections` (`lib/organizations/permissions.ts:13-15`) solo
+permite rol `owner` — no `editor`. Usa ese helper tal cual (no lo
+extiendas ni inventes un chequeo de rol paralelo) en las cuatro rutas de
+esta tarea y las Tareas 18-20.
+
 - [ ] **Step 1: Tests**
 
 ```typescript
 it("genera un nonce, lo pone en una cookie httpOnly de 10 minutos, y redirige a facebook.com/.../dialog/oauth con el state firmado", async () => {});
-it("rechaza si el actor no tiene rol owner/editor en la organización", async () => {});
+it("rechaza si canManageConnections(role) es false para el actor en esa organización", async () => {});
 it("el state incluye organization_id, el mismo nonce de la cookie, y una expiración de 10 min", async () => {});
 ```
 
@@ -1750,7 +2006,7 @@ git commit -m "feat: add Meta OAuth connect route with CSRF-bound nonce cookie"
 
 ```typescript
 it("rechaza si el nonce del state no coincide con el de la cookie", async () => {});
-it("rechaza si no hay sesión autenticada con rol owner/editor en la organización del state", async () => {});
+it("rechaza si no hay sesión autenticada con canManageConnections(role)===true en la organización del state", async () => {});
 it("con una sola página: intercambia code, extiende el token, llama /me/accounts, y persiste la conexión directo", async () => {});
 it("con varias páginas: crea una fila en organization_meta_oauth_sessions y redirige al selector, sin persistir ninguna conexión todavía", async () => {});
 it("nunca incluye ningún token en la respuesta al navegador", async () => {});
@@ -1781,6 +2037,7 @@ git commit -m "feat: add Meta OAuth callback with session-bound nonce verificati
 - [ ] **Step 1: Tests**
 
 ```typescript
+it("rechaza si canManageConnections(role) es false (misma regla que connect/callback)", async () => {});
 it("con nonce y pageId válidos, vuelve a llamar /me/accounts con el token guardado, extrae el access_token de la página elegida, y persiste la conexión", async () => {});
 it("rechaza si la sesión temporal expiró", async () => {});
 it("rechaza si el pageId no está en discovered_pages de esa sesión", async () => {});
@@ -1796,27 +2053,46 @@ git commit -m "feat: add Meta OAuth multi-page selection endpoint"
 
 ---
 
-## Task 20: OAuth — desconexión + estado de conexión en Settings
+## Task 20: OAuth — desconexión, estado de conexión, y reintentar target
 
 **Files:**
 - Create: `app/api/integrations/meta/disconnect/route.ts`
+- Create: `app/api/integrations/meta/status/route.ts`
+- Create: `app/api/publications/[targetId]/retry/route.ts` (o el path que siga la convención real de rutas de `publication_targets` en este repo — revísala antes de nombrar el archivo)
 - Modify: `app/(app)/settings/organizations/page.tsx`
-- Test: correspondiente para la ruta + un test de componente para la UI
+- Test: correspondiente para cada ruta + un test de componente para la UI
 
-- [ ] **Step 1-4: TDD estándar**
+**Corrección tras revisión de Codex CLI (dos huecos reales):**
+
+1. **`get_meta_connection_status` no tenía ningún caller HTTP concreto** —
+   se agrega `GET /api/integrations/meta/status?organizationId=...` que
+   resuelve el `actorId` de la **sesión autenticada del servidor**
+   (`supabase.auth.getUser()`), nunca de un parámetro que mande el cliente
+   — mismo patrón que el resto de las rutas de este repo (nunca confíes en
+   un actor/owner id que venga del request).
+2. **`retry_publish_target` (Task 7) no tenía ruta ni botón** — sin esto, el
+   flujo de "Reintentar" descrito en el spec no es alcanzable desde la UI.
+   Se agrega `POST /api/publications/[targetId]/retry`, mismo patrón de
+   resolución de actor desde la sesión, llamando la RPC de la Tarea 7.
+   Visible como botón "Reintentar" en la vista donde ya se muestra el
+   estado de cada `publication_target` (revisa `app/(app)/review/page.tsx`
+   o donde sea que hoy se listen los targets por content item) cuando
+   `status === 'ERROR'`.
+
+- [ ] **Step 1-4: TDD estándar** para las tres rutas.
 
 La ruta de disconnect llama `revoke_meta_connection`. La UI de Settings
-muestra el estado vía `get_meta_connection_status` (Tarea 2): "No
-conectado" / "Conectado como {pageName}" con un indicador separado para
-Instagram (`hasInstagram`) / "Reconectar" cuando `status = 'ERROR'`.
-Botones "Conectar Facebook" (link a `/api/integrations/meta/connect?organizationId=...`)
-y "Desconectar".
+muestra el estado vía `/api/integrations/meta/status`: "No conectado" /
+"Conectado como {pageName}" con un indicador separado para Instagram
+(`hasInstagram`) / "Reconectar" cuando `status = 'ERROR'`. Botones
+"Conectar Facebook" (link a `/api/integrations/meta/connect?organizationId=...`,
+solo visible si `canManageConnections(role)`) y "Desconectar".
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/api/integrations/meta/disconnect/route.ts "app/(app)/settings/organizations/page.tsx" <tests>
-git commit -m "feat: add Meta connection status and disconnect UI in Settings"
+git add app/api/integrations/meta/disconnect/route.ts app/api/integrations/meta/status/route.ts "app/api/publications/[targetId]/retry/route.ts" "app/(app)/settings/organizations/page.tsx" <tests>
+git commit -m "feat: add Meta connection status, disconnect, and target retry UI"
 ```
 
 ---
