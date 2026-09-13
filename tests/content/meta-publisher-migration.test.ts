@@ -37,3 +37,36 @@ describe("content_item_assets", () => {
     expect(sql).toMatch(/alter table public\.content_item_assets enable row level security/i);
   });
 });
+
+describe("organization_meta_connections", () => {
+  it("habilita RLS y revoca el acceso directo a la tabla para authenticated/anon", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.organization_meta_connections enable row level security/i);
+    expect(sql).toMatch(/revoke all on public\.organization_meta_connections from public, anon, authenticated/i);
+    // Nota: no se agrega un `not.toMatch` genérico de "no existe ninguna
+    // policy" — con [\s\S]* eso hace match voraz contra CUALQUIER policy de
+    // cualquier otra tabla en el mismo archivo y da falsos positivos/negativos
+    // (hallazgo de revisión Codex ronda 2). Las dos aserciones positivas de
+    // arriba ya cubren el contrato real.
+  });
+
+  it("get_meta_connection_status no selecciona ni regresa page_access_token", async () => {
+    const sql = await readMigration();
+    const fnMatch = sql.match(/create function public\.get_meta_connection_status[\s\S]*?\$\$;/i);
+    expect(fnMatch).not.toBeNull();
+    expect(fnMatch![0]).not.toMatch(/page_access_token/i);
+  });
+
+  it("get_meta_connection_status se otorga a authenticated; upsert/revoke/mark-error solo a service_role", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/grant execute on function public\.get_meta_connection_status\(uuid, uuid\) to authenticated/i);
+    expect(sql).toMatch(/grant execute on function public\.upsert_meta_connection\([^)]*\) to service_role/i);
+    expect(sql).toMatch(/grant execute on function public\.revoke_meta_connection\(uuid\) to service_role/i);
+    expect(sql).toMatch(/grant execute on function public\.mark_meta_connection_error\(uuid\) to service_role/i);
+  });
+
+  it("el CHECK de page_access_token no exige texto no-vacío cuando status no es ACTIVE (para que revoke pueda limpiarlo)", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/check \(status <> 'ACTIVE' or length\(btrim\(page_access_token\)\) > 0\)/i);
+  });
+});
