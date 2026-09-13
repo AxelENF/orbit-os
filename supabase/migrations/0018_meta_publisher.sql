@@ -170,3 +170,18 @@ grant execute on function public.get_meta_connection_status(uuid, uuid) to authe
 grant execute on function public.upsert_meta_connection(uuid, uuid, text, text, text, text) to service_role;
 grant execute on function public.revoke_meta_connection(uuid) to service_role;
 grant execute on function public.mark_meta_connection_error(uuid) to service_role;
+
+-- ============================================================
+-- Task 3: organization_meta_oauth_sessions
+-- ============================================================
+
+create table public.organization_meta_oauth_sessions (
+  nonce uuid primary key,
+  organization_id uuid not null references public.organizations(id) on delete restrict,
+  discovered_pages jsonb not null check (jsonb_typeof(discovered_pages) = 'array'),
+  user_long_lived_token text not null check (length(btrim(user_long_lived_token)) > 0),
+  created_by uuid not null references public.profiles(id) on delete restrict,
+  expires_at timestamptz not null
+);
+alter table public.organization_meta_oauth_sessions enable row level security;
+revoke all on public.organization_meta_oauth_sessions from public, anon, authenticated;

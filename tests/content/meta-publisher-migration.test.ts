@@ -70,3 +70,16 @@ describe("organization_meta_connections", () => {
     expect(sql).toMatch(/check \(status <> 'ACTIVE' or length\(btrim\(page_access_token\)\) > 0\)/i);
   });
 });
+
+describe("organization_meta_oauth_sessions", () => {
+  it("revoca el acceso directo a authenticated/anon", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.organization_meta_oauth_sessions enable row level security/i);
+    expect(sql).toMatch(/revoke all on public\.organization_meta_oauth_sessions from public, anon, authenticated/i);
+  });
+
+  it("discovered_pages exige un array jsonb", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/discovered_pages jsonb not null check \(jsonb_typeof\(discovered_pages\) = 'array'\)/i);
+  });
+});
