@@ -34,7 +34,7 @@ type FormState = Omit<CampaignBrief, "allowedFacts"> & {
 };
 
 type ContentFormProps = {
-  onSubmit?: (brief: CampaignBrief, file: File) => void | Promise<void>;
+  onSubmit?: (brief: CampaignBrief, files: File[]) => void | Promise<void>;
   repository?: Pick<ContentRepository, "createContentItem">;
   /** Test/server injection; the live portal resolves this from the active org. */
   aiasProfile?: AiasOrganizationProfile;
@@ -120,7 +120,7 @@ function profileFromApiResponse(value: unknown): AiasOrganizationProfile | null 
 
 export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormProps) {
   const [state, setState] = useState<FormState>(initialState);
-  const [asset, setAsset] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -206,7 +206,7 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
     [state],
   );
 
-  const isComplete = parsedBrief.success && Boolean(asset);
+  const isComplete = parsedBrief.success && files.length > 0;
 
   function updateField<Key extends keyof FormState>(
     field: Key,
@@ -221,7 +221,7 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
     event.preventDefault();
     setHasAttemptedSubmit(true);
 
-    if (!parsedBrief.success || !asset) return;
+    if (!parsedBrief.success || files.length === 0) return;
 
     setIsSubmitting(true);
     setSubmitError(null);
@@ -229,11 +229,11 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
     try {
       let createdItemIdForLink: string | null = null;
       if (onSubmit) {
-        await onSubmit(parsedBrief.data, asset);
+        await onSubmit(parsedBrief.data, files);
       } else if (isProductionMode) {
         const formData = new FormData();
         formData.set("brief", JSON.stringify(parsedBrief.data));
-        formData.set("asset", asset, asset.name);
+        files.forEach((file) => formData.append("assets", file));
         const response = await fetch("/api/content", {
           method: "POST",
           body: formData,
@@ -249,7 +249,7 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
         const createdItem = await (repository ?? demoRepository).createContentItem(parsedBrief.data);
         createdItemIdForLink = createdItem.id;
         if (!repository) {
-          await persistDemoAsset(createdItem, asset);
+          await persistDemoAsset(createdItem, files[0]!);
           persistDemoDraft(createdItem);
         }
       }
@@ -421,8 +421,8 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
 
       <section className="grid gap-6 rounded-3xl border border-white/[0.08] bg-[#091735] p-5 shadow-2xl shadow-black/10 sm:p-7 lg:grid-cols-[1.05fr_0.95fr]">
         <div className="space-y-6">
-          <AssetDropzone isProductionMode={isProductionMode} value={asset} onChange={(file) => {
-            setAsset(file);
+          <AssetDropzone isProductionMode={isProductionMode} value={files} onChange={(nextFiles) => {
+            setFiles(nextFiles);
             setSuccess(false);
             setSubmitError(null);
           }} />

@@ -30,7 +30,7 @@ const aiasProfile: AiasOrganizationProfile = {
   },
 };
 
-const completeBriefFields = () => {
+const completeBriefFields = (files = [new File(["png"], "creativo.png", { type: "image/png" })]) => {
   fireEvent.change(screen.getByLabelText("Área del negocio"), {
     target: { value: "Captación y seguimiento" },
   });
@@ -60,9 +60,10 @@ const completeBriefFields = () => {
   });
   fireEvent.change(screen.getByLabelText("Creativo final de Canva"), {
     target: {
-      files: [new File(["png"], "creativo.png", { type: "image/png" })],
+      files,
     },
   });
+  return files;
 };
 
 describe("ContentForm", () => {
@@ -70,6 +71,8 @@ describe("ContentForm", () => {
     cleanup();
     clearDemoDrafts();
     clearDemoAssets();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
   });
 
   it("keeps generate disabled until the commercial brief is factual and complete", () => {
@@ -105,7 +108,7 @@ describe("ContentForm", () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<ContentForm onSubmit={onSubmit} />);
 
-    completeBriefFields();
+    const files = completeBriefFields();
 
     const submit = screen.getByRole("button", {
       name: "Generar borradores",
@@ -125,6 +128,7 @@ describe("ContentForm", () => {
       campaignName: "Agenda clínica septiembre",
       destination: "whatsapp",
     });
+    expect(onSubmit.mock.calls[0]?.[1]).toEqual(files);
     expect(screen.getByText("Borrador guardado en modo local")).toBeInTheDocument();
     expect(
       screen.getByText("Siguiente paso: revisar los borradores antes de publicar."),
@@ -145,5 +149,29 @@ describe("ContentForm", () => {
     expect(drafts[0]?.visualAnalysis.source).toBe("local-demo");
     expect(drafts[0]?.targets.map((target) => target.platform)).toEqual(["FACEBOOK", "INSTAGRAM"]);
 
+  });
+
+  it("sends every selected asset under the assets FormData field in production mode", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon-key");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: { id: "content-1" } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const files = [
+      new File(["png-1"], "primero.png", { type: "image/png" }),
+      new File(["png-2"], "segundo.png", { type: "image/png" }),
+    ];
+
+    render(<ContentForm aiasProfile={aiasProfile} />);
+    completeBriefFields(files);
+    fireEvent.click(screen.getByRole("button", { name: "Generar borradores" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = request.body as FormData;
+    expect(body.getAll("assets")).toEqual(files);
+    expect(body.get("asset")).toBeNull();
   });
 });
