@@ -3,12 +3,21 @@ import { pathToFileURL } from "node:url";
 
 import { createClient } from "@supabase/supabase-js";
 
+import type { DurableJob } from "@/lib/automation/durable-job-contract";
 import type { SupabaseCopyJobPayload } from "@/lib/automation/supabase-copy-worker-store";
 import { createSupabaseCopyWorkerStore } from "@/lib/automation/supabase-copy-worker-store";
+import {
+  createSupabasePublishWorkerStore,
+  type SupabasePublishJobPayload,
+} from "@/lib/automation/supabase-publish-worker-store";
 import { DurableJobRunner, type DurableJobProcessor } from "@/worker/durable-runner";
 import { CopyGuardrailError } from "@/worker/providers/copy-guardrail-error";
+import { createMetaPublishProcessor } from "@/worker/providers/meta-publish-processor";
+import type { MetaPublishResult } from "@/lib/integrations/meta-graph-client";
+import { MetaPublishError } from "@/lib/integrations/meta-publish-error";
 
 type CopyResult = Record<string, unknown>;
+type StoppableRunner = { stop(): void; runUntilStopped(): Promise<void> };
 
 type ProcessorModule = {
   default?: unknown;
@@ -45,6 +54,10 @@ export function parseWorkerDuration(
  */
 export function isCopyJobRetryable(error: unknown): boolean {
   return !(error instanceof CopyGuardrailError) || error.retryable;
+}
+
+export function isPublishJobRetryable(error: unknown): boolean {
+  return !(error instanceof MetaPublishError) || error.retryable;
 }
 
 function moduleSpecifier(value: string): string {
@@ -92,11 +105,47 @@ export async function main(): Promise<void> {
       },
     },
   });
-  const shutdown = () => runner.stop();
+  const publishWorkerEnabled = process.env.SNAPGAD_META_PUBLISH_WORKER_ENABLED === "true";
+  const runners: StoppableRunner[] = [runner];
+  if (publishWorkerEnabled) {
+    const publishStore = createSupabasePublishWorkerStore(client, { provider: "meta" });
+    const publishProcessor = createMetaPublishProcessor({
+      markConnectionError: async (organizationId) => {
+        const { error } = await client.rpc("mark_meta_connection_error", {
+          p_organization_id: organizationId,
+        });
+        if (error) throw new Error("Unable to mark the Meta connection as errored.");
+      },
+    });
+    const publishJobProcessor: DurableJobProcessor<
+      SupabasePublishJobPayload,
+      Record<string, unknown>
+    > = async (job) => {
+      const metaJob: DurableJob<SupabasePublishJobPayload, MetaPublishResult> = {
+        ...job,
+        result: job.result as MetaPublishResult | undefined,
+      };
+      return publishProcessor(metaJob);
+    };
+    const publishRunner = new DurableJobRunner(publishStore, publishJobProcessor, {
+      pollIntervalMs: parseWorkerDuration("SNAPGAD_WORKER_POLL_INTERVAL_MS", DEFAULT_POLL_INTERVAL_MS),
+      leaseDurationMs: parseWorkerDuration("SNAPGAD_WORKER_LEASE_DURATION_MS", DEFAULT_LEASE_DURATION_MS),
+      heartbeatIntervalMs: parseWorkerDuration("SNAPGAD_WORKER_HEARTBEAT_INTERVAL_MS", DEFAULT_HEARTBEAT_INTERVAL_MS),
+      recoveryIntervalMs: parseWorkerDuration("SNAPGAD_WORKER_RECOVERY_INTERVAL_MS", DEFAULT_RECOVERY_INTERVAL_MS),
+      isRetryable: isPublishJobRetryable,
+      logger: {
+        error(message, metadata) {
+          console.error(JSON.stringify({ message, ...metadata }));
+        },
+      },
+    });
+    runners.push(publishRunner);
+  }
+  const shutdown = () => runners.forEach((activeRunner) => activeRunner.stop());
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
   try {
-    await runner.runUntilStopped();
+    await Promise.all(runners.map((activeRunner) => activeRunner.runUntilStopped()));
   } finally {
     process.removeListener("SIGTERM", shutdown);
     process.removeListener("SIGINT", shutdown);
