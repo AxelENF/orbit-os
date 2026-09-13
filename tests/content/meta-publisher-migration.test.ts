@@ -98,3 +98,66 @@ describe("automation_jobs PUBLISH kind", () => {
     expect(sql).toMatch(/\(kind = 'PUBLISH' and publication_target_id is not null\)/i);
   });
 });
+
+describe("PUBLISH job lifecycle SQL", () => {
+  it("enqueue_publish_automation_job deriva la idempotency key con md5(...)::uuid, no gen_random_uuid", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.enqueue_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/md5\(p_publication_target_id::text\)::uuid/i);
+  });
+  it("claim_next_publish_automation_job bloquea la fila del target (for update) antes de decidir si lo reclama, para serializar dos claims concurrentes del mismo target", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/select \* into target\s+from public\.publication_targets\s+where id = job\.publication_target_id and organization_id = job\.organization_id\s+for update/i);
+  });
+  it("claim_next_publish_automation_job re-verifica jobs PROCESSING concurrentes para el mismo target DESPUÉS de bloquear el target, no antes", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const targetLockIndex = fn.search(/for update;[\s\S]*?if target\.status/i);
+    const concurrentCheckIndex = fn.search(/active\.status = 'PROCESSING'/i);
+    expect(targetLockIndex).toBeGreaterThan(-1);
+    expect(concurrentCheckIndex).toBeGreaterThan(targetLockIndex);
+  });
+  it("claim_next_publish_automation_job llama fail_claim_publish_job (que pone el target en ERROR, no solo el job) en cada rama de falla temprana genuina", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const failCalls = fn.match(/perform public\.fail_claim_publish_job/gi) ?? [];
+    // target no encontrado, target no APPROVED (tras descartar PUBLISHED),
+    // sin conexión, IG no conectado, sin copy final, sin assets.
+    expect(failCalls.length).toBe(6);
+  });
+  it("un target ya PUBLISHED con un job duplicado obsoleto se cancela el job SIN llamar fail_claim_publish_job (no sobrescribe el estado bueno con ERROR)", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/if target\.status = 'PUBLISHED' then/i);
+    expect(fn).toMatch(/'PUBLISH_JOB_TARGET_ALREADY_PUBLISHED'/i);
+  });
+  it("recover_expired_publish_automation_jobs pone en ERROR los targets de los jobs que terminan en DEAD_LETTER", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.recover_expired_publish_automation_jobs[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/'ERROR'::public\.publication_status/i);
+  });
+  it("fail_publish_automation_job audita PUBLISH_JOB_FAILED y marca ERROR solo en transición terminal", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.fail_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/'PUBLISH_JOB_FAILED'/i);
+    expect(fn).toMatch(/next_status in \('FAILED', 'DEAD_LETTER'\)/i);
+  });
+  it("fail_publish_automation_job con p_requires_reconnect llama mark_meta_connection_error", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.fail_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/if p_requires_reconnect then/i);
+    expect(fn).toMatch(/perform public\.mark_meta_connection_error/i);
+  });
+  it("las seis funciones están revocadas de public/anon/authenticated y otorgadas solo a service_role", async () => {
+    const sql = await readMigration();
+    for (const name of [
+      "enqueue_publish_automation_job", "claim_next_publish_automation_job", "renew_publish_automation_job",
+      "complete_publish_automation_job", "fail_publish_automation_job", "cancel_publish_automation_job",
+      "recover_expired_publish_automation_jobs", "summarize_publish_automation_jobs",
+    ]) {
+      expect(sql).toMatch(new RegExp(`revoke all on function public\\.${name}\\([^)]*\\) from public, anon, authenticated`, "i"));
+      expect(sql).toMatch(new RegExp(`grant execute on function public\\.${name}\\([^)]*\\) to service_role`, "i"));
+    }
+  });
+});
