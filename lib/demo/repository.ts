@@ -155,27 +155,41 @@ export class DemoContentRepository
     return item;
   }
 
+  async createContentItemWithAssets(input: {
+    brief: unknown;
+    assets: ContentAssetUpload[];
+  }): Promise<ContentItem> {
+    const coverAsset = input.assets[0];
+    if (!coverAsset) throw new Error("At least one content asset is required.");
+    const created = await this.createContentItem(input.brief);
+    const uploaded: ContentItem = {
+      ...created,
+      assetId: coverAsset.id,
+      state: "UPLOADED",
+    };
+    for (const asset of input.assets) {
+      this.assetsById.set(asset.id, {
+        id: asset.id,
+        filename: asset.filename,
+        mimeType: asset.mimeType,
+        width: asset.width,
+        height: asset.height,
+        checksum: asset.checksum,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    this.contentItems.set(uploaded.id, uploaded);
+    return { ...uploaded };
+  }
+
   async createContentItemWithAsset(input: {
     brief: unknown;
     asset: ContentAssetUpload;
   }): Promise<ContentItem> {
-    const created = await this.createContentItem(input.brief);
-    const uploaded: ContentItem = {
-      ...created,
-      assetId: input.asset.id,
-      state: "UPLOADED",
-    };
-    this.assetsById.set(input.asset.id, {
-      id: input.asset.id,
-      filename: input.asset.filename,
-      mimeType: input.asset.mimeType,
-      width: input.asset.width,
-      height: input.asset.height,
-      checksum: input.asset.checksum,
-      createdAt: new Date().toISOString(),
+    return this.createContentItemWithAssets({
+      brief: input.brief,
+      assets: [input.asset],
     });
-    this.contentItems.set(uploaded.id, uploaded);
-    return { ...uploaded };
   }
 
   async listPublicationTargets(

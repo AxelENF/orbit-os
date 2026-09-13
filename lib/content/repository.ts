@@ -303,6 +303,10 @@ export interface ContentRepository
     CopyRequestRepository,
     CopyJobRepository {
   createContentItem(input: unknown): Promise<ContentItem>;
+  createContentItemWithAssets(input: {
+    brief: unknown;
+    assets: ContentAssetUpload[];
+  }): Promise<ContentItem>;
   createContentItemWithAsset(input: {
     brief: unknown;
     asset: ContentAssetUpload;

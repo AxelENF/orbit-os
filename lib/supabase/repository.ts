@@ -547,34 +547,47 @@ class SupabaseContentRepository
     return toContentItem(data);
   }
 
-  async createContentItemWithAsset(input: {
+  async createContentItemWithAssets(input: {
     brief: unknown;
-    asset: ContentAssetUpload;
+    assets: ContentAssetUpload[];
   }): Promise<ContentItem> {
     const brief = contentBriefSchema.parse(input.brief);
     const campaign = campaignBriefSchema.safeParse(input.brief);
-    const safeFilename = input.asset.filename
-      .normalize("NFKC")
-      .replace(/[^a-zA-Z0-9._-]+/g, "_")
-      .slice(0, 120) || "creative";
-    const storagePath = `${this.organization.organizationId}/${input.asset.id}/${safeFilename}`;
+    const coverAsset = input.assets[0];
+    if (!coverAsset) throw new Error("At least one content asset is required.");
     const storage = this.client.storage.from("content-assets");
-    const upload = await storage.upload(storagePath, input.asset.bytes, {
-      contentType: input.asset.mimeType,
-      upsert: false,
+    const uploadedPaths: string[] = [];
+    const preparedAssets = input.assets.map((asset) => {
+      const safeFilename = asset.filename
+        .normalize("NFKC")
+        .replace(/[^a-zA-Z0-9._-]+/g, "_")
+        .slice(0, 120) || "creative";
+      return {
+        asset,
+        storagePath: `${this.organization.organizationId}/${asset.id}/${safeFilename}`,
+      };
     });
-    if (upload.error) throw new Error("Unable to upload the content asset.");
 
-    const baseArguments = {
+    try {
+      for (const { asset, storagePath: path } of preparedAssets) {
+        const upload = await storage.upload(path, asset.bytes, {
+          contentType: asset.mimeType,
+          upsert: false,
+        });
+        if (upload.error) throw new Error("Unable to upload the content asset.");
+        uploadedPaths.push(path);
+      }
+
+      const baseArguments = {
         p_owner_id: this.organization.userId,
         p_organization_id: this.organization.organizationId,
-        p_asset_id: input.asset.id,
-        p_storage_path: storagePath,
-        p_filename: input.asset.filename,
-        p_mime_type: input.asset.mimeType,
-        p_width: input.asset.width,
-        p_height: input.asset.height,
-        p_checksum: input.asset.checksum,
+        p_asset_id: coverAsset.id,
+        p_storage_path: preparedAssets[0]!.storagePath,
+        p_filename: coverAsset.filename,
+        p_mime_type: coverAsset.mimeType,
+        p_width: coverAsset.width,
+        p_height: coverAsset.height,
+        p_checksum: coverAsset.checksum,
         p_business_line: brief.businessLine,
         p_service: brief.service,
         p_niche: brief.niche,
@@ -585,27 +598,53 @@ class SupabaseContentRepository
         p_human_description: brief.humanDescription,
         p_allowed_facts: brief.allowedFacts,
       };
-    const { data, error } = await this.client.rpc(
-      "create_content_item_with_asset_in_organization",
-      {
-        ...baseArguments,
-        p_campaign_name: campaign.success ? campaign.data.campaignName : null,
-        p_offer: campaign.success ? campaign.data.offer : null,
-        p_funnel_stage: campaign.success ? campaign.data.funnelStage : null,
-        p_destination: campaign.success ? campaign.data.destination : null,
-        p_destination_value: campaign.success ? campaign.data.destinationValue : null,
-        p_campaign_code: campaign.success
-          ? buildCampaignCode(campaign.data.campaignName, input.asset.id)
-          : null,
-      },
-    );
+      const { data, error } = await this.client.rpc(
+        "create_content_item_with_asset_in_organization",
+        {
+          ...baseArguments,
+          p_campaign_name: campaign.success ? campaign.data.campaignName : null,
+          p_offer: campaign.success ? campaign.data.offer : null,
+          p_funnel_stage: campaign.success ? campaign.data.funnelStage : null,
+          p_destination: campaign.success ? campaign.data.destination : null,
+          p_destination_value: campaign.success ? campaign.data.destinationValue : null,
+          p_campaign_code: campaign.success
+            ? buildCampaignCode(campaign.data.campaignName, coverAsset.id)
+            : null,
+        },
+      );
 
-    if (error) {
-      await storage.remove([storagePath]);
-      throw new Error("Unable to create the content item with asset.");
+      if (error) throw new Error("Unable to create the content item with asset.");
+      const content = toContentItem(data);
+
+      for (const [position, { asset }] of preparedAssets.entries()) {
+        const { error: assetLinkError } = await this.client.rpc(
+          "add_content_item_asset_in_organization",
+          {
+            p_organization_id: this.organization.organizationId,
+            p_actor_id: this.organization.userId,
+            p_content_item_id: content.id,
+            p_asset_id: asset.id,
+            p_position: position,
+          },
+        );
+        if (assetLinkError) throw new Error("Unable to register the content item assets.");
+      }
+
+      return content;
+    } catch (error) {
+      if (uploadedPaths.length > 0) await storage.remove(uploadedPaths);
+      throw error;
     }
+  }
 
-    return toContentItem(data);
+  async createContentItemWithAsset(input: {
+    brief: unknown;
+    asset: ContentAssetUpload;
+  }): Promise<ContentItem> {
+    return this.createContentItemWithAssets({
+      brief: input.brief,
+      assets: [input.asset],
+    });
   }
 
   async listPublicationTargets(

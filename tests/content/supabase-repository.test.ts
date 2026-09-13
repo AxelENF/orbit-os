@@ -168,6 +168,53 @@ describe("SupabaseContentRepository", () => {
     expect(from).not.toHaveBeenCalled();
   });
 
+  it("registers every uploaded asset in order after creating the cover item", async () => {
+    const assetIds = [
+      "8ab76cc5-f59a-48ed-8bc8-186cc7007533",
+      "0b93d53f-1d18-4d83-b7c8-cb8cf9fc4e1d",
+      "e3a14d68-6f52-4ad4-9d3e-77ee64c0fcb2",
+    ];
+    const rpc = vi.fn()
+      .mockResolvedValueOnce({ data: createdRow, error: null })
+      .mockResolvedValue({ data: null, error: null });
+    const upload = vi.fn().mockResolvedValue({ error: null });
+    const repository = createSupabaseRepository({
+      rpc,
+      storage: { from: vi.fn(() => ({ upload, remove: vi.fn() })) },
+    } as never, organizationA);
+
+    await expect(repository.createContentItemWithAssets({
+      brief: validBrief,
+      assets: assetIds.map((id, index) => ({
+        id,
+        filename: `creative-${index}.png`,
+        mimeType: "image/png",
+        width: 1080,
+        height: 1350,
+        checksum: `checksum-${index}`,
+        bytes: new Uint8Array([index]),
+      })),
+    })).resolves.toMatchObject({ id: createdRow.id });
+
+    expect(rpc.mock.calls.slice(1)).toEqual([
+      ["add_content_item_asset_in_organization", expect.objectContaining({
+        p_content_item_id: createdRow.id,
+        p_asset_id: assetIds[0],
+        p_position: 0,
+      })],
+      ["add_content_item_asset_in_organization", expect.objectContaining({
+        p_content_item_id: createdRow.id,
+        p_asset_id: assetIds[1],
+        p_position: 1,
+      })],
+      ["add_content_item_asset_in_organization", expect.objectContaining({
+        p_content_item_id: createdRow.id,
+        p_asset_id: assetIds[2],
+        p_position: 2,
+      })],
+    ]);
+  });
+
   it("propagates an RPC failure without attempting partial repository writes", async () => {
     const rpc = vi.fn().mockResolvedValue({
       data: null,

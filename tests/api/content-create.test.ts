@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createContentCreateHandler } from "@/app/api/content/route";
 import { createDemoRepository } from "@/lib/demo/repository";
@@ -20,11 +20,11 @@ const brief = {
   destinationValue: "https://wa.me/5215555555555?text=AGENDA",
 };
 
-function validPng(): Uint8Array {
+function validPng(width = 1080, height = 1350): Uint8Array {
   const bytes = new Uint8Array(24);
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  new DataView(bytes.buffer).setUint32(16, 1080, false);
-  new DataView(bytes.buffer).setUint32(20, 1350, false);
+  new DataView(bytes.buffer).setUint32(16, width, false);
+  new DataView(bytes.buffer).setUint32(20, height, false);
   return bytes;
 }
 
@@ -34,11 +34,20 @@ function blobPart(bytes: Uint8Array): ArrayBuffer {
   return copy;
 }
 
-function requestWithAsset(briefPayload: unknown = brief): Request {
+function requestWithAssets(
+  files: Array<{ name: string; bytes: Uint8Array; type?: string }>,
+  briefPayload: unknown = brief,
+): Request {
   const form = new FormData();
   form.set("brief", JSON.stringify(briefPayload));
-  form.set("asset", new File([blobPart(validPng())], "creative.png", { type: "image/png" }));
+  for (const file of files) {
+    form.append("assets", new File([blobPart(file.bytes)], file.name, { type: file.type ?? "image/png" }));
+  }
   return new Request("http://localhost/api/content", { method: "POST", body: form });
+}
+
+function requestWithAsset(briefPayload: unknown = brief): Request {
+  return requestWithAssets([{ name: "creative.png", bytes: validPng() }], briefPayload);
 }
 
 describe("POST /api/content", () => {
@@ -96,7 +105,7 @@ describe("POST /api/content", () => {
     const repository = createDemoRepository();
     const response = await createContentCreateHandler({
       getRepository: async () => ({
-        createContentItemWithAsset: repository.createContentItemWithAsset.bind(repository),
+        createContentItemWithAssets: repository.createContentItemWithAssets.bind(repository),
         enqueueCopyJob: async () => {
           throw new Error("queue unavailable");
         },
@@ -110,5 +119,86 @@ describe("POST /api/content", () => {
       content: { state: "UPLOADED" },
     });
     await expect(repository.listContentItems()).resolves.toHaveLength(1);
+  });
+
+  it("accepts 3 files in assets and preserves their selection order", async () => {
+    const createContentItemWithAssets = vi.fn().mockResolvedValue({
+      id: "b411ce10-50a9-4d8b-8ff3-a7fb522b53d2",
+      state: "UPLOADED",
+    });
+    const enqueueCopyJob = vi.fn().mockResolvedValue(undefined);
+    const response = await createContentCreateHandler({
+      getRepository: async () => ({ createContentItemWithAssets, enqueueCopyJob }),
+      createId: (() => {
+        const ids = [
+          "8ab76cc5-f59a-48ed-8bc8-186cc7007533",
+          "0b93d53f-1d18-4d83-b7c8-cb8cf9fc4e1d",
+          "e3a14d68-6f52-4ad4-9d3e-77ee64c0fcb2",
+          "4a150496-852d-46d4-8f25-951f6512db73",
+        ];
+        return () => ids.shift()!;
+      })(),
+    })(requestWithAssets([
+      { name: "first.png", bytes: validPng() },
+      { name: "second.png", bytes: validPng() },
+      { name: "third.png", bytes: validPng() },
+    ]));
+
+    expect(response.status).toBe(201);
+    expect(createContentItemWithAssets).toHaveBeenCalledWith(expect.objectContaining({
+      assets: [
+        expect.objectContaining({ id: "8ab76cc5-f59a-48ed-8bc8-186cc7007533", filename: "first.png" }),
+        expect.objectContaining({ id: "0b93d53f-1d18-4d83-b7c8-cb8cf9fc4e1d", filename: "second.png" }),
+        expect.objectContaining({ id: "e3a14d68-6f52-4ad4-9d3e-77ee64c0fcb2", filename: "third.png" }),
+      ],
+    }));
+  });
+
+  it("validates every file before any repository write", async () => {
+    const createContentItemWithAssets = vi.fn();
+    const response = await createContentCreateHandler({
+      getRepository: async () => ({
+        createContentItemWithAssets,
+        enqueueCopyJob: vi.fn(),
+      }),
+    })(requestWithAssets([
+      { name: "first.png", bytes: validPng() },
+      { name: "invalid.png", bytes: validPng(1080, 1080) },
+      { name: "third.png", bytes: validPng() },
+    ]));
+
+    expect(response.status).toBe(400);
+    expect(createContentItemWithAssets).not.toHaveBeenCalled();
+  });
+
+  it("rejects more than 10 files", async () => {
+    const createContentItemWithAssets = vi.fn();
+    const response = await createContentCreateHandler({
+      getRepository: async () => ({
+        createContentItemWithAssets,
+        enqueueCopyJob: vi.fn(),
+      }),
+    })(requestWithAssets(
+      Array.from({ length: 11 }, (_, index) => ({
+        name: `creative-${index}.png`,
+        bytes: validPng(),
+      })),
+    ));
+
+    expect(response.status).toBe(400);
+    expect(createContentItemWithAssets).not.toHaveBeenCalled();
+  });
+
+  it("rejects an intake with zero files", async () => {
+    const createContentItemWithAssets = vi.fn();
+    const response = await createContentCreateHandler({
+      getRepository: async () => ({
+        createContentItemWithAssets,
+        enqueueCopyJob: vi.fn(),
+      }),
+    })(requestWithAssets([]));
+
+    expect(response.status).toBe(400);
+    expect(createContentItemWithAssets).not.toHaveBeenCalled();
   });
 });

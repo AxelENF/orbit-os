@@ -47,11 +47,11 @@ export function createContentListHandler(
 
 export const GET = createContentListHandler();
 
-const MAX_MULTIPART_BYTES = MAX_ASSET_BYTES + 64_000;
+const MAX_MULTIPART_BYTES = MAX_ASSET_BYTES * 10 + 640_000;
 
 type ContentCreateHandlerDependencies = {
   getRepository?: () => Promise<
-    Pick<ContentRepository, "createContentItemWithAsset" | "enqueueCopyJob">
+    Pick<ContentRepository, "createContentItemWithAssets" | "enqueueCopyJob">
   >;
   createId?: () => string;
 };
@@ -85,10 +85,14 @@ export function createContentCreateHandler(
     }
 
     const rawBrief = formData.get("brief");
-    const assetFile = formData.get("asset");
-    if (typeof rawBrief !== "string" || !isFilePart(assetFile)) {
-      return jsonError("BRIEF_AND_ASSET_REQUIRED", 400);
+    const rawAssets = formData.getAll("assets");
+    if (typeof rawBrief !== "string" || rawAssets.length === 0) {
+      return jsonError("BRIEF_AND_ASSETS_REQUIRED", 400);
     }
+    if (rawAssets.length > 10 || rawAssets.some((asset) => !isFilePart(asset))) {
+      return jsonError("INVALID_CONTENT_ASSET", 400);
+    }
+    const assetFiles = rawAssets as File[];
 
     let briefPayload: unknown;
     try {
@@ -99,14 +103,13 @@ export function createContentCreateHandler(
 
     try {
       const brief = campaignBriefSchema.parse(briefPayload);
-      const validatedAsset = await validateAsset(assetFile);
-      const checksum = createHash("sha256")
-        .update(validatedAsset.bytes)
-        .digest("hex");
-      const repository = await getRepository();
-      const content = await repository.createContentItemWithAsset({
-        brief,
-        asset: {
+      const validatedAssets = await Promise.all(assetFiles.map((assetFile) => validateAsset(assetFile)));
+      const assets = assetFiles.map((assetFile, index) => {
+        const validatedAsset = validatedAssets[index]!;
+        const checksum = createHash("sha256")
+          .update(validatedAsset.bytes)
+          .digest("hex");
+        return {
           id: createId(),
           filename: assetFile.name,
           mimeType: validatedAsset.mimeType,
@@ -114,7 +117,12 @@ export function createContentCreateHandler(
           height: validatedAsset.height,
           checksum,
           bytes: validatedAsset.bytes,
-        },
+        };
+      });
+      const repository = await getRepository();
+      const content = await repository.createContentItemWithAssets({
+        brief,
+        assets,
       });
       try {
         await repository.enqueueCopyJob({
