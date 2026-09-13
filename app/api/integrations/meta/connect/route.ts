@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { cookies } from "next/headers";
 
@@ -6,10 +6,14 @@ import {
   canManageConnections,
   type OrganizationRole,
 } from "@/lib/organizations/permissions";
+import {
+  createSignedMetaOAuthState,
+  META_OAUTH_NONCE_COOKIE,
+  META_OAUTH_STATE_MAX_AGE_SECONDS,
+} from "@/lib/integrations/meta-oauth-state";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
-export const META_OAUTH_NONCE_COOKIE = "snapgad_meta_oauth_nonce";
-export const META_OAUTH_STATE_MAX_AGE_SECONDS = 600;
+export { META_OAUTH_NONCE_COOKIE, META_OAUTH_STATE_MAX_AGE_SECONDS } from "@/lib/integrations/meta-oauth-state";
 
 const META_OAUTH_SCOPES = [
   "pages_show_list",
@@ -31,22 +35,6 @@ function jsonError(error: string, status: number): Response {
       },
     },
   );
-}
-
-function encodeState(payload: { organization_id: string; nonce: string; exp: number }): string {
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-}
-
-function signState(payload: string, secret: string): string {
-  return createHmac("sha256", secret).update(payload).digest("base64url");
-}
-
-function createSignedState(
-  payload: { organization_id: string; nonce: string; exp: number },
-  secret: string,
-): string {
-  const encodedPayload = encodeState(payload);
-  return `${encodedPayload}.${signState(encodedPayload, secret)}`;
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -80,7 +68,7 @@ export async function GET(request: Request): Promise<Response> {
 
     const nonce = randomUUID();
     const expiresAt = Math.floor(Date.now() / 1000) + META_OAUTH_STATE_MAX_AGE_SECONDS;
-    const state = createSignedState(
+    const state = createSignedMetaOAuthState(
       { organization_id: organizationId, nonce, exp: expiresAt },
       appSecret,
     );
