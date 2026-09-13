@@ -695,3 +695,87 @@ grant execute on function public.fail_publish_automation_job(uuid, uuid, uuid, t
 grant execute on function public.cancel_publish_automation_job(uuid, uuid, uuid, text) to service_role;
 grant execute on function public.recover_expired_publish_automation_jobs(integer) to service_role;
 grant execute on function public.summarize_publish_automation_jobs() to service_role;
+
+-- ============================================================
+-- Task 6: apply_publication_diagnosis
+-- ============================================================
+
+-- automation_runs.kind (0001_content_os.sql) declaró un check inline
+-- cerrado a 4 valores, sin PUBLISH_DIAGNOSIS. Mismo patrón que la Tarea 4:
+-- dropear por el nombre auto-generado antes de agregar el nuevo.
+alter table public.automation_runs drop constraint if exists automation_runs_kind_check;
+alter table public.automation_runs add constraint automation_runs_kind_check
+  check (kind in ('COPY_REQUEST', 'COPY_CALLBACK', 'PUBLISH_REQUEST', 'PUBLISH_CALLBACK', 'PUBLISH_DIAGNOSIS'));
+
+create function public.apply_publication_diagnosis(
+  p_organization_id uuid, p_content_item_id uuid, p_publication_target_id uuid,
+  p_quality_level text, p_findings jsonb, p_idempotency_key uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  item public.content_items%rowtype;
+  target public.publication_targets%rowtype;
+  is_safe boolean;
+  prior_run public.automation_runs%rowtype;
+begin
+  if p_quality_level not in ('blocked', 'needs_review', 'promising') then
+    raise exception using errcode = '22023', message = 'DIAGNOSIS_INVALID_QUALITY_LEVEL';
+  end if;
+  if jsonb_typeof(p_findings) <> 'array' then
+    raise exception using errcode = '22023', message = 'DIAGNOSIS_INVALID_FINDINGS';
+  end if;
+
+  select * into prior_run from public.automation_runs
+  where kind = 'PUBLISH_DIAGNOSIS' and idempotency_key = p_idempotency_key;
+  if found then return jsonb_build_object('created', false); end if;
+
+  -- Orden de locks: content_items primero, publication_targets después —
+  -- mismo orden que approve_publication_target y
+  -- complete_publish_automation_job, para no crear un deadlock si alguna de
+  -- las tres corre al mismo tiempo sobre el mismo content item.
+  select * into item from public.content_items
+  where id = p_content_item_id and organization_id = p_organization_id for update;
+  if not found then raise exception using errcode = 'P0001', message = 'DIAGNOSIS_CONTENT_NOT_FOUND'; end if;
+
+  select * into target from public.publication_targets
+  where id = p_publication_target_id and content_item_id = p_content_item_id
+    and organization_id = p_organization_id for update;
+  if not found then raise exception using errcode = 'P0001', message = 'DIAGNOSIS_TARGET_NOT_FOUND'; end if;
+  if target.status <> 'PENDING_REVIEW' then
+    return jsonb_build_object('created', false, 'reason', 'TARGET_NOT_PENDING');
+  end if;
+
+  -- La regla vive acá, no en TypeScript: "promising" y CADA finding con
+  -- severity EXACTAMENTE "info" es lo único que cuenta como seguro. coalesce
+  -- a '' hace esto fail-closed: un finding con severity nula, ausente, o un
+  -- valor no reconocido NUNCA pasa como seguro, solo 'info' explícito.
+  is_safe := p_quality_level = 'promising' and not exists (
+    select 1 from jsonb_array_elements(p_findings) as finding
+    where coalesce(finding->>'severity', '') <> 'info'
+  );
+
+  insert into public.automation_runs (organization_id, owner_id, content_item_id, publication_target_id, kind, idempotency_key, status, response_payload)
+  values (p_organization_id, item.owner_id, p_content_item_id, p_publication_target_id, 'PUBLISH_DIAGNOSIS', p_idempotency_key, 'COMPLETED',
+    jsonb_build_object('qualityLevel', p_quality_level, 'isSafe', is_safe))
+  on conflict (kind, idempotency_key) do nothing;
+
+  if is_safe then
+    update public.publication_targets set status = 'APPROVED'::public.publication_status where id = target.id;
+    insert into public.audit_events (organization_id, owner_id, content_item_id, publication_target_id, event_type, metadata)
+    values (p_organization_id, item.owner_id, p_content_item_id, target.id, 'TARGET_AUTO_APPROVED', jsonb_build_object('qualityLevel', p_quality_level));
+    perform public.enqueue_publish_automation_job(p_organization_id, p_content_item_id, target.id);
+  else
+    insert into public.audit_events (organization_id, owner_id, content_item_id, publication_target_id, event_type, metadata)
+    values (p_organization_id, item.owner_id, p_content_item_id, target.id, 'TARGET_HELD_FOR_REVIEW', jsonb_build_object('qualityLevel', p_quality_level, 'findings', p_findings));
+  end if;
+
+  return jsonb_build_object('created', true, 'isSafe', is_safe);
+end;
+$$;
+
+revoke all on function public.apply_publication_diagnosis(uuid, uuid, uuid, text, jsonb, uuid) from public, anon, authenticated;
+grant execute on function public.apply_publication_diagnosis(uuid, uuid, uuid, text, jsonb, uuid) to service_role;

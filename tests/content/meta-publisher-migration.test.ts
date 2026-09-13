@@ -161,3 +161,24 @@ describe("PUBLISH job lifecycle SQL", () => {
     }
   });
 });
+
+describe("apply_publication_diagnosis SQL", () => {
+  it("automation_runs.kind se extiende para aceptar PUBLISH_DIAGNOSIS", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/alter table public\.automation_runs drop constraint if exists automation_runs_kind_check/i);
+    expect(sql).toMatch(/'PUBLISH_DIAGNOSIS'/i);
+  });
+  it("is_safe exige quality_level='promising' Y que TODOS los findings tengan severity='info' (fail-closed ante severity nula/desconocida)", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.apply_publication_diagnosis[\s\S]*?\$\$;/i)![0];
+    expect(fn).toMatch(/coalesce\(finding->>'severity', ''\) <> 'info'/i);
+  });
+  it("bloquea con lock en content_items antes que en publication_targets (mismo orden que approve_publication_target)", async () => {
+    const sql = await readMigration();
+    const fn = sql.match(/create function public\.apply_publication_diagnosis[\s\S]*?\$\$;/i)![0];
+    const itemLockIndex = fn.search(/select \* into item from public\.content_items[\s\S]*?for update/i);
+    const targetUpdateIndex = fn.search(/update public\.publication_targets set status = 'APPROVED'/i);
+    expect(itemLockIndex).toBeGreaterThan(-1);
+    expect(targetUpdateIndex).toBeGreaterThan(itemLockIndex);
+  });
+});
