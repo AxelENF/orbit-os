@@ -66,6 +66,43 @@ describe("fetchIntakeSuggestions", () => {
     expect(result.suggestions).toBeNull();
   });
 
+  it("mantiene activo el timeout hasta terminar de leer el cuerpo de la respuesta", async () => {
+    vi.useFakeTimers();
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    let resolveBody!: (value: unknown) => void;
+    const bodyPromise = new Promise<unknown>((resolve) => {
+      resolveBody = resolve;
+    });
+    const response = new Response(null, { status: 200 });
+    vi.spyOn(response, "json").mockReturnValue(bodyPromise);
+    const fetchFn = vi.fn().mockResolvedValue(response);
+
+    try {
+      const resultPromise = fetchIntakeSuggestions({
+        imageDataUrl: "data:image/png;base64,AAAA",
+        environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_TIMEOUT_MS: "15000" },
+        fetchFn,
+      } as IntakeSuggestionDependencies);
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(response.json).toHaveBeenCalledTimes(1);
+      expect(clearTimeoutSpy).not.toHaveBeenCalled();
+
+      resolveBody({
+        choices: [{ message: { content: JSON.stringify({ niche: "clinicas" }) } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+      const result = await resultPromise;
+
+      expect(result.suggestions?.niche).toBe("clinicas");
+      expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
   it("regresa el costo estimado cuando hubo respuesta, incluso si la forma es inválida (para registrar el gasto real)", async () => {
     // Corrección tras revisión de Codex CLI ronda 2: "{}" NO es una forma
     // inválida contra suggestionSchema — todos los campos son opcionales,
@@ -98,6 +135,92 @@ describe("fetchIntakeSuggestions", () => {
     await expect(fetchIntakeSuggestions(
       { imageDataUrl: "data:image/png;base64,AAAA", environment: {}, fetchFn: vi.fn() } as IntakeSuggestionDependencies,
     )).rejects.toThrow();
+  });
+
+  it("usa el techo de costo seguro cuando el entorno no es numérico", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ niche: "clinicas" }) } }],
+      usage: { prompt_tokens: 50_000, completion_tokens: 50_000 },
+    }), { status: 200 }));
+    const result = await fetchIntakeSuggestions({
+      imageDataUrl: "data:image/png;base64,AAAA",
+      environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD: "not-a-number" },
+      fetchFn,
+    } as IntakeSuggestionDependencies);
+
+    expect(result.suggestions).toBeNull();
+    expect(result.usage?.estimatedCostUsd).toBeGreaterThan(0.01);
+  });
+
+  it("usa 300 tokens cuando el límite de salida configurado no es numérico", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(okOpenRouterResponse({ niche: "clinicas" }));
+    await fetchIntakeSuggestions({
+      imageDataUrl: "data:image/png;base64,AAAA",
+      environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_MAX_OUTPUT_TOKENS: "not-a-number" },
+      fetchFn,
+    } as IntakeSuggestionDependencies);
+
+    const request = fetchFn.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toMatchObject({ max_tokens: 300 });
+  });
+
+  it("no dispara el timeout de inmediato cuando el límite configurado no es numérico", async () => {
+    vi.useFakeTimers();
+    let rejectRequest!: (reason: unknown) => void;
+    const fetchFn = vi.fn().mockImplementation((_input: string, init: RequestInit) => (
+      new Promise<never>((_, reject) => {
+        rejectRequest = reject;
+        init.signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+        }, { once: true });
+      })
+    ));
+
+    try {
+      const resultPromise = fetchIntakeSuggestions({
+        imageDataUrl: "data:image/png;base64,AAAA",
+        environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_TIMEOUT_MS: "not-a-number" },
+        fetchFn,
+      } as IntakeSuggestionDependencies);
+      await Promise.resolve();
+
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+      let settled = false;
+      void resultPromise.then(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      vi.advanceTimersByTime(14_999);
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      vi.advanceTimersByTime(1);
+      await expect(resultPromise).resolves.toEqual({ suggestions: null, usage: null });
+    } finally {
+      rejectRequest?.(new Error("test cleanup"));
+      vi.useRealTimers();
+    }
+  });
+
+  it("advierte cuando OpenRouter omite por completo usage y conserva el cálculo en cero", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ niche: "clinicas" }) } }],
+    }), { status: 200 }));
+
+    try {
+      const result = await fetchIntakeSuggestions({
+        imageDataUrl: "data:image/png;base64,AAAA",
+        environment: baseEnv,
+        fetchFn,
+      } as IntakeSuggestionDependencies);
+
+      expect(result.usage).toMatchObject({ inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("usage"));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("costo real por encima del techo por solicitud -> suggestions null, pero el uso real se sigue regresando para el ledger", async () => {

@@ -55,6 +55,15 @@ function requiredPriceEnv(environment: Record<string, string | undefined>, name:
   return value;
 }
 
+function positiveNumberEnv(
+  environment: Record<string, string | undefined>,
+  name: string,
+  fallback: number,
+): number {
+  const value = Number(environment[name] ?? fallback);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 function normalizeSuggestions(parsed: z.infer<typeof suggestionSchema>): IntakeSuggestions {
   return {
     niche: parsed.niche ?? null,
@@ -88,12 +97,16 @@ export async function fetchIntakeSuggestions(
   const apiKey = requiredEnv(environment, "OPENROUTER_API_KEY");
   const inputPrice = requiredPriceEnv(environment, "SNAPGAD_INTAKE_SUGGEST_MODEL_INPUT_PRICE_PER_1M_USD");
   const outputPrice = requiredPriceEnv(environment, "SNAPGAD_INTAKE_SUGGEST_MODEL_OUTPUT_PRICE_PER_1M_USD");
-  const maxOutputTokens = Number(environment.SNAPGAD_INTAKE_SUGGEST_MAX_OUTPUT_TOKENS ?? "300");
-  const timeoutMs = Number(environment.SNAPGAD_INTAKE_SUGGEST_TIMEOUT_MS ?? "15000");
+  const maxOutputTokens = positiveNumberEnv(environment, "SNAPGAD_INTAKE_SUGGEST_MAX_OUTPUT_TOKENS", 300);
+  const timeoutMs = positiveNumberEnv(environment, "SNAPGAD_INTAKE_SUGGEST_TIMEOUT_MS", 15000);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
+  let payload: {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
   try {
     response = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -115,26 +128,16 @@ export async function fetchIntakeSuggestions(
       }),
       signal: controller.signal,
     });
+    if (!response.ok) return { suggestions: null, usage: null };
+    payload = await response.json();
   } catch {
-    // Network error or abort/timeout: no response, nothing to bill, fail open.
+    // Network error, abort/timeout, or malformed body: no response, nothing to bill, fail open.
     return { suggestions: null, usage: null };
   } finally {
     clearTimeout(timeout);
   }
-  if (!response.ok) return { suggestions: null, usage: null };
-
-  // Corrección tras revisión de Codex CLI: un 200 con un cuerpo no-JSON
-  // (raro, pero posible ante un proxy/CDN intermedio fallando) hacía que
-  // response.json() lanzara sin protección, escapando hasta el caller de
-  // este módulo como una excepción no manejada.
-  let payload: {
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
-  };
-  try {
-    payload = await response.json();
-  } catch {
-    return { suggestions: null, usage: null };
+  if (!payload.usage) {
+    console.warn("OpenRouter response omitted usage; intake suggestion cost is unknown and is recorded as zero.");
   }
   const inputTokens = payload.usage?.prompt_tokens ?? 0;
   const outputTokens = payload.usage?.completion_tokens ?? 0;
@@ -157,7 +160,7 @@ export async function fetchIntakeSuggestions(
   // por encima del techo esperado (mismo espíritu que el guardrail de
   // costo de worker/providers/copy-processor.ts). El uso ya se regresa de
   // cualquier forma para que el ledger registre el gasto real.
-  const maxRequestCostUsd = Number(environment.SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD ?? "0.01");
+  const maxRequestCostUsd = positiveNumberEnv(environment, "SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD", 0.01);
   if (usage.estimatedCostUsd > maxRequestCostUsd) return { suggestions: null, usage };
 
   return { suggestions: normalizeSuggestions(parsed.data), usage };
