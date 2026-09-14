@@ -119,6 +119,7 @@ describe("SupabaseCopyWorkerStore", () => {
         error: null,
       })
       .mockResolvedValueOnce({ data: { recovered: 2 }, error: null })
+      .mockResolvedValueOnce({ data: { deleted: 0 }, error: null })
       .mockResolvedValueOnce({
         data: {
           queuedCount: 1,
@@ -144,6 +145,19 @@ describe("SupabaseCopyWorkerStore", () => {
     expect(await store.recoverExpired()).toBe(2);
     await expect(store.health()).resolves.toMatchObject({ retryCount: 2, deadLetterCount: 1 });
     expect(await store.cancel({ jobId, organizationId, idempotencyKey })).toBeNull();
+  });
+
+  it("cleans expired Meta OAuth sessions during the existing periodic recovery maintenance", async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { recovered: 2 }, error: null })
+      .mockResolvedValueOnce({ data: { deleted: 3 }, error: null });
+    const store = new SupabaseCopyWorkerStore(clientWith(rpc) as never);
+
+    await expect(store.recoverExpired()).resolves.toBe(2);
+
+    expect(rpc).toHaveBeenNthCalledWith(1, "recover_expired_copy_automation_jobs", { p_limit: 100 });
+    expect(rpc).toHaveBeenNthCalledWith(2, "delete_expired_meta_oauth_sessions", { p_limit: 100 });
   });
 
   it("records a retry when the claimed asset cannot be delivered", async () => {

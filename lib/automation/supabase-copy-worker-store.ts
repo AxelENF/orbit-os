@@ -326,6 +326,15 @@ export class SupabaseCopyWorkerStore
     if (error) throw new Error("Unable to recover expired durable copy jobs.");
     const parsed = recoveryResponseSchema.safeParse(data);
     if (!parsed.success) throw new Error("Supabase returned an invalid recovery response.");
+
+    // DurableJobRunner invokes recoverExpired at startup and on every recovery
+    // interval. Keep OAuth cleanup here so abandoned token-bearing sessions use
+    // the existing periodic worker maintenance without a new scheduler.
+    const { error: cleanupError } = await this.client.rpc("delete_expired_meta_oauth_sessions", {
+      p_limit: limit,
+    });
+    if (cleanupError) throw new Error("Unable to clean expired Meta OAuth sessions.");
+
     return parsed.data.recovered;
   }
 
