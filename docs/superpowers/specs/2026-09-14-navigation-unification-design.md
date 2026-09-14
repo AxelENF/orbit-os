@@ -1,6 +1,6 @@
 # Unificación de navegación y vista de campaña — diseño
 
-**Fecha:** 2026-09-14 (revisión 3, tras ronda 2 de revisión con Codex CLI — corrigió el ciclo de vida del predicado de "por revisar", la fuente de datos demo, el polling y la sincronización tras aprobar/reintentar; ver notas inline)
+**Fecha:** 2026-09-14 (revisión 4, tras ronda 3 —final, política de 3 rondas— de revisión con Codex CLI. Ronda 2 corrigió el ciclo de vida del predicado, la fuente de datos demo, el polling y la sincronización; ronda 3 encontró que la consulta Supabase propuesta en la revisión 3 reintroducía el mismo bug de ciclo de vida por perder el `status` al construir un único `Set`, que la sincronización demo no estaba especificada, que `useAttentionTargets` prometía aislar errores por id pero citaba un patrón (`Promise.all`) que no lo hace, y un archivo de fixture adicional no detectable por grep de nombre de tipo — todo corregido a mano tras ronda 3, sin ronda 4, según la política de 3 rondas ya usada en este spec y en los dos anteriores de esta sesión. Ver notas inline.)
 **Estado:** Aprobado por Axel de forma anticipada — sesión autónoma ("delega más activamente, haz más cosas para llevar esto al mejor nivel"). Decisiones documentadas con su razonamiento para revisión posterior.
 **Roadmap:** Segundo ítem del orden de 4 partes acordado el 2026-09-14 (intake ✅ → **arquitectura de información/navegación** → compositor de logo → capa MCP). El dashboard de resultados (otro hallazgo de la misma sesión) se separa como su propio spec siguiente — es una capacidad nueva (renderizar datos que hoy no se muestran en ningún lado), no una corrección de navegación fragmentada, y merece su propio ciclo de diseño en vez de inflar este.
 
@@ -127,16 +127,39 @@ Bajo el predicado corregido siguen apareciendo sin marca especial en
 "Todas", con su propio texto de siguiente-acción — no se pierde
 información, se corrige la etiqueta.
 
-**Modo demo — los targets nunca llegan a `ERROR`:** revisado
-`lib/demo/draft-store.ts` completo: ninguna función local
+**Modo demo (browser/localStorage) — los targets nunca llegan a
+`ERROR`:** **corrección de precisión tras revisión de Codex CLI ronda
+3** — la afirmación debe limitarse explícitamente al almacén demo de
+navegador (`lib/demo/draft-store.ts`), no a "modo demo" en general.
+Revisado `lib/demo/draft-store.ts` completo: ninguna función local
 (`approveDemoTarget`, `recordDemoManualPublicationDelivery`,
 `recordDemoPublicationResult`) asigna `status: "ERROR"` a un target — no
-existe un worker de publicación real en modo demo que pueda fallar. La
+existe un worker de publicación real en ese almacén que pueda fallar. La
 mitad `ERROR` del predicado es correcta de incluir por simetría con
-producción, pero en la práctica siempre será `false` en demo — no hace
-falta ninguna ruta de "reintentar" local nueva, porque no hay ningún
-target en `ERROR` que reintentar. Si en el futuro se simula un fallo de
-publicación en demo, esa ruta se añadiría entonces.
+producción, pero en la práctica siempre será `false` para datos leídos
+de `readDemoDrafts()` — no hace falta ninguna ruta de "reintentar" local
+nueva en la UI de `!isProductionMode`, porque no hay ningún target en
+`ERROR` que reintentar ahí. Si en el futuro se simula un fallo de
+publicación en ese almacén, esa ruta se añadiría entonces.
+
+**Distinto de `DemoContentRepository` (servidor):** existe un segundo
+mecanismo, no relacionado con lo anterior —
+`lib/demo/repository.ts` (`DemoContentRepository`, alcanzada vía
+`createContentRepository()`/`lib/content/repository-factory.ts` cuando
+el servidor cae al repositorio en memoria) sí puede producir un target
+`ERROR`: su ingestión de resultados de publicación
+(`lib/demo/repository.ts:761-767`) asigna `status: "ERROR"` cuando el
+callback trae un error. Esto no contradice lo anterior — es un
+mecanismo completamente distinto (in-memory server-side, no
+`localStorage`) — pero si la página toma la rama de producción
+(`isProductionMode === true`, vía `fetch('/api/content')`) mientras el
+servidor cae a `DemoContentRepository` por una config incompleta, un
+target `ERROR` real sí puede llegar por ahí. No requiere ningún trabajo
+adicional: esa rama ya es la de producción (`listContentSummaries()` +
+`useAttentionTargets` + retry vía `/api/content/.../retry`), así que ya
+queda cubierta por el mismo flujo de aprobar/reintentar de producción
+descrito en este spec — el navegador nunca distingue Supabase real de
+`DemoContentRepository`, solo habla con la misma API.
 
 La inconsistencia demo/producción que ya existe en `/review` (demo solo
 consideraba `PENDING_REVIEW`, producción también `ERROR`) se corrige de
@@ -169,14 +192,31 @@ En vez de eso:
    consultas planas en paralelo (`Promise.all`), unidas después en
    JavaScript. `listContentSummaries()` se extiende con el mismo patrón:
    una segunda consulta plana, en paralelo con la de `content_items`,
-   contra `publication_targets` —
-   `select content_item_id from publication_targets where
+   contra `publication_targets`.
+   **Corrección tras revisión de Codex CLI ronda 3 (bloqueador real,
+   reintroducía el bug del predicado):** la versión anterior de esta
+   sección seleccionaba solo `content_item_id` para ambos estados juntos
+   y los reducía a un único `Set<string>` — eso pierde cuál de los dos
+   estados fue el que hizo match, así que al mapear no hay forma de
+   aplicar el gate `content.state === "REVIEW"` solo a la mitad
+   `PENDING_REVIEW` del predicado (ver arriba) — un `DRAFT` con su
+   target `PENDING_REVIEW` de creación volvería a marcarse como
+   accionable, exactamente el bug que esta sección existe para evitar.
+   Corregido: la consulta selecciona `content_item_id, status` —
+   `select content_item_id, status from publication_targets where
    organization_id = :org and status in ('PENDING_REVIEW', 'ERROR')` —
-   cuyo resultado se reduce a un `Set<string>` de `content_item_id`s y se
-   usa para poblar `hasActionableTarget` al mapear cada fila de
-   `content_items`. Sin RPC nueva, sin vista SQL nueva — dos `select`s
-   planos es exactamente el nivel de complejidad que este archivo ya usa
-   en otros lados.
+   y el resultado se reduce a **dos** `Set<string>` separados,
+   `pendingReviewIds` y `errorIds` (uno por estado, no uno combinado).
+   Al mapear cada fila de `content_items` a su `ContentSummary`:
+   ```
+   hasActionableTarget =
+     (row.state === "REVIEW" && pendingReviewIds.has(row.id))
+     || errorIds.has(row.id)
+   ```
+   — el mismo predicado de dos condiciones ya definido arriba, aplicado
+   correctamente en el punto de fusión. Sin RPC nueva, sin vista SQL
+   nueva — dos `select`s planos es exactamente el nivel de complejidad
+   que este archivo ya usa en otros lados.
    - **Índice nuevo:** el único índice existente sobre esta tabla es
      `publication_targets_organization_content_item_id_idx` — cubre
      `(organization_id, content_item_id, platform)`
@@ -185,7 +225,10 @@ En vez de eso:
      un prefijo distinto — se agrega una migración nueva y aditiva con
      `create index if not exists
      publication_targets_organization_status_idx on
-     public.publication_targets (organization_id, status);`.
+     public.publication_targets (organization_id, status);` (este es el
+     único índice **explícito** adicional; la tabla también tiene los
+     índices implícitos de su `PRIMARY KEY` y cualquier `UNIQUE`
+     existente, sin cambios).
    - **Costo del campo requerido:** hacerlo requerido (no opcional) es
      intencional — evita que un futuro caller de `listContentSummaries()`
      olvide poblarlo silenciosamente. El costo real, verificado por
@@ -260,12 +303,38 @@ resuelve con éxito, deben pasar dos cosas, en este orden:
    `attention` en el siguiente render sin necesidad de invalidación
    manual — el filtro ya deriva de `hasActionableTarget`, que ya viene
    recalculado.
+
+**Contrato concreto (aclaración tras recomendación de Codex CLI ronda
+3):** `useAttentionTargets` acepta un callback, `onTargetResolved`, que
+`/library/page.tsx` le pasa al invocar el hook; el hook lo llama después
+del paso 1 (tras actualizar su propio estado local), y la página lo
+usa como el único disparador del refetch del paso 2. Evita que el
+hook conozca `listContentSummaries()` directamente (mantiene la
+separación: el hook solo sabe de `getContentRecord`/targets) y evita que
+la página tenga que inspeccionar el resultado del approve/retry para
+decidir si refetchear — siempre refetchea, por simplicidad, dado que la
+acción ya es poco frecuente.
+
 No se introduce ninguna librería de cache/invalidación nueva (este
 codebase no usa React Query ni SWR en ningún lado — confirmado en todas
 las páginas leídas, todas usan `useState`/`useEffect` planos) — un
 refetch completo tras una acción humana poco frecuente (aprobar/
 reintentar, nunca por keystroke) es consistente con el patrón ya usado y
 suficientemente barato.
+
+**Modo demo — corrección tras revisión de Codex CLI ronda 3 (bloqueador
+real, sin especificar):** la sincronización de arriba (pasos 1-2)
+describe solo producción; el modo demo (`!isProductionMode`) no usa
+`useAttentionTargets` en absoluto (ver "Modo demo" más abajo), así que
+no aplica el mismo mecanismo. En su lugar, sigue exactamente el patrón
+que `/review/page.tsx` ya usa hoy en demo: una función `refresh()` que
+vuelve a llamar `readDemoDrafts()` (línea 23-25 hoy) y se invoca después
+de cada `approveDemoTarget()` exitoso. Como `readDemoDrafts()` es la
+misma fuente que ya alimenta la tarjeta, el filtro `attention` y el
+contador "por revisar" (ver "Modo demo" más abajo — todo se deriva de un
+solo arreglo ya cargado, sin fetch de por medio), una sola llamada a
+`refresh()` actualiza los tres a la vez — no hace falta un paso
+separado equivalente al 1/2 de producción.
 
 `/library/page.tsx` acepta el filtro también como query param
 `?filter=` (`all` | `attention` | `scheduled` | `published`) además del
@@ -332,24 +401,44 @@ Publicamos automático cuando el diagnóstico no marca riesgo; si lo marca, pedi
 
 `listContentSummaries()` conserva su manejo de error actual de `/library`
 (estado vacío + mensaje) sin cambios — es la ruta por defecto y no se
-toca su comportamiento de falla. `useAttentionTargets` (el fetch nuevo,
-acotado) sigue el mismo patrón que `/review` ya usa hoy para su fetch de
-detalle: si `getContentRecord()` falla para algún id, ese id se omite de
-la vista de "por revisar" con un error visible, sin tumbar el resto de la
-lista (que ya cargó por `listContentSummaries()` de forma independiente).
+toca su comportamiento de falla.
+
+**Corrección tras revisión de Codex CLI ronda 3 (contradicción real):**
+la revisión anterior decía que `useAttentionTargets` "sigue el mismo
+patrón que `/review` ya usa hoy" para omitir solo el id que falla — pero
+el patrón real de `/review` (`review/page.tsx:29-32`,
+`Promise.all(items.map((item) => getContentRecord(item.id)))`) hace
+exactamente lo opuesto: `Promise.all` rechaza el conjunto completo ante
+el primer error individual, así que hoy un solo `getContentRecord()`
+fallido tumba toda la cola de revisión (`productionError` se activa
+para todo, no por id). Como el comportamiento que este spec promete
+(omitir solo el id que falla, sin tumbar el resto) es intencional y
+mejor que el actual, `useAttentionTargets` usa `Promise.allSettled()` en
+vez de replicar el `Promise.all()` existente — cada id resuelto exitoso
+entra al render; cada id rechazado se omite de la vista de "por revisar"
+con un error visible acotado a esa tarjeta, sin afectar los demás ni la
+lista base (que ya cargó por `listContentSummaries()` de forma
+independiente). Esto es una mejora deliberada sobre el comportamiento
+actual de `/review`, no una preservación de él — se anota explícitamente
+para que no se implemente por accidente el `Promise.all()` viejo.
 
 ## Testing
 
-**Corrección tras revisión de Codex CLI:** no existe hoy ningún test de
-`/review` **ni de `/library`** como página — solo tests del componente
-`PublicationTargets` en aislamiento y de `/drafts`
-(`tests/components/drafts-page.test.tsx`). **Corrección adicional tras
-ronda 2:** la frase "tests de `/library` extendidos" de la revisión
-anterior también era falsa, por la misma razón — no hay ningún archivo
-de test de página para `/library` hoy tampoco. Los tests nuevos de abajo
-se escriben desde cero para ambas páginas, siguiendo el mismo patrón de
-test de página que ya usa `tests/components/drafts-page.test.tsx` (mock
-de `fetch`, modo demo vs. producción).
+**Corrección tras revisión de Codex CLI:** no existe hoy ningún archivo
+de test de **página** para `/review` ni para `/library` — sí existe uno
+para `/drafts` (`tests/components/drafts-page.test.tsx`), tests
+aislados del componente `PublicationTargets`, y otros tests de
+componentes no relacionados (`app-shell.test.tsx`,
+`content-form.test.tsx`, etc. — mencionados aquí solo para no dar a
+entender que `drafts-page.test.tsx` es el único archivo de test que
+existe en `tests/components/`, cosa que la redacción de la revisión
+anterior podía sugerir). **Corrección adicional tras ronda 2:** la frase
+"tests de `/library` extendidos" de la revisión anterior también era
+falsa, por la misma razón — no hay ningún archivo de test de página para
+`/library` hoy tampoco. Los tests nuevos de abajo se escriben desde cero
+para ambas páginas, siguiendo el mismo patrón de test de página que ya
+usa `tests/components/drafts-page.test.tsx` (mock de `fetch`, modo demo
+vs. producción).
 
 - Test de repositorio: `listContentSummaries()` incluye
   `hasActionableTarget` correctamente calculado, cubriendo explícitamente
@@ -361,22 +450,37 @@ de `fetch`, modo demo vs. producción).
   - target `ERROR` + `content.state === "APPROVED"` (o cualquier estado
     distinto de `REVIEW`) → `true` (retry no depende de `content.state`).
   - sin ningún target `PENDING_REVIEW`/`ERROR` → `false`.
+  - **caso explícito del bug de ronda 3:** un `content_item` en `DRAFT`
+    con su target `PENDING_REVIEW` de creación y OTRO `content_item`, de
+    otra organización, en `REVIEW` con un target `ERROR` — confirma que
+    la consulta de dos `Set`s (`pendingReviewIds`/`errorIds`) no
+    confunde el estado de un item con el de otro ni colapsa ambos
+    estados en un solo `Set`.
 - Test de fixtures: actualizar `tests/content/campaign-view.test.ts` y
-  cualquier otro literal `ContentSummary` encontrado por grep para
-  incluir el campo nuevo (ver "Costo del campo requerido" arriba).
+  `tests/api/content-read-approval.test.ts:51-65` (hallado en la ronda 3
+  de revisión — construye un objeto con la forma de `ContentSummary` sin
+  nombrar el tipo explícitamente, por lo que un grep textual de
+  "ContentSummary" no lo encuentra; se identifica por estructura, no por
+  nombre de tipo) para incluir el campo nuevo.
 - Test del hook `useAttentionTargets` (nuevo): dado un arreglo de ids,
-  hace `getContentRecord()` solo para esos ids (no para todos); tras un
-  approve/retry exitoso, actualiza su estado local para ese id sin
-  refetch de los demás.
+  hace `getContentRecord()` solo para esos ids (no para todos), usando
+  `Promise.allSettled()` — un id que falla se omite con error visible
+  acotado a esa tarjeta, los demás ids exitosos igual se renderizan (no
+  se replica el `Promise.all()` de `/review`, que tumba todo el
+  conjunto); tras un approve/retry exitoso, actualiza su estado local
+  para ese id sin refetch de los demás y llama `onTargetResolved`.
 - Test de polling: `/library/page.tsx` reprograma `listContentSummaries()`
   cada 4s mientras la respuesta incluya algún item `GENERATING`,
   independientemente del filtro activo; deja de hacerlo cuando ninguno
   lo está.
-- Test de sincronización (nuevo, cubre el hallazgo de ronda 2): aprobar
-  el último target `PENDING_REVIEW`/`ERROR` de una campaña dispara un
-  refetch de `listContentSummaries()`; en el resultado siguiente esa
-  campaña ya no aparece en el filtro `attention` y el contador "por
-  revisar" baja en uno, sin recargar la página.
+- Test de sincronización (nuevo, cubre el hallazgo de ronda 2): en
+  producción, aprobar el último target `PENDING_REVIEW`/`ERROR` de una
+  campaña llama `onTargetResolved`, que dispara un refetch de
+  `listContentSummaries()`; en el resultado siguiente esa campaña ya no
+  aparece en el filtro `attention` y el contador "por revisar" baja en
+  uno, sin recargar la página. En demo (hallazgo de ronda 3), el mismo
+  caso vía `approveDemoTarget()` + `refresh()` (`readDemoDrafts()`)
+  produce el mismo resultado observable.
 - Tests de `/library`: filtro `attention` usa `hasActionableTarget` (no
   `state`); al activarlo, dispara el fetch de detalle solo para esos ids
   y muestra `PublicationTargets` inline, permitiendo aprobar/reintentar;
