@@ -258,8 +258,13 @@ describe("fetchIntakeSuggestions", () => {
   });
 
   it("regresa el costo estimado cuando hubo respuesta, incluso si la forma es inválida (para registrar el gasto real)", async () => {
+    // Corrección tras revisión de Codex CLI ronda 2: "{}" NO es una forma
+    // inválida contra suggestionSchema — todos los campos son opcionales,
+    // así que "{}" parsea con éxito a un objeto con todo en null. Para
+    // probar de verdad una forma inválida hace falta un campo con un tipo
+    // que el schema rechace (p. ej. contentType numérico, no string/null).
     const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      choices: [{ message: { content: "{}" } }],
+      choices: [{ message: { content: JSON.stringify({ contentType: 12345 }) } }],
       usage: { prompt_tokens: 500, completion_tokens: 80 },
     }), { status: 200 }));
     const result = await fetchIntakeSuggestions(
@@ -269,10 +274,42 @@ describe("fetchIntakeSuggestions", () => {
     expect(result.usage).toEqual({ provider: "openrouter", model: "test-model", inputTokens: 500, outputTokens: 80, estimatedCostUsd: expect.any(Number) });
   });
 
+  it("una respuesta 200 con {} (todos los campos ausentes) regresa un objeto de sugerencias todo en null, no null completo", async () => {
+    // Caso legítimo, no un error: el modelo respondió pero no tuvo nada
+    // que sugerir para ningún campo. Distinto del caso de arriba (forma
+    // inválida de verdad).
+    const fetchFn = vi.fn().mockResolvedValue(okOpenRouterResponse({}));
+    const result = await fetchIntakeSuggestions(
+      { imageDataUrl: "data:image/png;base64,AAAA", environment: baseEnv, fetchFn } as IntakeSuggestionDependencies,
+    );
+    expect(result.suggestions).toEqual({ niche: null, contentType: null, objective: null, humanDescription: null, offer: null, cta: null });
+  });
+
   it("falta configuración requerida (modelo/precios) -> lanza (la ruta lo convierte en 503)", async () => {
     await expect(fetchIntakeSuggestions(
       { imageDataUrl: "data:image/png;base64,AAAA", environment: {}, fetchFn: vi.fn() } as IntakeSuggestionDependencies,
     )).rejects.toThrow();
+  });
+
+  it("costo real por encima del techo por solicitud -> suggestions null, pero el uso real se sigue regresando para el ledger", async () => {
+    // Hallazgo de revisión Codex CLI ronda 2: la versión anterior solo
+    // comprobaba presupuesto ANTES de llamar (hasIntakeSuggestionBudget,
+    // Tarea 4) pero nunca validaba el costo REAL de la respuesta contra
+    // SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD después — una respuesta
+    // inesperadamente grande (más tokens de los esperados) se habría
+    // regresado igual, sin ningún guardrail, a diferencia del patrón ya
+    // establecido en copy-processor.ts.
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ niche: "clinicas" }) } }],
+      usage: { prompt_tokens: 50_000, completion_tokens: 50_000 }, // mucho más de lo esperado
+    }), { status: 200 }));
+    const result = await fetchIntakeSuggestions({
+      imageDataUrl: "data:image/png;base64,AAAA",
+      environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD: "0.01" },
+      fetchFn,
+    } as IntakeSuggestionDependencies);
+    expect(result.suggestions).toBeNull();
+    expect(result.usage?.estimatedCostUsd).toBeGreaterThan(0.01);
   });
 });
 ```
@@ -439,6 +476,15 @@ export async function fetchIntakeSuggestions(
   const parsed = suggestionSchema.safeParse(parsedJson);
   if (!parsed.success) return { suggestions: null, usage };
 
+  // Corrección tras revisión de Codex CLI ronda 2: el chequeo de
+  // hasIntakeSuggestionBudget (Tarea 4) solo protege ANTES de llamar —
+  // esto protege DESPUÉS, contra una respuesta cuyo costo real terminó
+  // por encima del techo esperado (mismo espíritu que el guardrail de
+  // costo de worker/providers/copy-processor.ts). El uso ya se regresa de
+  // cualquier forma para que el ledger registre el gasto real.
+  const maxRequestCostUsd = Number(environment.SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD ?? "0.01");
+  if (usage.estimatedCostUsd > maxRequestCostUsd) return { suggestions: null, usage };
+
   return { suggestions: normalizeSuggestions(parsed.data), usage };
 }
 ```
@@ -501,12 +547,19 @@ describe("hasIntakeSuggestionBudget", () => {
     expect(result).toBe(false);
   });
 
-  it("true (fail open) si la lectura de Supabase lanza", async () => {
+  it("false (fail closed) si la lectura de Supabase lanza", async () => {
+    // Corrección tras revisión de Codex CLI ronda 2: la versión anterior
+    // de este test (y de la implementación) hacía fail-OPEN aquí —
+    // contradice al spec, que dice explícitamente que un fallo de lectura
+    // se trata "igual que sin margen de presupuesto" (200 con
+    // suggestions: null, sin llamar a OpenRouter). Fail-open habría
+    // permitido llamadas reales a OpenRouter precisamente cuando no se
+    // puede confirmar que hay presupuesto — lo opuesto de un guardrail.
     const result = await hasIntakeSuggestionBudget({} as never, "org-1", 0.01, {
       getMonthToDateSpendUsd: vi.fn().mockRejectedValue(new Error("db down")),
       getMonthlyBudgetUsd: vi.fn().mockResolvedValue(5),
     });
-    expect(result).toBe(true);
+    expect(result).toBe(false);
   });
 });
 
@@ -543,9 +596,16 @@ type BudgetReaders = {
 /**
  * Soft, read-only gate — NOT an atomic reservation. See the spec's "Por qué
  * no se reusa el sistema de reservas" for why: reserveAiRequestBudget needs
- * a real automation_jobs row, and this call must feel instant. Fails open
- * (true) on a Supabase read error — an interactive suggestion is optional,
- * never worth blocking the user's form over a transient read failure.
+ * a real automation_jobs row, and this call must feel instant.
+ *
+ * Corrección tras revisión de Codex CLI ronda 2: falla CERRADO (false) ante
+ * un error de lectura de Supabase, no abierto. El spec dice explícitamente
+ * (sección "Contrato de la API", "Fallo de Supabase al leer el gasto/
+ * presupuesto mensual") que ese caso se trata igual que "sin margen de
+ * presupuesto" — la versión anterior de esta función regresaba `true` en
+ * el catch, permitiendo una llamada real a OpenRouter justo cuando no se
+ * puede confirmar que hay presupuesto. El formulario sigue siendo 100%
+ * usable sin la sugerencia; no hay razón para arriesgar gasto no verificado.
  */
 export async function hasIntakeSuggestionBudget(
   client: SupabaseClient,
@@ -559,7 +619,7 @@ export async function hasIntakeSuggestionBudget(
     const spent = await readers.getMonthToDateSpendUsd(client, organizationId, new Date());
     return spent + maxRequestCostUsd <= monthlyBudget;
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -968,6 +1028,12 @@ it("un campo sugerido en null no toca el campo existente", async () => {
 **Correcciones tras revisión de Codex CLI — dos errores reales en la
 versión anterior de este paso:**
 
+0. **Import faltante** (hallazgo de revisión Codex ronda 2): el código de
+   abajo usa `useRef`, que no está en el import actual de React de este
+   archivo (`import { useEffect, useMemo, useState } from "react";`,
+   línea 5). Cámbialo a
+   `import { useEffect, useMemo, useRef, useState } from "react";` — sin
+   esto, el archivo no compila.
 1. Esta rama tiene `const [asset, setAsset] = useState<File | null>(null)`
    (línea 123 actual) — **no** `files: File[]`. Ese nombre venía de haber
    leído por error el `content-form.tsx` de la rama paralela
