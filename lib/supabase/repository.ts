@@ -587,13 +587,16 @@ class SupabaseContentRepository
       const baseArguments = {
         p_owner_id: this.organization.userId,
         p_organization_id: this.organization.organizationId,
-        p_asset_id: coverAsset.id,
-        p_storage_path: preparedAssets[0]!.storagePath,
-        p_filename: coverAsset.filename,
-        p_mime_type: coverAsset.mimeType,
-        p_width: coverAsset.width,
-        p_height: coverAsset.height,
-        p_checksum: coverAsset.checksum,
+        p_assets: preparedAssets.map(({ asset, storagePath }, position) => ({
+          assetId: asset.id,
+          position,
+          storagePath,
+          filename: asset.filename,
+          mimeType: asset.mimeType,
+          width: asset.width,
+          height: asset.height,
+          checksum: asset.checksum,
+        })),
         p_business_line: brief.businessLine,
         p_service: brief.service,
         p_niche: brief.niche,
@@ -605,7 +608,7 @@ class SupabaseContentRepository
         p_allowed_facts: brief.allowedFacts,
       };
       const { data, error } = await this.client.rpc(
-        "create_content_item_with_asset_in_organization",
+        "create_content_item_with_assets_in_organization",
         {
           ...baseArguments,
           p_campaign_name: campaign.success ? campaign.data.campaignName : null,
@@ -620,23 +623,7 @@ class SupabaseContentRepository
       );
 
       if (error) throw new Error("Unable to create the content item with asset.");
-      const content = toContentItem(data);
-
-      for (const [position, { asset }] of preparedAssets.entries()) {
-        const { error: assetLinkError } = await this.client.rpc(
-          "add_content_item_asset_in_organization",
-          {
-            p_organization_id: this.organization.organizationId,
-            p_actor_id: this.organization.userId,
-            p_content_item_id: content.id,
-            p_asset_id: asset.id,
-            p_position: position,
-          },
-        );
-        if (assetLinkError) throw new Error("Unable to register the content item assets.");
-      }
-
-      return content;
+      return toContentItem(data);
     } catch (error) {
       if (uploadedPaths.length > 0) await storage.remove(uploadedPaths);
       throw error;

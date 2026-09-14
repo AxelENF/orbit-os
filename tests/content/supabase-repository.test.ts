@@ -168,15 +168,13 @@ describe("SupabaseContentRepository", () => {
     expect(from).not.toHaveBeenCalled();
   });
 
-  it("registers every uploaded asset in order after creating the cover item", async () => {
+  it("creates the item and registers every uploaded asset through one atomic RPC", async () => {
     const assetIds = [
       "8ab76cc5-f59a-48ed-8bc8-186cc7007533",
       "0b93d53f-1d18-4d83-b7c8-cb8cf9fc4e1d",
       "e3a14d68-6f52-4ad4-9d3e-77ee64c0fcb2",
     ];
-    const rpc = vi.fn()
-      .mockResolvedValueOnce({ data: createdRow, error: null })
-      .mockResolvedValue({ data: null, error: null });
+    const rpc = vi.fn().mockResolvedValue({ data: createdRow, error: null });
     const upload = vi.fn().mockResolvedValue({ error: null });
     const repository = createSupabaseRepository({
       rpc,
@@ -196,23 +194,22 @@ describe("SupabaseContentRepository", () => {
       })),
     })).resolves.toMatchObject({ id: createdRow.id });
 
-    expect(rpc.mock.calls.slice(1)).toEqual([
-      ["add_content_item_asset_in_organization", expect.objectContaining({
-        p_content_item_id: createdRow.id,
-        p_asset_id: assetIds[0],
-        p_position: 0,
-      })],
-      ["add_content_item_asset_in_organization", expect.objectContaining({
-        p_content_item_id: createdRow.id,
-        p_asset_id: assetIds[1],
-        p_position: 1,
-      })],
-      ["add_content_item_asset_in_organization", expect.objectContaining({
-        p_content_item_id: createdRow.id,
-        p_asset_id: assetIds[2],
-        p_position: 2,
-      })],
-    ]);
+    expect(rpc).toHaveBeenCalledOnce();
+    expect(rpc).toHaveBeenCalledWith(
+      "create_content_item_with_assets_in_organization",
+      expect.objectContaining({
+        p_organization_id: organizationA.organizationId,
+        p_owner_id: organizationA.userId,
+        p_assets: [
+          expect.objectContaining({ assetId: assetIds[0], position: 0 }),
+          expect.objectContaining({ assetId: assetIds[1], position: 1 }),
+          expect.objectContaining({ assetId: assetIds[2], position: 2 }),
+        ],
+      }),
+    );
+    expect(rpc.mock.calls[0]?.[1]?.p_assets).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ bytes: expect.anything() })]),
+    );
   });
 
   it("propagates an RPC failure without attempting partial repository writes", async () => {
