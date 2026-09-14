@@ -950,6 +950,14 @@ vi.mock("@/lib/content/client", () => ({
   approveContentTarget: (...args: unknown[]) => approveContentTarget(...args),
   retryContentTarget: (...args: unknown[]) => retryContentTarget(...args),
 }));
+// Declarado aquí desde el inicio (no en el Ciclo C, donde se usa por
+// primera vez) — corrección tras revisión de Codex CLI ronda 3: un
+// afterEach que resetea este mock necesita que ya exista como variable
+// en este punto del archivo, y vi.mock ya se hoistea al tope del módulo
+// de todas formas, así que no hay costo en declararlo temprano junto a
+// los demás mocks en vez de partido entre dos ciclos distintos.
+const useSearchParams = vi.hoisted(() => vi.fn(() => new URLSearchParams()));
+vi.mock("next/navigation", () => ({ useSearchParams }));
 
 import LibraryPage from "@/app/(app)/library/page";
 
@@ -961,12 +969,13 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   // vi.clearAllMocks() clears call history but NOT a .mockReturnValue()
-  // override (only .mockReset() does that) — without this line, Cycle B's
-  // hasSupabaseBrowserConfig.mockReturnValue(false) would leak into every
-  // later test in this file, silently flipping them into demo mode. This
-  // re-arms the production default after every test, regardless of what
-  // that test changed it to.
+  // override (only .mockReset() does that) — without these two lines,
+  // Cycle B's hasSupabaseBrowserConfig.mockReturnValue(false) and Cycle
+  // C's useSearchParams.mockReturnValue(new URLSearchParams("filter=..."))
+  // would leak into every later test in this file. Re-arm both defaults
+  // after every test, regardless of what that test changed them to.
   hasSupabaseBrowserConfig.mockReturnValue(true);
+  useSearchParams.mockReturnValue(new URLSearchParams());
   vi.useRealTimers();
 });
 
@@ -1005,6 +1014,30 @@ describe("LibraryPage attention filter", () => {
     await waitFor(() => expect(getContentRecord).toHaveBeenCalledTimes(1));
     expect(getContentRecord).toHaveBeenCalledWith("b");
   });
+
+  it("shows a visible per-card error for an id whose detail fetch fails, without hiding the rest (recomendación ronda 3 del plan review)", async () => {
+    listContentSummaries.mockResolvedValue([
+      summary("b", "REVIEW", true),
+      summary("c", "REVIEW", true),
+    ]);
+    getContentRecord.mockImplementation((id: string) =>
+      id === "c"
+        ? Promise.reject(new Error("boom"))
+        : Promise.resolve({
+            content: { id: "b", state: "REVIEW", service: "bot_whatsapp", niche: "clinicas" },
+            targets: [{ id: "target-1", contentItemId: "b", platform: "FACEBOOK", status: "PENDING_REVIEW" }],
+            drafts: [], auditEvents: [], publicationResults: [],
+          }),
+    );
+
+    const user = userEvent.setup();
+    render(<LibraryPage />);
+    await user.click(screen.getByRole("tab", { name: "Por revisar" }));
+
+    await waitFor(() => expect(getContentRecord).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Aprobar Facebook/i })).toBeInTheDocument();
+  });
 });
 
 describe("LibraryPage polling", () => {
@@ -1036,6 +1069,14 @@ todavía; no hay polling; el contador sigue usando el predicado viejo).
 
 Reescribe `app/(app)/library/page.tsx`. Puntos clave respecto al
 archivo actual:
+
+- **Import faltante — corrección tras revisión de Codex CLI ronda 3
+  (bug real, no compila sin esto):** agrega
+  `import { PublicationTargets } from "@/components/content/publication-targets";`
+  y `import { useAttentionTargets } from "@/lib/content/use-attention-targets";`
+  al inicio del archivo — ambos se usan más abajo en este mismo Step y
+  en el Ciclo B, pero el import nunca se menciona explícitamente en
+  ningún paso anterior.
 
 - `matchesFilter`/`attentionStates` (líneas 24-31 hoy) se elimina el uso
   de `content_items.state` para el filtro `ATTENTION` — usa
@@ -1157,6 +1198,38 @@ CLI ronda 1 del plan: sin esto, un id que falla en
 a lo que la spec exige explícitamente — "error visible acotado a esa
 tarjeta".)
 
+**Condiciones de render mutuamente excluyentes — corrección tras
+revisión de Codex CLI ronda 3 (los estados de arriba podían solaparse
+de forma ambigua: una tarjeta vieja junto a un estado vacío, o un
+estado vacío junto a un error).** Cuando `filter === "ATTENTION"`,
+envuelve el bloque completo de arriba (records + failedIds) así,
+reemplazando cualquier otro bloque "Nada pendiente" que el filtro
+`ATTENTION` pudiera compartir con los demás filtros:
+
+```typescript
+{filter === "ATTENTION" && attention.isLoading ? (
+  <p className="mt-8 text-sm text-slate-500">Cargando campañas por revisar…</p>
+) : null}
+
+{filter === "ATTENTION" && !attention.isLoading && (attention.records.length > 0 || attention.failedIds.length > 0) ? (
+  <section className="mt-8 space-y-5">
+    {/* ...attention.records.map(...) y attention.failedIds.map(...) de arriba, sin cambios... */}
+  </section>
+) : null}
+
+{filter === "ATTENTION" && !attention.isLoading && attention.records.length === 0 && attention.failedIds.length === 0 ? (
+  <section className="mt-5 rounded-2xl border border-dashed border-[#315bd6]/35 bg-[#091735] p-5 text-center">
+    <p className="text-sm text-slate-400">Nada pendiente de revisión.</p>
+  </section>
+) : null}
+```
+
+Estas tres condiciones son mutuamente excluyentes por construcción
+(`isLoading` vs. `records.length > 0 || failedIds.length > 0` vs.
+ninguno de los dos) — nunca puede haber dos a la vez, y el bloque de
+`filteredItems` (excluido de `ATTENTION` en el Step A3 de arriba) no
+compite con ninguna de las tres.
+
 - [ ] **Step A4: Confirmar que pasa (solo el ciclo A — demo y query param todavía no existen)**
 
 Run: `npm test -- tests/components/library-page.test.tsx -t "attention filter"`
@@ -1188,13 +1261,20 @@ vi.mock("@/lib/demo/draft-store", () => ({
   approveDemoTarget: (...args: unknown[]) => approveDemoTarget(...args),
 }));
 
-function demoDraft(id: string, state: string, targets: Array<{ id: string; status: string }>) {
+// Corrección tras revisión de Codex CLI ronda 3: los targets deben
+// traer `contentItemId`/`platform` reales — sin `platform`,
+// PublicationTargets no puede renderizar el botón "Aprobar Facebook"
+// que el Step B5 necesita clickear, y un DemoDraftRecord incompleto no
+// coincide con el tipo real.
+function demoDraft(id: string, state: string, targets: Array<{ id: string; status: string; platform?: "FACEBOOK" | "INSTAGRAM" }>) {
   return {
     content: { id, state, service: "bot_whatsapp", niche: "clinicas", contentType: "venta_directa", objective: "agenda_demo" },
     filename: "creativo.png", mimeType: "image/png", previewDataUrl: "data:image/png;base64,",
     visualAnalysis: { source: "local-demo" as const, summary: "", detectedClaims: [] },
     drafts: [], selectedDraftId: "d1", finalCopy: { headline: "", body: "", cta: "", hashtags: [] },
-    warnings: [], targets, publicationResults: [], auditEvents: [], updatedAt: "2026-09-14T00:00:00.000Z",
+    warnings: [],
+    targets: targets.map((target) => ({ contentItemId: id, platform: "FACEBOOK" as const, ...target })),
+    publicationResults: [], auditEvents: [], updatedAt: "2026-09-14T00:00:00.000Z",
   };
 }
 
@@ -1248,11 +1328,15 @@ useEffect(() => {
   return () => window.clearTimeout(timer);
 }, [isProductionMode]);
 
+// Corrección tras revisión de Codex CLI ronda 3: NO reimplementes el
+// predicado aquí — esto es exactamente la duplicación que la Task 4
+// existe para evitar (un único hasActionableTarget(contentState,
+// targets) compartido por las dos implementaciones de repositorio; el
+// modo demo del cliente es una tercera consumidora del mismo cálculo,
+// no una tercera definición). Reutiliza la función importada:
+// `import { hasActionableTarget } from "@/lib/content/actionable-target";`
 function demoHasActionableTarget(record: DemoDraftRecord): boolean {
-  return (
-    (record.content.state === "REVIEW" && record.targets.some((t) => t.status === "PENDING_REVIEW")) ||
-    record.targets.some((t) => t.status === "ERROR")
-  );
+  return hasActionableTarget(record.content.state, record.targets);
 }
 
 function matchesDemoFilter(draft: DemoDraftRecord, filter: CampaignFilter): boolean {
@@ -1376,13 +1460,11 @@ sincronización" del Ciclo D, pero vía `approveDemoTarget()` +
   it("removes the demo card from the attention filter and decrements the counter after approving its last target", async () => {
     hasSupabaseBrowserConfig.mockReturnValue(false);
     const draftBeforeApproval = demoDraft("d1", "REVIEW", [{ id: "t1", status: "PENDING_REVIEW" }]);
+    const draftAfterApproval = demoDraft("d1", "APPROVED", [{ id: "t1", status: "APPROVED" }]);
     readDemoDrafts
       .mockReturnValueOnce([draftBeforeApproval])
-      .mockReturnValue([{ ...draftBeforeApproval, targets: [{ id: "t1", status: "APPROVED" }] }]);
-    approveDemoTarget.mockReturnValue({
-      content: draftBeforeApproval.content,
-      targets: [{ id: "t1", status: "APPROVED" }],
-    });
+      .mockReturnValue([draftAfterApproval]);
+    approveDemoTarget.mockReturnValue(draftAfterApproval);
 
     const user = userEvent.setup();
     render(<LibraryPage />);
@@ -1397,11 +1479,16 @@ sincronización" del Ciclo D, pero vía `approveDemoTarget()` +
   });
 ```
 
-(Ajusta la forma exacta del target — `{ id: "t1", status: "..." }` está
-simplificado; usa la forma completa de `PublicationTarget`, con
-`contentItemId`/`platform`, igual que en `demoDraft()`. La plataforma
-del target de este fixture debe ser `FACEBOOK` para que el botón
-"Aprobar Facebook" exista.)
+(Usa `demoDraft()` para construir tanto el estado "antes" como
+"después" — produce un `DemoDraftRecord` completo y realista con
+`platform: "FACEBOOK"` en el target por defecto (ver el helper
+corregido en el Step B1), en vez de objetos parciales hechos a mano. El
+`content.state` pasa de `"REVIEW"` a `"APPROVED"` en
+`draftAfterApproval` porque `approveDemoTarget` real transiciona el
+estado del content item cuando su último target queda `APPROVED`
+— `lib/demo/draft-store.ts`, `approveDemoTarget` — así que el fixture
+del "después" modela la transición real, no solo el cambio de
+`status` del target.)
 
 - [ ] **Step B6: Confirmar que ya pasa (no debería requerir código nuevo si el Step B3 está bien implementado)**
 
@@ -1420,34 +1507,11 @@ Expected: PASS (todos los tests de este `describe`, incluido el nuevo).
 
 - [ ] **Step C1: Escribir el test que falla**
 
-Agrega a `tests/components/library-page.test.tsx`, siguiendo el patrón
-exacto de `tests/components/meta-oauth-page-selector.test.tsx:7-9`
-(`vi.hoisted` + `vi.mock("next/navigation", ...)`) — agrégalo **antes**
-de los demás `vi.mock(...)` del archivo, junto a los otros hoisted:
-
-```typescript
-const useSearchParams = vi.hoisted(() => vi.fn(() => new URLSearchParams()));
-vi.mock("next/navigation", () => ({ useSearchParams }));
-```
-
-**Corrección tras revisión de Codex CLI ronda 2 del plan (mismo tipo de
-fuga que `hasSupabaseBrowserConfig`, esta vez sin arreglar):** este test
-llama `useSearchParams.mockReturnValue(new URLSearchParams("filter=attention"))`
-— como el `afterEach` global (Step A1) solo usa `vi.clearAllMocks()`
-(que no deshace `mockReturnValue`), ese override sobrevive a este test y
-se filtra al Ciclo D, que corre después en el mismo archivo. El test de
-sincronización del Ciclo D "por casualidad" sigue pasando porque hace
-click explícito en el tab "Por revisar" sin importar el filtro inicial
-— pero el aislamiento entre tests queda roto igual. Agrega esta línea al
-mismo `afterEach` del Step A1, junto a la de
-`hasSupabaseBrowserConfig.mockReturnValue(true)`:
-
-```typescript
-  useSearchParams.mockReturnValue(new URLSearchParams());
-```
-
-(Vuelve al Step A1 y agrégala ahí mismo, en el `afterEach` — no crees un
-`afterEach` nuevo en este ciclo.)
+`useSearchParams` ya está declarado y mockeado desde el Step A1 (junto a
+los demás mocks, con su reset correspondiente ya en el `afterEach`
+compartido) — este ciclo solo agrega el test que lo usa, siguiendo el
+patrón de `tests/components/meta-oauth-page-selector.test.tsx:37-43`
+para configurarlo por test:
 
 ```typescript
 describe("LibraryPage query param", () => {
