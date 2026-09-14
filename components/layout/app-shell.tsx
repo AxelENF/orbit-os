@@ -63,22 +63,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen bg-[#07112E] text-[#F4F7FC]">
-      <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 border-r border-white/[0.08] bg-[#091735] px-6 py-7 lg:block">
-        <Link href="/" className="group block" aria-label="Ir al inicio de SnapGad Content OS">
+      <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 flex-col border-r border-white/[0.08] bg-[#091735] px-6 py-7 lg:flex">
+        <Link href="/" className="group block shrink-0" aria-label="Ir al inicio de SnapGad Content OS">
           <p className="text-[0.65rem] font-bold uppercase tracking-[0.28em] text-[#FF4D00]">SnapGad</p>
           <p className="mt-1 text-xl font-semibold tracking-[-0.03em] text-white group-hover:text-[#A8C7FF]">Content OS</p>
           <p className="mt-2 max-w-[13rem] text-xs leading-5 text-slate-500">Convierte creativos en campañas que puedes controlar.</p>
         </Link>
 
-        <div className="mt-12 rounded-2xl border border-[#2C5ED8]/30 bg-[#12327A]/25 p-4">
+        <div className="mt-12 shrink-0 rounded-2xl border border-[#2C5ED8]/30 bg-[#12327A]/25 p-4">
           <p className="text-[0.62rem] font-bold uppercase tracking-[0.2em] text-[#A8C7FF]">Workspace</p>
           <p className="mt-2 text-sm font-semibold text-white">SnapGad Technology</p>
           <p className="mt-1 text-xs text-slate-500">1 organización activa</p>
         </div>
 
-        <div className="mt-7"><Navigation pathname={pathname} /></div>
+        <div className="mt-7 min-h-0 flex-1 overflow-y-auto"><Navigation pathname={pathname} /></div>
 
-        <details className="absolute inset-x-6 bottom-7 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+        <details className="mt-4 shrink-0 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
           <summary className="cursor-pointer list-none text-xs font-semibold text-slate-300">Estado del sistema</summary>
           <div className="mt-3 border-t border-white/10 pt-3">
             <RuntimeMode />
