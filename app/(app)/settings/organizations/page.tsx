@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 
 import {
   OrganizationSwitcher,
@@ -91,7 +91,17 @@ export default function OrganizationsSettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [metaConnectionStates, setMetaConnectionStates] = useState<Record<string, MetaConnectionState>>({});
   const [metaOAuthSelectionComplete, setMetaOAuthSelectionComplete] = useState(false);
+  const metaStatusRequestIds = useRef<Record<string, number>>({});
+  const metaSelectionStartedFor = useRef(new Set<string>());
+  const isMountedRef = useRef(false);
   const isProductionMode = hasSupabaseBrowserConfig();
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,16 +130,40 @@ export default function OrganizationsSettingsPage() {
       cancelled = true;
     };
 
+    const statusRequests = organizations.flatMap((organization) => {
+      if (metaSelectionStartedFor.current.has(organization.id)) return [];
+      const requestId = (metaStatusRequestIds.current[organization.id] ?? 0) + 1;
+      metaStatusRequestIds.current[organization.id] = requestId;
+      return [{ organization, requestId }];
+    });
+
     Promise.all(
-      organizations.map(async (organization): Promise<[string, MetaConnectionState]> => {
+      statusRequests.map(async ({ organization, requestId }) => {
         try {
-          return [organization.id, { status: await loadMetaConnectionStatus(organization.id) }];
+          return {
+            organizationId: organization.id,
+            requestId,
+            state: { status: await loadMetaConnectionStatus(organization.id) },
+          };
         } catch {
-          return [organization.id, { status: disconnectedMetaStatus, error: true }];
+          return {
+            organizationId: organization.id,
+            requestId,
+            state: { status: disconnectedMetaStatus, error: true },
+          };
         }
       }),
     ).then((entries) => {
-      if (!cancelled) setMetaConnectionStates(Object.fromEntries(entries));
+      if (cancelled || !isMountedRef.current) return;
+      setMetaConnectionStates((current) => {
+        const next = { ...current };
+        for (const entry of entries) {
+          if (metaStatusRequestIds.current[entry.organizationId] === entry.requestId) {
+            next[entry.organizationId] = entry.state;
+          }
+        }
+        return next;
+      });
     });
 
     return () => {
@@ -138,6 +172,8 @@ export default function OrganizationsSettingsPage() {
   }, [isProductionMode, organizations]);
 
   async function handleDisconnect(organizationId: string) {
+    const requestId = (metaStatusRequestIds.current[organizationId] ?? 0) + 1;
+    metaStatusRequestIds.current[organizationId] = requestId;
     setMetaConnectionStates((current) => ({
       ...current,
       [organizationId]: {
@@ -156,11 +192,13 @@ export default function OrganizationsSettingsPage() {
       });
       if (!response.ok) throw new Error("META_DISCONNECT_FAILED");
       const status = await loadMetaConnectionStatus(organizationId);
+      if (!isMountedRef.current || metaStatusRequestIds.current[organizationId] !== requestId) return;
       setMetaConnectionStates((current) => ({
         ...current,
         [organizationId]: { status },
       }));
     } catch {
+      if (!isMountedRef.current || metaStatusRequestIds.current[organizationId] !== requestId) return;
       setMetaConnectionStates((current) => ({
         ...current,
         [organizationId]: {
@@ -173,7 +211,9 @@ export default function OrganizationsSettingsPage() {
   }
 
   async function handleMetaSelectionComplete(organizationId: string) {
-    setMetaOAuthSelectionComplete(true);
+    metaSelectionStartedFor.current.add(organizationId);
+    const requestId = (metaStatusRequestIds.current[organizationId] ?? 0) + 1;
+    metaStatusRequestIds.current[organizationId] = requestId;
     setMetaConnectionStates((current) => ({
       ...current,
       [organizationId]: {
@@ -185,11 +225,13 @@ export default function OrganizationsSettingsPage() {
 
     try {
       const status = await loadMetaConnectionStatus(organizationId);
+      if (!isMountedRef.current || metaStatusRequestIds.current[organizationId] !== requestId) return;
       setMetaConnectionStates((current) => ({
         ...current,
         [organizationId]: { status },
       }));
     } catch {
+      if (!isMountedRef.current || metaStatusRequestIds.current[organizationId] !== requestId) return;
       setMetaConnectionStates((current) => ({
         ...current,
         [organizationId]: {
@@ -198,6 +240,10 @@ export default function OrganizationsSettingsPage() {
           error: true,
         },
       }));
+    } finally {
+      if (isMountedRef.current && metaStatusRequestIds.current[organizationId] === requestId) {
+        setMetaOAuthSelectionComplete(true);
+      }
     }
   }
 

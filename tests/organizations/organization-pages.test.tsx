@@ -216,4 +216,64 @@ describe("organization pages", () => {
     expect(await screen.findByText("Conectado como Página Uno")).toBeInTheDocument();
     expect(statusReads).toBe(2);
   });
+
+  it("does not let the initial Meta status read overwrite the post-selection refresh", async () => {
+    hasSupabaseBrowserConfig.mockReturnValue(true);
+    useSearchParams.mockReturnValue(
+      new URLSearchParams({
+        metaOAuth: "select",
+        nonce: "11111111-1111-4111-8111-111111111111",
+      }),
+    );
+    let statusReads = 0;
+    let releaseInitialStatus!: (response: Response) => void;
+    const initialStatus = new Promise<Response>((resolve) => {
+      releaseInitialStatus = resolve;
+    });
+    const fetchMock = vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+      const url = new URL(input, "https://orbit.example");
+      if (url.pathname === "/api/organizations") {
+        return Promise.resolve(new Response(JSON.stringify({
+          organizations: [{ id: "organization-owner", name: "Clínica Norte", role: "owner" }],
+          activeOrganizationId: "organization-owner",
+        }), { status: 200 }));
+      }
+      if (url.pathname === "/api/organizations/organization-owner/profile") {
+        return Promise.resolve(new Response(null, { status: 404 }));
+      }
+      if (url.pathname === "/api/integrations/meta/status") {
+        statusReads += 1;
+        return statusReads === 1
+          ? initialStatus
+          : Promise.resolve(new Response(JSON.stringify({
+            status: "ACTIVE",
+            facebookPageName: "Página Uno",
+            hasInstagram: true,
+          }), { status: 200 }));
+      }
+      if (url.pathname === "/api/integrations/meta/connect/select" && init?.method === "POST") {
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }
+      if (url.pathname === "/api/integrations/meta/connect/select") {
+        return Promise.resolve(new Response(JSON.stringify({
+          organizationId: "organization-owner",
+          pages: [{ id: "page-1", name: "Página Uno", hasInstagram: true }],
+        }), { status: 200 }));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<OrganizationsSettingsPage />);
+    expect(await screen.findByRole("button", { name: "Página Uno" })).toBeInTheDocument();
+    await waitFor(() => expect(statusReads).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Página Uno" }));
+    await waitFor(() => expect(statusReads).toBe(2));
+    expect(await screen.findByText("Conectado como Página Uno")).toBeInTheDocument();
+
+    releaseInitialStatus(new Response(JSON.stringify({ status: "NOT_CONNECTED", hasInstagram: false }), { status: 200 }));
+
+    expect(await screen.findByText("Conectado como Página Uno")).toBeInTheDocument();
+  });
 });

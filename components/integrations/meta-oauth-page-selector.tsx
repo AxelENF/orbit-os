@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export type MetaOAuthPage = {
   id: string;
@@ -87,9 +87,11 @@ export function MetaOAuthPageSelector({ nonce, onConnected }: MetaOAuthPageSelec
   const [error, setError] = useState<string | null>(null);
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
+  const isMountedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
+    isMountedRef.current = true;
 
     fetch(`/api/integrations/meta/connect/select?nonce=${encodeURIComponent(nonce)}`, {
       cache: "no-store",
@@ -118,6 +120,7 @@ export function MetaOAuthPageSelector({ nonce, onConnected }: MetaOAuthPageSelec
 
     return () => {
       cancelled = true;
+      isMountedRef.current = false;
     };
   }, [nonce]);
 
@@ -135,8 +138,10 @@ export function MetaOAuthPageSelector({ nonce, onConnected }: MetaOAuthPageSelec
       });
       if (!response.ok) throw await readApiError(response, "META_OAUTH_SELECTION_FAILED");
       await onConnected(organizationId);
+      if (!isMountedRef.current) return;
       setIsComplete(true);
     } catch (reason: unknown) {
+      if (!isMountedRef.current) return;
       const apiError = asApiError(reason, "META_OAUTH_SELECTION_FAILED");
       if (apiError.organizationId) setOrganizationId(apiError.organizationId);
       setSelectedPageId(null);
