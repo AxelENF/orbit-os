@@ -411,10 +411,19 @@ export async function fetchIntakeSuggestions(
   }
   if (!response.ok) return { suggestions: null, usage: null };
 
-  const payload = (await response.json()) as {
+  // Corrección tras revisión de Codex CLI: un 200 con un cuerpo no-JSON
+  // (raro, pero posible ante un proxy/CDN intermedio fallando) hacía que
+  // response.json() lanzara sin protección, escapando hasta el caller de
+  // este módulo como una excepción no manejada.
+  let payload: {
     choices?: Array<{ message?: { content?: string } }>;
     usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
+  try {
+    payload = await response.json();
+  } catch {
+    return { suggestions: null, usage: null };
+  }
   const inputTokens = payload.usage?.prompt_tokens ?? 0;
   const outputTokens = payload.usage?.completion_tokens ?? 0;
   const estimatedCostUsd = estimateCostUsd(inputTokens, outputTokens, inputPrice, outputPrice);
@@ -565,16 +574,25 @@ export async function recordIntakeSuggestionUsage(
   organizationId: string,
   usage: IntakeSuggestionUsage,
 ): Promise<void> {
-  const { error } = await client.rpc("record_interactive_ai_usage", {
-    p_organization_id: organizationId,
-    p_provider: usage.provider,
-    p_model: usage.model,
-    p_input_tokens: usage.inputTokens,
-    p_output_tokens: usage.outputTokens,
-    p_estimated_cost_usd: usage.estimatedCostUsd,
-  });
-  if (error) {
-    console.error(JSON.stringify({ message: "failed to record interactive AI usage", organizationId, error: String(error) }));
+  // Corrección tras revisión de Codex CLI: client.rpc() puede LANZAR (error
+  // de red/transporte), no solo regresar { error }. Sin este try/catch, una
+  // sugerencia ya pagada y ya calculada se habría convertido en un 503 para
+  // el usuario solo porque el registro del gasto en el ledger falló a nivel
+  // de transporte — exactamente lo que la Tarea 5 debe evitar.
+  try {
+    const { error } = await client.rpc("record_interactive_ai_usage", {
+      p_organization_id: organizationId,
+      p_provider: usage.provider,
+      p_model: usage.model,
+      p_input_tokens: usage.inputTokens,
+      p_output_tokens: usage.outputTokens,
+      p_estimated_cost_usd: usage.estimatedCostUsd,
+    });
+    if (error) {
+      console.error(JSON.stringify({ message: "failed to record interactive AI usage", organizationId, error: String(error) }));
+    }
+  } catch (error) {
+    console.error(JSON.stringify({ message: "threw while recording interactive AI usage", organizationId, error: String(error) }));
   }
 }
 ```
@@ -621,7 +639,18 @@ function multipartRequest(file: File): Request {
   return new Request("https://orbit.example/api/content/suggestions", { method: "POST", body: formData });
 }
 
-const validPngBytes = /* mismo fixture PNG mínimo que ya usan otros tests de validateAsset — revisa tests/content/*.test.ts existentes para el helper compartido, no inventes uno nuevo */ new Uint8Array();
+// Mismo fixture mínimo de cabecera PNG que usa tests/content/asset-validation.test.ts:5-11
+// (pngBytes no está exportado desde ese archivo — se duplica localmente,
+// es un fixture de 6 líneas, no amerita un módulo compartido nuevo).
+function pngBytes(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(24);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  new DataView(bytes.buffer).setUint32(16, width, false);
+  new DataView(bytes.buffer).setUint32(20, height, false);
+  return bytes;
+}
+
+const validPngBytes = pngBytes(540, 675); // dimensiones mínimas válidas, ver MIN_ASSET_WIDTH/HEIGHT en asset-validation.ts
 
 describe("POST /api/content/suggestions", () => {
   it("401 sin organización resuelta (sin sesión)", async () => {
@@ -734,6 +763,14 @@ function jsonError(error: string, status: number): Response {
  * createContentRepository(), which falls back to an unauthenticated demo
  * repository when Supabase isn't configured. This route spends real
  * OpenRouter budget and must always resolve a real organization or fail.
+ *
+ * Corrección tras revisión de Codex CLI: la primera versión de este
+ * helper no leía la cookie de organización activa
+ * (resolveActiveOrganizationHint en repository-factory.ts) — un usuario
+ * con más de una organización habría recibido OrganizationSelectionRequiredError
+ * (que este código convertía en 401) incluso teniendo una organización
+ * activa válida. Se replica el mismo mecanismo de cookie que ya usa
+ * createContentRepository.
  */
 async function defaultResolveOrganization(): Promise<ResolvedOrganization> {
   const { getContentRepositoryMode } = await import("@/lib/content/repository-factory");
@@ -751,9 +788,31 @@ async function defaultResolveOrganization(): Promise<ResolvedOrganization> {
     .eq("user_id", user.id);
   if (membershipError) throw new SuggestionConfigurationError();
 
+  // Mismo mecanismo de cookie de organización activa que
+  // createContentRepository (repository-factory.ts:56-77) — sin esto, un
+  // usuario con más de una organización cae siempre en
+  // OrganizationSelectionRequiredError.
+  const activeOrganizationCookieSecret = process.env.SNAPGAD_ACTIVE_ORGANIZATION_COOKIE_SECRET;
+  let activeOrganizationId: string | null = null;
+  if (activeOrganizationCookieSecret) {
+    try {
+      const { cookies } = await import("next/headers");
+      const { ACTIVE_ORGANIZATION_COOKIE } = await import("@/lib/organizations/active-organization");
+      const { verifyActiveOrganizationCookieValue } = await import("@/lib/organizations/active-organization-cookie");
+      const cookieStore = await cookies();
+      activeOrganizationId = verifyActiveOrganizationCookieValue(
+        cookieStore.get(ACTIVE_ORGANIZATION_COOKIE)?.value,
+        user.id,
+        activeOrganizationCookieSecret,
+      ) ?? null;
+    } catch {
+      activeOrganizationId = null;
+    }
+  }
+
   const { selectOrganizationMembership } = await import("@/lib/content/repository-factory");
   const { requireOrganizationContext } = await import("@/lib/organizations/context");
-  const candidate = selectOrganizationMembership((memberships ?? []) as never);
+  const candidate = selectOrganizationMembership((memberships ?? []) as never, activeOrganizationId);
   const organization = await requireOrganizationContext(candidate.organizationId, {
     getSession: async () => ({ userId: user.id }),
     getMembership: async ({ organizationId, userId }) =>
@@ -906,14 +965,37 @@ it("un campo sugerido en null no toca el campo existente", async () => {
 
 - [ ] **Step 3: Implementar**
 
-Agrega el estado de procedencia y el efecto de sugerencias. Puntos clave
-del diseño (ver spec para el razonamiento completo):
+**Correcciones tras revisión de Codex CLI — dos errores reales en la
+versión anterior de este paso:**
+
+1. Esta rama tiene `const [asset, setAsset] = useState<File | null>(null)`
+   (línea 123 actual) — **no** `files: File[]`. Ese nombre venía de haber
+   leído por error el `content-form.tsx` de la rama paralela
+   `feat/meta-publisher-oauth-adapter` (con soporte multi-asset) durante
+   el análisis de estructura de la app, antes de crear esta rama. Usa
+   `asset` en todo este paso, singular.
+2. **Stale closure real:** un efecto con `userEditedFields` excluido de
+   sus dependencias (a propósito, para no re-disparar el fetch en cada
+   edición) captura el valor de `userEditedFields` **del momento en que el
+   efecto se creó**, no el actual — si el usuario edita un campo mientras
+   la solicitud sigue en vuelo, esa edición no se refleja en el chequeo al
+   aplicar la respuesta. La solución estándar de React para esto es una
+   `ref` sincronizada, no la forma funcional de `setState` (que solo sirve
+   para *escribir* el estado más reciente, no para *leer* un valor externo
+   dentro de un callback async ya en curso).
 
 ```typescript
 // dentro de ContentForm, junto a los demás useState:
 const [userEditedFields, setUserEditedFields] = useState<Set<keyof FormState>>(
   () => new Set(),
 );
+// Se mantiene sincronizada en cada render con el valor más reciente de
+// userEditedFields, para que el callback async del efecto de sugerencias
+// (que no puede depender de userEditedFields sin re-disparar el fetch en
+// cada tecla) siempre lea el valor actual, no uno capturado en el momento
+// en que el efecto arrancó.
+const userEditedFieldsRef = useRef(userEditedFields);
+userEditedFieldsRef.current = userEditedFields;
 
 // updateField (ya existe) es el único punto de entrada de TODO cambio
 // disparado por el usuario, sea <input>, <textarea>, <select> o <datalist>
@@ -932,15 +1014,32 @@ function updateField<Key extends keyof FormState>(field: Key, value: FormState[K
 }
 ```
 
-`applyProfile()` (el efecto existente de defaults de AIAS) debe filtrar
-por `userEditedFields` de la misma forma — cambia su `setState` para no
-tocar ningún campo ya en el set (usa la forma funcional de `setState` para
-leer `userEditedFields` actual sin agregarlo como dependencia del efecto,
-o pásalo por una ref si hace falta evitar reruns del efecto).
+`applyProfile()` (el efecto existente de defaults de AIAS) usa la misma
+`userEditedFieldsRef.current` (no `userEditedFields` directo, mismo
+razonamiento de stale closure — `applyProfile` también corre dentro de un
+efecto con sus propias dependencias) para no tocar ningún campo ya
+editado por el usuario:
 
-Nuevo efecto para las sugerencias de imagen (dispara cuando `files[0]`
-cambia a un archivo distinto — usa una key derivada del archivo, p. ej.
-`` `${file.name}:${file.size}:${file.lastModified}` ``, para detectar
+```typescript
+function applyProfile(profile: AiasOrganizationProfile) {
+  const defaults = buildAiasContentDefaults(profile);
+  setState((current) => ({
+    ...current,
+    businessLine: userEditedFieldsRef.current.has("businessLine") ? current.businessLine : (current.businessLine || defaults.businessLine),
+    service: userEditedFieldsRef.current.has("service") ? current.service : (current.service || defaults.service),
+    niche: userEditedFieldsRef.current.has("niche") ? current.niche : (current.niche || defaults.niche),
+    cta: userEditedFieldsRef.current.has("cta") ? current.cta : (current.cta || defaults.cta),
+    humanDescription: userEditedFieldsRef.current.has("humanDescription") ? current.humanDescription : (current.humanDescription || defaults.humanDescription),
+    allowedFactsText: userEditedFieldsRef.current.has("allowedFactsText") ? current.allowedFactsText : (current.allowedFactsText || defaults.allowedFacts.join("\n")),
+    forbiddenClaims: userEditedFieldsRef.current.has("forbiddenClaims") ? current.forbiddenClaims : (current.forbiddenClaims.length ? current.forbiddenClaims : defaults.forbiddenClaims),
+  }));
+  setAiasSuggestionsLoaded(true);
+}
+```
+
+Nuevo efecto para las sugerencias de imagen (dispara cuando `asset` cambia
+a un archivo distinto — usa una key derivada del archivo, p. ej.
+`` `${asset.name}:${asset.size}:${asset.lastModified}` ``, para detectar
 "es un archivo distinto" sin comparar objetos `File` por referencia):
 
 ```typescript
@@ -948,8 +1047,7 @@ const [suggestionsLoading, setSuggestionsLoading] = useState(false);
 const [suggestionsApplied, setSuggestionsApplied] = useState(false);
 
 useEffect(() => {
-  const file = files[0];
-  if (!file || !isProductionMode) return;
+  if (!asset || !isProductionMode) return;
   let cancelled = false;
   setSuggestionsLoading(true);
   setSuggestionsApplied(false);
@@ -957,7 +1055,7 @@ useEffect(() => {
   void (async () => {
     try {
       const formData = new FormData();
-      formData.append("asset", file);
+      formData.append("asset", asset);
       const response = await fetch("/api/content/suggestions", { method: "POST", body: formData, credentials: "same-origin" });
       if (!response.ok || cancelled) return;
       const payload = (await response.json()) as { suggestions: Record<string, unknown> | null };
@@ -968,12 +1066,14 @@ useEffect(() => {
         for (const [key, value] of Object.entries(payload.suggestions!)) {
           const field = key as keyof FormState;
           if (value === null || value === undefined) continue;
-          if (userEditedFields.has(field)) continue;
+          // Lee la ref, no el `userEditedFields` cerrado por este efecto —
+          // el usuario pudo haber editado el campo DESPUÉS de que el fetch
+          // arrancó pero ANTES de que la respuesta llegara.
+          if (userEditedFieldsRef.current.has(field)) continue;
           (next as Record<string, unknown>)[field] = value;
         }
         return next;
       });
-      setUserEditedFields((current) => current); // no-op: sugerencias no marcan el campo como editado
       if (!cancelled) setSuggestionsApplied(true);
     } catch {
       // Análisis opcional — el formulario sigue siendo 100% usable sin él.
@@ -983,8 +1083,8 @@ useEffect(() => {
   })();
 
   return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- userEditedFields se lee, no se re-suscribe: no queremos re-disparar el fetch cuando el usuario edita un campo, solo cuando cambia el archivo.
-}, [files, isProductionMode]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- userEditedFields se lee vía userEditedFieldsRef.current dentro del callback, a propósito: no queremos re-disparar el fetch en cada edición del usuario, solo cuando cambia el archivo.
+}, [asset, isProductionMode]);
 ```
 
 Banner nuevo, junto al banner existente de AIAS (no lo reemplaces):
