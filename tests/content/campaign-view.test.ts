@@ -11,6 +11,7 @@ const item = (state: ContentSummary["state"]): ContentSummary => ({
   niche: "clinicas",
   contentType: "venta_directa",
   objective: "agenda_demo",
+  hasActionableTarget: false,
 });
 
 describe("campaign view model", () => {

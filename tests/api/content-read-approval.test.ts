@@ -56,6 +56,7 @@ describe("content read and approval API", () => {
       niche: "clinicas" as const,
       contentType: "venta_directa" as const,
       objective: "agenda_demo" as const,
+      hasActionableTarget: true,
     };
     const repository = {
       listContentItems: async () => {

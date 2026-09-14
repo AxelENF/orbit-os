@@ -47,7 +47,16 @@ export type ContentSummary = Pick<
   ContentItem,
   "id" | "state" | "createdAt" | "assetId" | "campaign"
 > &
-  Pick<ContentBrief, "service" | "niche" | "contentType" | "objective">;
+  Pick<ContentBrief, "service" | "niche" | "contentType" | "objective"> & {
+    /**
+     * True when at least one publication_target needs a human decision:
+     * a PENDING_REVIEW target while content.state === "REVIEW", or any
+     * ERROR target regardless of content.state. See
+     * docs/superpowers/specs/2026-09-14-navigation-unification-design.md
+     * for why this is two independent conditions, not one flat check.
+     */
+    hasActionableTarget: boolean;
+  };
 
 export type CampaignContext = Pick<
   CampaignBrief,
