@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import { contentBriefSchema } from "@/lib/content/contracts";
 import { buildCampaignCode, campaignBriefSchema } from "@/lib/content/campaign";
+import { hasActionableTarget } from "@/lib/content/actionable-target";
 import { validateFinalCopy } from "@/lib/content/final-copy";
 import { aiasOrganizationProfileSchema, type AiasPlatform } from "@/lib/aias/contracts";
 import { diagnosePublication } from "@/lib/aias/publication-diagnosis";
@@ -34,6 +35,7 @@ import {
   type CopyResultIngestion,
   type CopyResultRepository,
   type PublicationTarget,
+  type PublicationTargetStatus,
   type PublishRequestPreparation,
   type PublishRequestPreparationInput,
   type PublishResultCallback,
@@ -728,14 +730,16 @@ class SupabaseContentRepository
         destination: row.destination,
         destinationValue: row.destination_value,
       });
-      const hasActionableTarget =
-        (row.state === "REVIEW" && pendingReviewIds.has(row.id)) ||
-        errorIds.has(row.id);
+      const targetsForPredicate: Array<{ status: PublicationTargetStatus }> = [
+        ...(pendingReviewIds.has(row.id) ? [{ status: "PENDING_REVIEW" as const }] : []),
+        ...(errorIds.has(row.id) ? [{ status: "ERROR" as const }] : []),
+      ];
+      const hasActionableTargetValue = hasActionableTarget(row.state, targetsForPredicate);
       return {
         id: row.id,
         state: row.state,
         createdAt: row.created_at,
-        hasActionableTarget,
+        hasActionableTarget: hasActionableTargetValue,
         ...brief.data,
         ...(row.asset_id ? { assetId: row.asset_id } : {}),
         ...(campaign.success && row.campaign_code

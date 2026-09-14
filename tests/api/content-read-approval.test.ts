@@ -47,6 +47,22 @@ describe("content read and approval API", () => {
     });
   });
 
+  it("marks hasActionableTarget only once content reaches REVIEW, and always for ERROR targets", async () => {
+    const repository = createDemoRepository();
+    const draftItem = await repository.createContentItem(brief);
+    // draftItem.state is DRAFT at creation (lib/demo/repository.ts:123 —
+    // createContentItem defaults to "DRAFT"; createContentItemWithAssets
+    // is the one that starts at "UPLOADED", not used here). Its two
+    // targets are PENDING_REVIEW from creation either way
+    // (lib/demo/repository.ts:145-153, mirrors what
+    // 0006_create_content_item_with_asset.sql does for Supabase).
+
+    const list = await createContentListHandler({ getRepository: async () => repository })();
+    const { items } = (await list.json()) as { items: Array<{ id: string; hasActionableTarget: boolean }> };
+
+    expect(items.find((item) => item.id === draftItem.id)?.hasActionableTarget).toBe(false);
+  });
+
   it("uses the lightweight campaign projection when the repository provides it", async () => {
     const summary = {
       id: "d32c92ce-9e2b-4aa2-9c39-5c5d97746156",

@@ -27,6 +27,7 @@ import {
   type PublishResultRepository,
   type StoredCopyDraft,
 } from "@/lib/content/repository";
+import { hasActionableTarget } from "@/lib/content/actionable-target";
 import { buildCampaignCode, campaignBriefSchema } from "@/lib/content/campaign";
 import { validateFinalCopy } from "@/lib/content/final-copy";
 import { transitionContentState, type ContentState } from "@/lib/content/state-machine";
@@ -212,6 +213,7 @@ export class DemoContentRepository
         niche: item.niche,
         contentType: item.contentType,
         objective: item.objective,
+        hasActionableTarget: hasActionableTarget(item.state, this.targetsByContentItem.get(item.id) ?? []),
         ...(item.assetId ? { assetId: item.assetId } : {}),
         ...(item.campaign ? { campaign: item.campaign } : {}),
       })),
