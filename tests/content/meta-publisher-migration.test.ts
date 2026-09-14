@@ -7,6 +7,16 @@ async function readMigration(): Promise<string> {
   return readFile(path, "utf8");
 }
 
+async function readProviderFixMigration(): Promise<string> {
+  const path = fileURLToPath(new URL("../../supabase/migrations/0020_publish_job_provider_fix.sql", import.meta.url));
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  }
+}
+
 describe("content_item_assets", () => {
   it("declara la tabla con position acotada entre 0 y 9", async () => {
     const sql = await readMigration();
@@ -158,6 +168,22 @@ describe("PUBLISH job lifecycle SQL", () => {
     ]) {
       expect(sql).toMatch(new RegExp(`revoke all on function public\\.${name}\\([^)]*\\) from public, anon, authenticated`, "i"));
       expect(sql).toMatch(new RegExp(`grant execute on function public\\.${name}\\([^)]*\\) to service_role`, "i"));
+    }
+  });
+});
+
+describe("0020 publish job provider fix", () => {
+  it("inserta provider='meta' en los jobs creados por enqueue y retry", async () => {
+    const sql = await readProviderFixMigration();
+
+    for (const functionName of ["enqueue_publish_automation_job", "retry_publish_target"]) {
+      const functionMatch = sql.match(
+        new RegExp(`create (?:or replace )?function public\\.${functionName}[\\s\\S]*?\\$\\$;`, "i"),
+      );
+      expect(functionMatch).not.toBeNull();
+      expect(functionMatch?.[0]).toMatch(
+        /insert into public\.automation_jobs\s*\([^)]*\bprovider\b[^)]*\)\s*values\s*\([^;]*'meta'/is,
+      );
     }
   });
 });
