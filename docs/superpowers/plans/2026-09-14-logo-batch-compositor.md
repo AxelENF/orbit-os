@@ -78,11 +78,23 @@ git commit -m "feat: add organization-logos Storage bucket with RLS policies"
 
 **Files:**
 - Create: `lib/logo-studio/compose.ts`
-- Test: `lib/logo-studio/compose.test.ts`
+- Test: `lib/logo-studio/compose.test.ts` (función pura, `@vitest-environment node`)
+- Test: `lib/logo-studio/compose-canvas.test.ts` (canvas, `@vitest-environment jsdom`)
 
 **Estrategia de testing de canvas (ya resuelta en el spec, no la reinventes):** jsdom no implementa un contexto 2D funcional ni decodifica imágenes reales — `HTMLImageElement.decode()` no existe, así que `new Image()` real en un test nunca tiene `naturalWidth`/`naturalHeight` distintos de `0`. Los tests de `compositeToBlob` usan objetos `{ naturalWidth, naturalHeight } as unknown as HTMLImageElement` en vez de instancias reales de `Image`, y mockean `HTMLCanvasElement.prototype.getContext`/`toBlob` directamente. No instales el paquete `canvas` (binario nativo, innecesario con este enfoque).
 
-- [ ] **Step 1: Escribir los tests que fallan — `computeLogoPlacement` (función pura, sin mocks)**
+**Corrección tras revisión de Codex CLI ronda 1 (decisión que no debía quedar
+pendiente para la implementación):** la versión anterior de este plan dejaba
+como "decisión durante la implementación" si hacía falta dividir el archivo
+de test en dos, por el conflicto de `@vitest-environment node` vs. `jsdom`
+en un mismo archivo (Vitest 4.1.11 aplica el pragma a nivel de archivo
+completo, no se pueden mezclar dos en el mismo). Se decide aquí, no se
+pospone: **dos archivos separados desde el principio** —
+`compose.test.ts` (función pura, `node`) y `compose-canvas.test.ts`
+(canvas, `jsdom`) — ambos importan de `lib/logo-studio/compose.ts`, que
+sigue siendo un solo archivo fuente (solo el test se divide).
+
+- [ ] **Step 1: Escribir los tests que fallan — `computeLogoPlacement` (función pura, sin mocks) — `lib/logo-studio/compose.test.ts`**
 
 ```typescript
 /** @vitest-environment node */
@@ -91,14 +103,31 @@ import { describe, expect, it } from "vitest";
 import { computeLogoPlacement } from "@/lib/logo-studio/compose";
 
 describe("computeLogoPlacement", () => {
-  it("places the logo in each of the 4 corners with the given margin", () => {
-    const topLeft = computeLogoPlacement(1080, 1350, 200, 100, { corner: "top-left", sizePercent: 15, marginPercent: 4 });
-    expect(topLeft.x).toBeCloseTo(1080 * 0.04);
-    expect(topLeft.y).toBeCloseTo(1080 * 0.04);
+  it("places the logo in the top-left corner with the given margin", () => {
+    const placement = computeLogoPlacement(1080, 1350, 200, 100, { corner: "top-left", sizePercent: 15, marginPercent: 4 });
+    expect(placement.x).toBeCloseTo(1080 * 0.04);
+    expect(placement.y).toBeCloseTo(1080 * 0.04);
+  });
 
-    const bottomRight = computeLogoPlacement(1080, 1350, 200, 100, { corner: "bottom-right", sizePercent: 15, marginPercent: 4 });
-    expect(bottomRight.x).toBeCloseTo(1080 - bottomRight.width - 1080 * 0.04);
-    expect(bottomRight.y).toBeCloseTo(1350 - bottomRight.height - 1080 * 0.04);
+  it("places the logo in the top-right corner with the given margin", () => {
+    const margin = 1080 * 0.04;
+    const placement = computeLogoPlacement(1080, 1350, 200, 100, { corner: "top-right", sizePercent: 15, marginPercent: 4 });
+    expect(placement.x).toBeCloseTo(1080 - placement.width - margin);
+    expect(placement.y).toBeCloseTo(margin);
+  });
+
+  it("places the logo in the bottom-left corner with the given margin", () => {
+    const margin = 1080 * 0.04;
+    const placement = computeLogoPlacement(1080, 1350, 200, 100, { corner: "bottom-left", sizePercent: 15, marginPercent: 4 });
+    expect(placement.x).toBeCloseTo(margin);
+    expect(placement.y).toBeCloseTo(1350 - placement.height - margin);
+  });
+
+  it("places the logo in the bottom-right corner with the given margin", () => {
+    const margin = 1080 * 0.04;
+    const placement = computeLogoPlacement(1080, 1350, 200, 100, { corner: "bottom-right", sizePercent: 15, marginPercent: 4 });
+    expect(placement.x).toBeCloseTo(1080 - placement.width - margin);
+    expect(placement.y).toBeCloseTo(1350 - placement.height - margin);
   });
 
   it("preserves the logo's aspect ratio", () => {
@@ -166,15 +195,13 @@ export function computeLogoPlacement(
 Run: `npm test -- lib/logo-studio/compose.test.ts`
 Expected: PASS (los 4 tests de `computeLogoPlacement`; los de `compositeToBlob` del siguiente step aún no existen).
 
-- [ ] **Step 5: Escribir el test que falla — `compositeToBlob` (canvas mockeado)**
-
-Agrega al mismo archivo de test:
+- [ ] **Step 5: Escribir el test que falla — `compositeToBlob` (canvas mockeado) — `lib/logo-studio/compose-canvas.test.ts` (archivo separado, ver nota arriba)**
 
 ```typescript
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { compositeToBlob } from "@/lib/logo-studio/compose";
+import { compositeToBlob, computeLogoPlacement } from "@/lib/logo-studio/compose";
 
 function fakeImage(naturalWidth: number, naturalHeight: number): HTMLImageElement {
   return { naturalWidth, naturalHeight } as unknown as HTMLImageElement;
@@ -185,7 +212,7 @@ describe("compositeToBlob", () => {
     vi.restoreAllMocks();
   });
 
-  it("draws the creative then the logo at the placement computeLogoPlacement predicts, and resolves with the mocked blob", async () => {
+  it("draws the creative full-size, then the logo at the exact placement computeLogoPlacement predicts, and resolves with the mocked blob", async () => {
     const drawImageCalls: unknown[][] = [];
     const fakeContext = {
       drawImage: (...args: unknown[]) => { drawImageCalls.push(args); },
@@ -198,12 +225,17 @@ describe("compositeToBlob", () => {
 
     const creative = fakeImage(1080, 1350);
     const logo = fakeImage(200, 100);
-    const result = await compositeToBlob(creative, logo, { corner: "bottom-right", sizePercent: 15, marginPercent: 4 }, "image/png");
+    const options = { corner: "bottom-right" as const, sizePercent: 15, marginPercent: 4 };
+    const result = await compositeToBlob(creative, logo, options, "image/png");
+    const expectedPlacement = computeLogoPlacement(1080, 1350, 200, 100, options);
 
     expect(result).toBe(fakeBlob);
     expect(drawImageCalls).toHaveLength(2); // creativo, luego logo
-    expect(drawImageCalls[0][0]).toBe(creative);
-    expect(drawImageCalls[1][0]).toBe(logo);
+    // Corrección ronda 1: antes solo se verificaba QUÉ objeto se dibujó,
+    // no las coordenadas/tamaño reales — ahora se comparan contra
+    // computeLogoPlacement directamente, no un número inventado.
+    expect(drawImageCalls[0]).toEqual([creative, 0, 0, 1080, 1350]);
+    expect(drawImageCalls[1]).toEqual([logo, expectedPlacement.x, expectedPlacement.y, expectedPlacement.width, expectedPlacement.height]);
   });
 
   it("passes the given jpegQuality to toBlob for image/jpeg output", async () => {
@@ -230,11 +262,9 @@ describe("compositeToBlob", () => {
 });
 ```
 
-(La primera mitad del archivo — `computeLogoPlacement` — corre en `@vitest-environment node`; esta segunda mitad necesita `jsdom` para tener `HTMLCanvasElement` disponible. Si Vitest no permite mezclar dos `@vitest-environment` en un mismo archivo en la versión instalada, **divide el archivo**: `compose.test.ts` para la función pura y `compose-canvas.test.ts` para `compositeToBlob` — decide cuál aplica corriendo un test rápido primero.)
-
 - [ ] **Step 6: Confirmar que falla**
 
-Run: `npm test -- lib/logo-studio/compose.test.ts` (o `compose-canvas.test.ts` si dividiste el archivo)
+Run: `npm test -- lib/logo-studio/compose-canvas.test.ts`
 Expected: FAIL — `compositeToBlob` no existe todavía.
 
 - [ ] **Step 7: Implementar `compositeToBlob`**
@@ -272,18 +302,18 @@ export function compositeToBlob(
 
 - [ ] **Step 8: Confirmar que pasa**
 
-Run: `npm test -- lib/logo-studio/compose.test.ts` (y `compose-canvas.test.ts` si aplica)
-Expected: PASS, todos los tests de este archivo.
+Run: `npm test -- lib/logo-studio/compose.test.ts lib/logo-studio/compose-canvas.test.ts`
+Expected: PASS, todos los tests de ambos archivos (7 en `compose.test.ts`, 3 en `compose-canvas.test.ts`).
 
 - [ ] **Step 9: `tsc`, lint**
 
-Run: `npx tsc --noEmit && npx eslint lib/logo-studio/compose.ts lib/logo-studio/compose.test.ts`
+Run: `npx tsc --noEmit && npx eslint lib/logo-studio/compose.ts lib/logo-studio/compose.test.ts lib/logo-studio/compose-canvas.test.ts`
 Expected: limpio.
 
 - [ ] **Step 10: Commit**
 
 ```bash
-git add lib/logo-studio/compose.ts lib/logo-studio/compose.test.ts
+git add lib/logo-studio/compose.ts lib/logo-studio/compose.test.ts lib/logo-studio/compose-canvas.test.ts
 git commit -m "feat: add pure logo placement math and canvas compositing"
 ```
 
@@ -298,11 +328,22 @@ git commit -m "feat: add pure logo placement math and canvas compositing"
 
 - [ ] **Step 1: Instalar `jszip`**
 
+**Corrección tras revisión de Codex CLI ronda 1 (ambigüedad de lockfile
+resuelta, no dejada para la implementación):** este repositorio tiene
+tanto `package-lock.json` como `pnpm-lock.yaml`, pero `pnpm` **no está
+instalado** en el entorno donde se ejecuta este trabajo (verificado:
+`pnpm --version` falla con "command not found") — todos los comandos de
+este plan y de los dos planes anteriores de esta sesión ya se ejecutan
+con `npm`. `package-lock.json` es el único lockfile que este entorno
+puede mantener actualizado; `pnpm-lock.yaml` es anterior a esta sesión
+y se deja intacto, sin tocarlo (no se actualiza ni se borra — no es
+parte del alcance de este cambio).
+
 ```bash
 npm install jszip
 ```
 
-Confirma que `package.json`/el lockfile quedan actualizados (`git status` debe mostrar ambos modificados).
+Confirma que `package.json` y `package-lock.json` quedan actualizados (`git status` debe mostrar ambos modificados; `pnpm-lock.yaml` debe seguir intacto, sin cambios).
 
 - [ ] **Step 2: Escribir el test que falla — nombres finales por extensión de salida, deduplicados DESPUÉS de convertir**
 
@@ -321,6 +362,10 @@ describe("resolveOutputFilename", () => {
     expect(resolveOutputFilename("foto.png", "image/png")).toBe("foto.png");
     expect(resolveOutputFilename("foto.jpeg", "image/jpeg")).toBe("foto.jpg");
   });
+
+  it("sanitizes the filename the same way lib/supabase/repository.ts:556-559 does (hallazgo ronda 1)", () => {
+    expect(resolveOutputFilename("mi foto (final)!.webp", "image/jpeg")).toBe("mi_foto__final__.jpg");
+  });
 });
 
 describe("buildLogoStudioZip", () => {
@@ -333,6 +378,20 @@ describe("buildLogoStudioZip", () => {
     const zip = await JSZip.loadAsync(zipBlob);
     const names = Object.keys(zip.files).sort();
     expect(names).toEqual(["foto-2.jpg", "foto.jpg"]);
+  });
+
+  it("never assigns the same final name twice, even when a generated suffix collides with an existing input name (hallazgo ronda 1 — bug real de dedupe)", async () => {
+    // foto.jpg, foto-2.jpg (ya viene con ese nombre), y otro foto.jpg —
+    // el tercero no puede resolver a "foto-2.jpg", ya está tomado por el
+    // segundo; debe seguir a "foto-3.jpg".
+    const entries = [
+      { originalFilename: "foto.jpg", outputFormat: "image/jpeg" as const, blob: new Blob(["a"]) },
+      { originalFilename: "foto-2.jpg", outputFormat: "image/jpeg" as const, blob: new Blob(["b"]) },
+      { originalFilename: "foto.jpg", outputFormat: "image/jpeg" as const, blob: new Blob(["c"]) },
+    ];
+    const zipBlob = await buildLogoStudioZip(entries);
+    const zip = await JSZip.loadAsync(zipBlob);
+    expect(Object.keys(zip.files).sort()).toEqual(["foto-2.jpg", "foto-3.jpg", "foto.jpg"]);
   });
 
   it("packages N blobs into a zip with exactly N entries", async () => {
@@ -368,18 +427,42 @@ export type ZipEntryInput = {
 
 export function resolveOutputFilename(originalFilename: string, outputFormat: OutputFormat): string {
   const extension = outputFormat === "image/png" ? "png" : "jpg";
-  const withoutExtension = originalFilename.replace(/\.[^./\\]+$/, "");
+  // Corrección ronda 1: la spec exige el mismo saneamiento que ya usa
+  // lib/supabase/repository.ts:556-559 para nombres de archivo — la
+  // versión anterior de este plan no lo aplicaba en absoluto.
+  const sanitized = originalFilename
+    .normalize("NFKC")
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .slice(0, 120) || "creative";
+  const withoutExtension = sanitized.replace(/\.[^./\\]+$/, "");
   return `${withoutExtension}.${extension}`;
 }
 
 function dedupe(names: string[]): string[] {
-  const seen = new Map<string, number>();
+  // Corrección ronda 1 (bug real): la versión anterior usaba un contador
+  // por nombre ORIGINAL, no verificaba si el nombre GENERADO ya estaba en
+  // uso — con ["foto.jpg", "foto-2.jpg", "foto.jpg"], producía dos
+  // entradas "foto-2.jpg" (una ya presente en el input, otra generada al
+  // desambiguar la tercera). Esta versión rastrea el conjunto de nombres
+  // ya asignados y sigue incrementando el sufijo hasta encontrar uno
+  // realmente libre.
+  const used = new Set<string>();
   return names.map((name) => {
-    const count = seen.get(name) ?? 0;
-    seen.set(name, count + 1);
-    if (count === 0) return name;
+    if (!used.has(name)) {
+      used.add(name);
+      return name;
+    }
     const dot = name.lastIndexOf(".");
-    return dot === -1 ? `${name}-${count + 1}` : `${name.slice(0, dot)}-${count + 1}${name.slice(dot)}`;
+    const base = dot === -1 ? name : name.slice(0, dot);
+    const extension = dot === -1 ? "" : name.slice(dot);
+    let suffix = 2;
+    let candidate = `${base}-${suffix}${extension}`;
+    while (used.has(candidate)) {
+      suffix += 1;
+      candidate = `${base}-${suffix}${extension}`;
+    }
+    used.add(candidate);
+    return candidate;
   });
 }
 
@@ -419,8 +502,6 @@ git add package.json package-lock.json lib/logo-studio/export-zip.ts lib/logo-st
 git commit -m "feat: add ZIP export with output-extension-aware deduplication"
 ```
 
-(Ajusta el nombre del lockfile si este proyecto usa `pnpm-lock.yaml` en vez de `package-lock.json` — confirma con `ls` antes de este `git add`.)
-
 ---
 
 ### Task 4: `app/api/organizations/[id]/logo/route.ts` — proxy same-origin + subida
@@ -431,7 +512,26 @@ git commit -m "feat: add ZIP export with output-extension-aware deduplication"
 
 **Antes de escribir código, lee `app/api/organizations/[id]/profile/route.ts` completo** — esta ruta nueva sigue su misma secuencia base (validar UUID con zod → `supabase.auth.getUser()` → resolver membership vía `organization_members`), pero con un gate de rol distinto y sin el JSON-parsing de esa ruta (esta usa `multipart/form-data` para `POST` y devuelve bytes de imagen para `GET`, no JSON).
 
-**Predicado exacto de "no hay logo todavía" (verificado contra el SDK instalado, `@supabase/storage-js@2.116.0`):** `@supabase/supabase-js` re-exporta `StorageApiError` (`node_modules/@supabase/supabase-js/src/index.ts:16`), que trae un campo `.code` — "Service-specific error code from the Storage API response body, such as `NoSuchKey`, `AccessDenied`...". El predicado correcto es `error instanceof StorageApiError && error.code === "NoSuchKey"` → `404 LOGO_NOT_CONFIGURED`; cualquier otro error → `503 LOGO_LOOKUP_FAILED`.
+**Predicado exacto de "no hay logo todavía" (verificado contra el SDK instalado, `@supabase/storage-js@2.116.0`; corrección de cita tras revisión de Codex CLI ronda 1 — línea `17`, no `16`):** `@supabase/supabase-js` re-exporta `StorageApiError` (`node_modules/@supabase/supabase-js/src/index.ts:17`), que trae un campo `.code` — "Service-specific error code from the Storage API response body, such as `NoSuchKey`, `AccessDenied`...". El predicado correcto es `error instanceof StorageApiError && error.code === "NoSuchKey"` → `404 LOGO_NOT_CONFIGURED`; cualquier otro error → `503 LOGO_LOOKUP_FAILED`.
+
+**Manejo de errores completo (corrección tras revisión de Codex CLI ronda 1
+— el ejemplo anterior no distinguía estos casos, calcaba solo la parte
+feliz de `profile/route.ts`):** siguiendo el mismo patrón de
+`profile/route.ts:130-147` (`resolveMembership`/`MembershipLookupError`)
+y `withRouteDependencies` (línea `326-341`, catch-all → `503`), esta
+ruta distingue explícitamente:
+- Membership **no existe** (la organización es válida pero el usuario no
+  pertenece) → `404 ORGANIZATION_NOT_FOUND`.
+- La consulta de membership **lanza** una excepción (fallo real de
+  Supabase, no "no pertenece") → `503 ORGANIZATION_LOOKUP_FAILED`, nunca
+  `404` — un 404 en este caso ocultaría un fallo real detrás de un
+  mensaje de "no encontrado".
+- `request.formData()` puede lanzar (multipart malformado) → capturado,
+  `400 INVALID_REQUEST`.
+- La creación del cliente de Supabase server-side puede fallar (falta de
+  configuración) → capturado en el nivel más externo, `503
+  LOGO_INTEGRATION_NOT_CONFIGURED` (mismo patrón que
+  `PROFILE_INTEGRATION_NOT_CONFIGURED` en `profile/route.ts`).
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
@@ -548,6 +648,36 @@ describe("POST /api/organizations/[id]/logo", () => {
     await expect(response.json()).resolves.toEqual({ error: "INVALID_LOGO_FORMAT" });
   });
 
+  it("accepts real PNG bytes even when the client falsely declares a different Content-Type (hallazgo ronda 1 — el test anterior solo probaba bytes-no-PNG con MIME correcto, nunca al revés)", async () => {
+    const upload = vi.fn().mockResolvedValue({ error: null });
+    const handler = createOrganizationLogoPostHandler({
+      getSession: async () => ({ userId: "user-1" }),
+      getMembership: async () => ({ role: "owner" }),
+      upload,
+    });
+    // Bytes PNG reales, pero el File se etiqueta como image/jpeg — la
+    // validación real es por firma de bytes, no por esta etiqueta.
+    const formData = new FormData();
+    formData.set("logo", new File([pngSignature], "logo.png", { type: "image/jpeg" }));
+    const request = new Request("http://localhost/api/organizations/x/logo", { method: "POST", body: formData });
+
+    const response = await handler(request, context());
+
+    expect(response.status).toBe(200);
+    expect(upload).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ contentType: "image/png" }));
+  });
+
+  it("returns 503 ORGANIZATION_LOOKUP_FAILED (not 404) when the membership lookup itself throws", async () => {
+    const handler = createOrganizationLogoPostHandler({
+      getSession: async () => ({ userId: "user-1" }),
+      getMembership: async () => { throw new Error("connection reset"); },
+      upload: vi.fn(),
+    });
+    const response = await handler(formDataRequest(pngSignature), context());
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ error: "ORGANIZATION_LOOKUP_FAILED" });
+  });
+
   it("rejects a file over 5MB with 413", async () => {
     const tooLarge = new Uint8Array(5 * 1024 * 1024 + 1);
     tooLarge.set(pngSignature);
@@ -596,7 +726,16 @@ async function resolveAuthAndMembership(
   if (!parsed.success) return jsonError("INVALID_ORGANIZATION_ID", 400);
   const session = await deps.getSession();
   if (!session) return jsonError("AUTHENTICATION_REQUIRED", 401);
-  const membership = await deps.getMembership({ organizationId: parsed.data, userId: session.userId });
+  // Corrección ronda 1: distinguir "la consulta de membership lanzó" (falla
+  // real, 503) de "la consulta resolvió sin encontrar nada" (no pertenece,
+  // 404) — mismo patrón que resolveMembership/MembershipLookupError en
+  // profile/route.ts:130-147. La versión anterior mapeaba ambos casos a 404.
+  let membership: Membership | null;
+  try {
+    membership = await deps.getMembership({ organizationId: parsed.data, userId: session.userId });
+  } catch {
+    return jsonError("ORGANIZATION_LOOKUP_FAILED", 503);
+  }
   if (!membership) return jsonError("ORGANIZATION_NOT_FOUND", 404);
   return { organizationId: parsed.data, membership };
 }
@@ -643,7 +782,14 @@ export function createOrganizationLogoPostHandler(deps: PostHandlerDependencies)
     if (resolved instanceof Response) return resolved;
     if (!canManageConnections(resolved.membership.role)) return jsonError("ORGANIZATION_ACCESS_DENIED", 403);
 
-    const formData = await request.formData();
+    // Corrección ronda 1: request.formData() puede lanzar con multipart
+    // malformado — la versión anterior lo dejaba sin capturar.
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch {
+      return jsonError("INVALID_REQUEST", 400);
+    }
     const file = formData.get("logo");
     if (!(file instanceof File)) return jsonError("INVALID_REQUEST", 400);
     if (file.size > MAX_LOGO_BYTES) return jsonError("REQUEST_TOO_LARGE", 413);
@@ -663,7 +809,16 @@ async function withDependencies<T>(
   context: RouteContext,
   handlerFactory: (deps: { getSession: () => Promise<Session | null>; getMembership: (input: { organizationId: string; userId: string }) => Promise<Membership | null>; download: GetHandlerDependencies["download"]; upload: PostHandlerDependencies["upload"] }) => (request: Request, context: RouteContext) => Promise<Response>,
 ): Promise<Response> {
-  const supabase = await createSupabaseServerClient();
+  // Corrección ronda 1: createSupabaseServerClient() puede fallar si la
+  // configuración de Supabase falta — sin este try/catch, eso era una
+  // excepción sin manejar en vez de un 503, igual que
+  // profile/route.ts:326-341 (withRouteDependencies) ya hace.
+  let supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>;
+  try {
+    supabase = await createSupabaseServerClient();
+  } catch {
+    return jsonError("LOGO_INTEGRATION_NOT_CONFIGURED", 503);
+  }
   const deps = {
     getSession: async () => {
       const { data: { user }, error } = await supabase.auth.getUser();
@@ -671,7 +826,11 @@ async function withDependencies<T>(
     },
     getMembership: async ({ organizationId, userId }: { organizationId: string; userId: string }) => {
       const { data, error } = await supabase.from("organization_members").select("role").eq("organization_id", organizationId).eq("user_id", userId).maybeSingle();
-      if (error || !data) return null;
+      // Corrección ronda 1: un error real de la consulta ya NO se trata
+      // igual que "no hay membership" — se relanza para que
+      // resolveAuthAndMembership lo mapee a 503, no a 404.
+      if (error) throw error;
+      if (!data) return null;
       return { role: data.role as OrganizationRole };
     },
     download: (path: string) => supabase.storage.from("organization-logos").download(path),
@@ -694,7 +853,7 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
 - [ ] **Step 4: Confirmar que pasa**
 
 Run: `npm test -- tests/api/organization-logo.test.ts`
-Expected: PASS, los 9 tests.
+Expected: PASS, los 11 tests (9 originales + 2 agregados en la corrección de ronda 1: MIME falsamente declarado, y membership que lanza).
 
 - [ ] **Step 5: `tsc`, lint**
 
@@ -781,16 +940,34 @@ import { AppShell } from "@/components/layout/app-shell";
 afterEach(() => cleanup());
 
 describe("AppShell", () => {
-  it("includes a Logo Studio link with the image icon", () => {
+  it("includes a Logo Studio link to /tools/logo-studio using the new image icon (not some other icon)", () => {
     render(<AppShell>content</AppShell>);
-    expect(screen.getByRole("link", { name: /Logo Studio/i })).toHaveAttribute("href", "/tools/logo-studio");
+    const link = screen.getByRole("link", { name: /Logo Studio/i });
+    expect(link).toHaveAttribute("href", "/tools/logo-studio");
+    // Corrección ronda 1 (hallazgo real): el test anterior nunca verificaba
+    // que el ícono fuera específicamente "image" — busca un fragmento del
+    // path SVG único de ese ícono (ver Task 5, `cx="8.5" cy="8.5" r="1.5"`,
+    // no compartido por ningún otro ícono existente) dentro del link.
+    expect(link.innerHTML).toContain('cx="8.5"');
   });
 
   it("does not overlap the nav with the system-status panel (structural check — see Task 12 for real browser verification)", () => {
     render(<AppShell>content</AppShell>);
     const nav = screen.getByRole("navigation", { name: "Navegación principal" });
-    expect(nav.className).toMatch(/flex-1/);
-    expect(nav.parentElement?.className).not.toMatch(/absolute/);
+    // Corrección ronda 1 (bug real, no cosmético): el fix aplica
+    // flex-1/overflow-y-auto al <div> que ENVUELVE a <nav> (nav.parentElement),
+    // no a <nav> mismo — <nav> conserva su propia clase original
+    // ("space-y-1"). La versión anterior comprobaba nav.className, que
+    // nunca contiene "flex-1" pase lo que pase — ese assert no podía pasar
+    // ni con el fix bien aplicado.
+    expect(nav.parentElement?.className).toMatch(/flex-1/);
+    expect(nav.parentElement?.className).toMatch(/overflow-y-auto/);
+
+    // El panel "Estado del sistema" ya no debe estar posicionado `absolute`
+    // — se busca el <details> directamente (no es pariente de <nav> ni
+    // antes ni después del fix, así que nav.parentElement nunca lo alcanza).
+    const statusPanel = screen.getByText("Estado del sistema").closest("details");
+    expect(statusPanel?.className).not.toMatch(/\babsolute\b/);
   });
 });
 
@@ -944,6 +1121,23 @@ git commit -m "feat: port sidebar layout fix and add Logo Studio nav entry"
 **Files:**
 - Create: `components/logo-studio/logo-upload-panel.tsx`
 - Test: `components/logo-studio/logo-upload-panel.test.tsx`
+- Modify: `package.json` (agrega `@testing-library/user-event` a `devDependencies`)
+
+**Corrección tras revisión de Codex CLI ronda 1 (hallazgo real y
+significativo, no cosmético):** este task es el primero del plan que usa
+`userEvent` de `@testing-library/user-event` — verificado que **no está
+declarado** en `package.json` ni en `package-lock.json`; está presente
+en `node_modules` solo como `extraneous` (`npm ls @testing-library/user-event`
+lo confirma), es decir, quedó instalado manualmente en algún momento
+fuera del árbol de dependencias declarado. Un `npm ci` limpio (el que
+usaría CI o un checkout nuevo) **no lo instalaría**, y todos los tests
+de este plan que usan `userEvent` fallarían por un import que no
+resuelve. Se instala aquí como dependencia real antes de escribir el
+primer test que la usa:
+
+```bash
+npm install --save-dev @testing-library/user-event
+```
 
 - [ ] **Step 1: Escribir el test que falla**
 
@@ -976,7 +1170,16 @@ describe("LogoUploadPanel", () => {
     render(<LogoUploadPanel organizationId="org-1" />);
     const input = screen.getByLabelText(/subir logo/i);
     const jpegFile = new File(["fake"], "logo.jpg", { type: "image/jpeg" });
-    await user.upload(input, jpegFile);
+    // Corrección ronda 1 (hallazgo real): userEvent.upload() por defecto
+    // respeta el atributo `accept` del input y filtra el archivo ANTES de
+    // disparar el evento — el input tiene accept="image/png", así que sin
+    // { applyAccept: false } este test nunca llegaría a ejercer la
+    // validación propia del componente, solo probaría el filtrado nativo
+    // del navegador (que userEvent simula). Verificar `applyAccept` contra
+    // la versión instalada de @testing-library/user-event; si no existe
+    // esa opción en la versión real, usa fireEvent.change(input, { target:
+    // { files: [jpegFile] } }) en su lugar para saltarte el filtro.
+    await user.upload(input, jpegFile, { applyAccept: false });
     expect(screen.getByText(/debe ser un png/i)).toBeInTheDocument();
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -993,6 +1196,17 @@ describe("LogoUploadPanel", () => {
     const img = screen.getByRole("img", { name: /logo/i, hidden: true }) as HTMLImageElement;
     expect(img.src).toMatch(/\/api\/organizations\/org-1\/logo\?t=\d+/);
   });
+
+  it("calls onUploadSuccess after a successful upload, so a parent page can refresh anything else that shows the logo (hallazgo ronda 1 del plan review — ver Task 11)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 })));
+    const onUploadSuccess = vi.fn();
+    const user = userEvent.setup();
+    render(<LogoUploadPanel organizationId="org-1" onUploadSuccess={onUploadSuccess} />);
+    const input = screen.getByLabelText(/subir logo/i);
+    await user.upload(input, new File(["fake"], "logo.png", { type: "image/png" }));
+
+    await waitFor(() => expect(onUploadSuccess).toHaveBeenCalledTimes(1));
+  });
 });
 ```
 
@@ -1008,7 +1222,19 @@ Expected: FAIL — el módulo no existe todavía.
 
 import { useState } from "react";
 
-export function LogoUploadPanel({ organizationId }: { organizationId: string }) {
+export function LogoUploadPanel({
+  organizationId,
+  onUploadSuccess,
+}: {
+  organizationId: string;
+  // Corrección ronda 1 (gap real): sin esto, CompositePreview (Task 10) y
+  // el <img> de este panel podían mostrar dos versiones distintas del
+  // logo tras un reemplazo — el panel refresca su propio <img> con un
+  // cache-bust interno, pero nada le avisaba al resto de la página. Ver
+  // Task 11, donde el page usa este callback para su propio cache-bust
+  // compartido con CompositePreview.
+  onUploadSuccess?: () => void;
+}) {
   const [hasLogo, setHasLogo] = useState(true); // optimista; onError lo corrige
   const [cacheBust, setCacheBust] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -1030,6 +1256,7 @@ export function LogoUploadPanel({ organizationId }: { organizationId: string }) 
       if (!response.ok) throw new Error("UPLOAD_FAILED");
       setHasLogo(true);
       setCacheBust(Date.now());
+      onUploadSuccess?.();
     } catch {
       setError("No se pudo subir el logo. Inténtalo de nuevo.");
     } finally {
@@ -1116,18 +1343,27 @@ describe("CreativeBatchDropzone", () => {
     const user = userEvent.setup();
     render(<CreativeBatchDropzone onFilesChange={onFilesChange} />);
     const input = screen.getByLabelText(/cargar creativos/i);
-    await user.upload(input, new File(["a"], "a.pdf", { type: "application/pdf" }));
+    // Corrección ronda 1 (mismo hallazgo que Task 7): sin
+    // { applyAccept: false }, userEvent filtra el PDF antes de disparar
+    // el evento, y este test nunca ejercería la validación de react-dropzone.
+    await user.upload(input, new File(["a"], "a.pdf", { type: "application/pdf" }), { applyAccept: false });
     expect(screen.getByText(/tipo de archivo no soportado/i)).toBeInTheDocument();
   });
 
-  it(`rejects a batch larger than MAX_BATCH_SIZE (${MAX_BATCH_SIZE})`, async () => {
+  it(`rejects a batch larger than MAX_BATCH_SIZE (${MAX_BATCH_SIZE}) with its own distinct message`, async () => {
     const onFilesChange = vi.fn();
     const user = userEvent.setup();
     render(<CreativeBatchDropzone onFilesChange={onFilesChange} />);
     const input = screen.getByLabelText(/cargar creativos/i);
     const tooMany = Array.from({ length: MAX_BATCH_SIZE + 1 }, (_, index) => new File(["a"], `${index}.png`, { type: "image/png" }));
     await user.upload(input, tooMany);
+    // Corrección ronda 1 (bug real): con `maxFiles` configurado,
+    // react-dropzone ya mete los archivos sobrantes en `fileRejections`
+    // con code "too-many-files" — `acceptedFiles.length` nunca puede
+    // superar MAX_BATCH_SIZE por sí solo. El mensaje debe distinguirse del
+    // genérico "tipo no soportado" de la prueba anterior.
     expect(screen.getByText(new RegExp(`máximo ${MAX_BATCH_SIZE}`, "i"))).toBeInTheDocument();
+    expect(screen.queryByText(/tipo de archivo no soportado/i)).not.toBeInTheDocument();
   });
 
   it(`rejects an individual file larger than MAX_FILE_BYTES`, async () => {
@@ -1161,16 +1397,24 @@ export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 export function CreativeBatchDropzone({ onFilesChange }: { onFilesChange: (files: File[]) => void }) {
   const [error, setError] = useState<string | null>(null);
 
+  // Corrección ronda 1 (bug real): con `maxFiles` configurado abajo,
+  // react-dropzone YA pone los archivos sobrantes en `fileRejections`
+  // (code "too-many-files") — nunca llegan a `acceptedFiles`, así que la
+  // rama vieja `acceptedFiles.length > MAX_BATCH_SIZE` era código muerto,
+  // jamás se ejecutaba. Distingue el motivo del rechazo por su `code` en
+  // vez de asumirlo por longitud (verifica el string exacto de
+  // ErrorCode.TooManyFiles contra la versión instalada de react-dropzone,
+  // 20.1.2, al implementar).
   const onDrop = useCallback((acceptedFiles: File[], fileRejections: { file: File; errors: { code: string }[] }[]) => {
-    if (fileRejections.length > 0) {
+    const hasTooManyFiles = fileRejections.some((rejection) => rejection.errors.some((error) => error.code === "too-many-files"));
+    const hasOtherRejection = fileRejections.some((rejection) => rejection.errors.some((error) => error.code !== "too-many-files"));
+
+    if (hasTooManyFiles) {
+      setError(`Máximo ${MAX_BATCH_SIZE} creativos por lote.`);
+    } else if (hasOtherRejection) {
       setError("Hay archivos con tipo de archivo no soportado o demasiado grande — solo se aceptan .png/.jpg/.jpeg/.webp hasta 10 MB cada uno.");
     } else {
       setError(null);
-    }
-    if (acceptedFiles.length > MAX_BATCH_SIZE) {
-      setError(`Máximo ${MAX_BATCH_SIZE} creativos por lote.`);
-      onFilesChange(acceptedFiles.slice(0, MAX_BATCH_SIZE));
-      return;
     }
     onFilesChange(acceptedFiles);
   }, [onFilesChange]);
@@ -1326,12 +1570,30 @@ git commit -m "feat: add corner/size/margin composite controls"
 - Create: `components/logo-studio/composite-preview.tsx`
 - Test: `components/logo-studio/composite-preview.test.tsx`
 
-- [ ] **Step 1: Escribir el test que falla**
+**Corrección tras revisión de Codex CLI ronda 1 (gap real, no una
+simplificación aceptable):** la versión anterior de este task cubría
+solo el estado vacío (`creativeFile={null}`), evitando por completo el
+camino real de orquestación (`new Image()` + `onload`/`onerror` +
+`compositeToBlob` + limpieza de `blob:` URLs) — y con razón aparente,
+porque en jsdom 29.1.1 asignar `.src` a un `new Image()` real **no
+dispara `onload` ni `onerror` nunca**, así que un test que esperara eso
+se quedaría colgado. Pero eso deja sin probar exactamente la lógica más
+delicada del componente: si en el navegador real la carga del logo
+falla (por ejemplo, el proxy same-origin de Task 4 responde `404`
+porque la organización no tiene logo todavía), la versión anterior de
+la implementación entra en un estado en el que `previewUrl` nunca se
+asigna y el componente se queda mostrando "Generando preview…" para
+siempre — un cuelgue silencioso real. La solución no es evitar probar
+esto, es **mockear el constructor global `Image`** para controlar
+cuándo/cómo se resuelve la carga, y agregar un estado de error explícito
+a la implementación (que la versión anterior tampoco tenía).
+
+- [ ] **Step 1: Escribir los tests que fallan**
 
 ```typescript
 /** @vitest-environment jsdom */
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/logo-studio/compose", async (importOriginal) => {
@@ -1340,25 +1602,87 @@ vi.mock("@/lib/logo-studio/compose", async (importOriginal) => {
 });
 
 import { CompositePreview } from "@/components/logo-studio/composite-preview";
+import { compositeToBlob } from "@/lib/logo-studio/compose";
 
-afterEach(() => cleanup());
+// jsdom no dispara onload/onerror al asignar Image.src — se sustituye el
+// constructor global por uno controlable: cualquier src que contenga
+// "fail" dispara onerror, el resto dispara onload en el siguiente microtask.
+class FakeImage {
+  onload: (() => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  naturalWidth = 1080;
+  naturalHeight = 1350;
+  #src = "";
+  set src(value: string) {
+    this.#src = value;
+    queueMicrotask(() => {
+      if (value.includes("fail")) this.onerror?.(new Event("error"));
+      else this.onload?.();
+    });
+  }
+  get src() { return this.#src; }
+}
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("CompositePreview", () => {
   it("shows a placeholder when there's no creative selected yet", () => {
     render(<CompositePreview creativeFile={null} logoImageUrl="/api/organizations/org-1/logo" options={{ corner: "bottom-right", sizePercent: 15, marginPercent: 4 }} />);
     expect(screen.getByText(/carga al menos un creativo/i)).toBeInTheDocument();
   });
+
+  it("renders the composited preview once both images 'load' successfully", async () => {
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn().mockReturnValue("blob:fake"), revokeObjectURL: vi.fn() });
+    const file = new File(["a"], "a.png", { type: "image/png" });
+
+    render(<CompositePreview creativeFile={file} logoImageUrl="/api/organizations/org-1/logo" options={{ corner: "bottom-right", sizePercent: 15, marginPercent: 4 }} />);
+
+    expect(screen.getByText(/generando preview/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("img", { name: /preview/i })).toBeInTheDocument());
+    expect(compositeToBlob).toHaveBeenCalled();
+  });
+
+  it("shows a visible error instead of hanging on 'Generando preview…' forever when the logo image fails to load", async () => {
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn().mockReturnValue("blob:fake"), revokeObjectURL: vi.fn() });
+    const file = new File(["a"], "a.png", { type: "image/png" });
+
+    render(<CompositePreview creativeFile={file} logoImageUrl="/api/organizations/org-1/logo-fail" options={{ corner: "bottom-right", sizePercent: 15, marginPercent: 4 }} />);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.queryByText(/generando preview/i)).not.toBeInTheDocument();
+  });
+
+  it("revokes the previous preview's object URL when a new creative replaces it, and on unmount", async () => {
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn().mockReturnValue("blob:fake"), revokeObjectURL });
+    const fileA = new File(["a"], "a.png", { type: "image/png" });
+    const fileB = new File(["b"], "b.png", { type: "image/png" });
+
+    const { rerender, unmount } = render(<CompositePreview creativeFile={fileA} logoImageUrl="/logo" options={{ corner: "bottom-right", sizePercent: 15, marginPercent: 4 }} />);
+    await waitFor(() => expect(screen.getByRole("img", { name: /preview/i })).toBeInTheDocument());
+
+    rerender(<CompositePreview creativeFile={fileB} logoImageUrl="/logo" options={{ corner: "bottom-right", sizePercent: 15, marginPercent: 4 }} />);
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalled());
+
+    unmount();
+    expect(revokeObjectURL.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
 });
 ```
-
-(Este componente depende de carga real de imágenes en el navegador — su cobertura de test se mantiene deliberadamente mínima, solo el estado vacío; el comportamiento real de composición ya está probado a fondo en `compose.test.ts`, Task 2 — no dupliques esa cobertura aquí con más mocks de canvas.)
 
 - [ ] **Step 2: Confirmar que falla**
 
 Run: `npm test -- components/logo-studio/composite-preview.test.tsx`
 Expected: FAIL — el módulo no existe todavía.
 
-- [ ] **Step 3: Implementar**
+- [ ] **Step 3: Implementar (con estado de error explícito y limpieza en unmount — corrección de la versión anterior)**
 
 ```typescript
 "use client";
@@ -1377,14 +1701,17 @@ export function CompositePreview({
   options: CompositeOptions;
 }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [hasError, setHasError] = useState(false);
   const objectUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!creativeFile) {
       setPreviewUrl(null);
+      setHasError(false);
       return;
     }
     let cancelled = false;
+    setHasError(false);
 
     async function render() {
       const creativeImage = new Image();
@@ -1405,11 +1732,27 @@ export function CompositePreview({
       setPreviewUrl(url);
     }
 
-    render().catch(() => setPreviewUrl(null));
-    return () => { cancelled = true; };
+    render().catch(() => {
+      if (cancelled) return;
+      setPreviewUrl(null);
+      setHasError(true);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [creativeFile, logoImageUrl, options]);
 
+  // Limpieza en unmount — la versión anterior solo revocaba la URL previa
+  // cuando una NUEVA llegaba, nunca al desmontar el componente.
+  useEffect(() => {
+    return () => {
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    };
+  }, []);
+
   if (!creativeFile) return <p>Carga al menos un creativo para ver el preview.</p>;
+  if (hasError) return <p role="alert">No se pudo generar el preview. Verifica que el creativo sea una imagen válida.</p>;
   return previewUrl ? <img src={previewUrl} alt="Preview del composite" /> : <p>Generando preview…</p>;
 }
 ```
@@ -1417,7 +1760,7 @@ export function CompositePreview({
 - [ ] **Step 4: Confirmar que pasa**
 
 Run: `npm test -- components/logo-studio/composite-preview.test.tsx`
-Expected: PASS.
+Expected: PASS, los 4 tests.
 
 - [ ] **Step 5: `tsc`, lint**
 
@@ -1439,9 +1782,34 @@ git commit -m "feat: add live composite preview"
 - Create: `app/(app)/tools/logo-studio/page.tsx`
 - Test: `tests/components/logo-studio-page.test.tsx`
 
-**Antes de escribir código, lee `app/(app)/settings/organizations/page.tsx` completo** — esta página nueva resuelve `activeOrganizationId` exactamente con el mismo patrón (fetch propio de `GET /api/organizations`, estado local, su propia instancia de `OrganizationSwitcher` con `onOrganizationChange`), no un mecanismo nuevo.
+**Antes de escribir código, lee `app/(app)/settings/organizations/page.tsx` completo** — esta página nueva resuelve `activeOrganizationId` exactamente con el mismo patrón (fetch propio de `GET /api/organizations` vía un `loadOrganizations()` que verifica `response.ok` y valida con `parseOrganizationsResponse`, estado local, su propia instancia de `OrganizationSwitcher` con `onOrganizationChange`), no un mecanismo nuevo.
 
-- [ ] **Step 1: Escribir el test que falla**
+**Corrección tras revisión de Codex CLI ronda 1 — cuatro hallazgos reales
+en este task, ninguno cosmético:**
+1. El fetch anterior no comprobaba `response.ok` ni usaba
+   `parseOrganizationsResponse` — una respuesta `401`/`403` real (sesión
+   expirada, por ejemplo) habría dejado `organizations`/`activeOrganizationId`
+   en un estado no validado, rompiendo `organizations.length` u otra
+   lectura downstream.
+2. `LogoUploadPanel` no reseteaba su estado `hasLogo` al cambiar de
+   organización — mostraría el logo (o la ausencia de logo) de la
+   organización ANTERIOR hasta que el nuevo `<img>` disparara su propio
+   `onError`. Se soluciona con `key={activeOrganizationId}` en el uso de
+   `<LogoUploadPanel>` — fuerza un remount completo del componente al
+   cambiar de organización, sin tocar su implementación interna (Task 7).
+3. `CompositePreview` y `LogoUploadPanel` no compartían ningún mecanismo
+   de cache-busting — tras reemplazar el logo, el preview en vivo podía
+   seguir usando la versión cacheada anterior. Se soluciona levantando un
+   contador de cache-bust a este nivel, incrementado vía el
+   `onUploadSuccess` que Task 7 ya expone.
+4. `handleExport` usaba `Promise.all`, que aborta TODO el export si un
+   solo creativo falla al cargar como imagen — contradice el manejo de
+   errores de la spec ("un archivo corrupto... se omite... sin abortar el
+   resto del lote") y el patrón ya establecido en la rama de navegación
+   (`useAttentionTargets`, aislamiento de errores por id vía
+   `Promise.allSettled`). Se corrige de la misma forma aquí.
+
+- [ ] **Step 1: Escribir los tests que fallan**
 
 ```typescript
 /** @vitest-environment jsdom */
@@ -1453,9 +1821,40 @@ vi.mock("@/lib/logo-studio/export-zip", () => ({
   buildLogoStudioZip: vi.fn().mockResolvedValue(new Blob(["zip"])),
   downloadZip: vi.fn(),
 }));
+vi.mock("@/lib/logo-studio/compose", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/logo-studio/compose")>();
+  return { ...actual, compositeToBlob: vi.fn().mockResolvedValue(new Blob(["fake"])) };
+});
 
 import LogoStudioPage from "@/app/(app)/tools/logo-studio/page";
-import { downloadZip } from "@/lib/logo-studio/export-zip";
+import { buildLogoStudioZip } from "@/lib/logo-studio/export-zip";
+import { compositeToBlob } from "@/lib/logo-studio/compose";
+
+class FakeImage {
+  onload: (() => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  naturalWidth = 1080;
+  naturalHeight = 1350;
+  #src = "";
+  set src(value: string) {
+    this.#src = value;
+    queueMicrotask(() => {
+      if (value.includes("corrupt")) this.onerror?.(new Event("error"));
+      else this.onload?.();
+    });
+  }
+  get src() { return this.#src; }
+}
+
+function organizationsResponse() {
+  return new Response(JSON.stringify({
+    organizations: [
+      { id: "org-1", name: "SnapGad", role: "owner" },
+      { id: "org-2", name: "Otra organización", role: "owner" },
+    ],
+    activeOrganizationId: "org-1",
+  }), { status: 200 });
+}
 
 afterEach(() => {
   cleanup();
@@ -1464,28 +1863,71 @@ afterEach(() => {
 });
 
 describe("LogoStudioPage", () => {
-  it("resolves the active organization from GET /api/organizations, same as settings/organizations", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      organizations: [{ id: "org-1", name: "SnapGad" }],
-      activeOrganizationId: "org-1",
-    }), { status: 200 })));
-
+  it("resolves the active organization from GET /api/organizations using response.ok + parseOrganizationsResponse, same as settings/organizations", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(organizationsResponse()));
     render(<LogoStudioPage />);
-
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/organizations"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/organizations", expect.anything()));
     expect(await screen.findByText(/SnapGad/i)).toBeInTheDocument();
   });
 
-  it("re-fetches the logo when the active organization changes via the local switcher", async () => {
-    // La aserción exacta depende de cómo termine estructurado el switcher local —
-    // como mínimo, confirma que cambiar de organización dispara un nuevo
-    // GET /api/organizations/{nuevoId}/logo (o el <img src> apunta al nuevo id),
-    // no el de la organización anterior.
+  it("shows an error instead of crashing when GET /api/organizations responds with a non-ok status", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "AUTHENTICATION_REQUIRED" }), { status: 401 })));
+    render(<LogoStudioPage />);
+    await waitFor(() => expect(screen.getByText(/no se pudieron cargar tus organizaciones/i)).toBeInTheDocument());
+  });
+
+  it("remounts the logo panel (and its stale hasLogo state) when the active organization changes", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(organizationsResponse()));
+    render(<LogoStudioPage />);
+    await screen.findByText(/SnapGad/i);
+
+    const img1 = screen.getByRole("img", { name: /logo/i, hidden: true }) as HTMLImageElement;
+    expect(img1.src).toContain("/api/organizations/org-1/logo");
+
+    await waitFor(() => screen.getByLabelText("Organización activa"));
+    (screen.getByLabelText("Organización activa") as HTMLSelectElement).value = "org-2";
+
+    // La aserción exacta del disparo de cambio depende de cómo se conecte
+    // el OrganizationSwitcher local — como mínimo, tras seleccionar
+    // "org-2", el <img> del logo debe apuntar a
+    // /api/organizations/org-2/logo, nunca seguir en org-1.
+  });
+
+  it("exports successfully composited creatives even when one fails to load, instead of aborting the whole ZIP (Promise.allSettled, not Promise.all)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(organizationsResponse()));
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn().mockReturnValue("blob:fake"), revokeObjectURL: vi.fn() });
+    render(<LogoStudioPage />);
+    await screen.findByText(/SnapGad/i);
+
+    // Simula que CreativeBatchDropzone ya entregó 2 archivos, uno "corrupto"
+    // (su Image simulada dispara onerror por el nombre) — la forma exacta
+    // de inyectar esto depende de cómo quede estructurado el estado del
+    // page; ajusta esta parte de la prueba a la implementación real,
+    // pero la aserción final no debe cambiar:
+    // await user.upload(dropzoneInput, [goodFile, corruptFile]);
+    // await user.click(screen.getByRole("button", { name: /exportar/i }));
+
+    // await waitFor(() => expect(buildLogoStudioZip).toHaveBeenCalledWith(
+    //   expect.arrayContaining([expect.objectContaining({ originalFilename: "good.png" })]),
+    // ));
+    // expect(buildLogoStudioZip).toHaveBeenCalledWith(
+    //   expect.not.arrayContaining([expect.objectContaining({ originalFilename: "corrupt.png" })]),
+    // );
+    // expect(screen.getByText(/no se pudo procesar/i)).toBeInTheDocument(); // error visible, no silencioso
   });
 });
 ```
 
-(El segundo test queda deliberadamente como esqueleto — complétalo durante la implementación una vez que la estructura real del switcher local esté decidida; no lo dejes vacío en el commit final, es la prueba directa del hallazgo de ronda 2 del spec sobre contexto de organización.)
+(Los dos últimos tests quedan con partes comentadas — completa la
+interacción real con `CreativeBatchDropzone` (Task 8) durante la
+implementación, una vez que sepas cómo el page conecta
+`onFilesChange` con su propio estado. Las aserciones finales (no
+comentadas) son las que debes cumplir: cambiar de organización actualiza
+el `<img>` del logo, y un creativo corrupto no aborta el export completo
+ni desaparece en silencio. No dejes ninguno de los dos tests
+efectivamente vacío en el commit final — es el hallazgo directo de
+ronda 1 del plan review.)
 
 - [ ] **Step 2: Confirmar que falla**
 
@@ -1499,54 +1941,90 @@ Estructura mínima — junta todos los componentes de las Tasks 5-10:
 ```typescript
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { OrganizationSwitcher, type OrganizationOption } from "@/components/aias/organization-switcher";
+import { OrganizationSwitcher, parseOrganizationsResponse, type OrganizationOption } from "@/components/aias/organization-switcher";
 import { CompositeControls } from "@/components/logo-studio/composite-controls";
 import { CompositePreview } from "@/components/logo-studio/composite-preview";
 import { CreativeBatchDropzone } from "@/components/logo-studio/creative-batch-dropzone";
 import { LogoUploadPanel } from "@/components/logo-studio/logo-upload-panel";
-import { compositeToBlob, type CompositeOptions } from "@/lib/logo-studio/compose";
+import { compositeToBlob, type CompositeOptions, type OutputFormat } from "@/lib/logo-studio/compose";
 import { buildLogoStudioZip, downloadZip } from "@/lib/logo-studio/export-zip";
+
+// Mismo patrón que settings/organizations/page.tsx:26-32 — corrección
+// ronda 1: la versión anterior llamaba fetch().then(r => r.json()) sin
+// comprobar response.ok ni validar la forma de la respuesta.
+async function loadOrganizations(): Promise<{ organizations: OrganizationOption[]; activeOrganizationId: string | null }> {
+  const response = await fetch("/api/organizations", { cache: "no-store" });
+  if (!response.ok) throw new Error("ORGANIZATION_LOOKUP_FAILED");
+  const payload = parseOrganizationsResponse(await response.json());
+  if (!payload) throw new Error("INVALID_ORGANIZATIONS_RESPONSE");
+  return payload;
+}
+
+type ExportFailure = { filename: string };
 
 export default function LogoStudioPage() {
   const [organizations, setOrganizations] = useState<OrganizationOption[]>([]);
   const [activeOrganizationId, setActiveOrganizationId] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [creativeFiles, setCreativeFiles] = useState<File[]>([]);
   const [options, setOptions] = useState<CompositeOptions>({ corner: "bottom-right", sizePercent: 15, marginPercent: 4 });
   const [isExporting, setIsExporting] = useState(false);
+  const [exportFailures, setExportFailures] = useState<ExportFailure[]>([]);
+  // Corrección ronda 1: contador de cache-bust compartido — se incrementa
+  // vía LogoUploadPanel.onUploadSuccess (Task 7) para que CompositePreview
+  // (Task 10) también deje de usar la versión cacheada del logo anterior.
+  const [logoCacheBust, setLogoCacheBust] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/organizations")
-      .then((response) => response.json())
-      .then((payload: { organizations: OrganizationOption[]; activeOrganizationId: string | null }) => {
+    loadOrganizations()
+      .then((payload) => {
         if (cancelled) return;
         setOrganizations(payload.organizations);
         setActiveOrganizationId(payload.activeOrganizationId);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setLoadError("No se pudieron cargar tus organizaciones.");
+      });
     return () => { cancelled = true; };
   }, []);
 
-  async function handleExport() {
-    if (!activeOrganizationId || creativeFiles.length === 0) return;
-    setIsExporting(true);
-    try {
-      const logoUrl = `/api/organizations/${activeOrganizationId}/logo`;
-      const logoImage = new Image();
-      await new Promise<void>((resolve, reject) => { logoImage.onload = () => resolve(); logoImage.onerror = reject; logoImage.src = logoUrl; });
+  const logoImageUrl = useMemo(
+    () => activeOrganizationId ? `/api/organizations/${activeOrganizationId}/logo${logoCacheBust ? `?t=${logoCacheBust}` : ""}` : null,
+    [activeOrganizationId, logoCacheBust],
+  );
 
-      const entries = await Promise.all(creativeFiles.map(async (file) => {
+  async function handleExport() {
+    if (!activeOrganizationId || !logoImageUrl || creativeFiles.length === 0) return;
+    setIsExporting(true);
+    setExportFailures([]);
+    try {
+      const logoImage = new Image();
+      await new Promise<void>((resolve, reject) => { logoImage.onload = () => resolve(); logoImage.onerror = reject; logoImage.src = logoImageUrl; });
+
+      // Corrección ronda 1 (bug real): Promise.all abortaba TODO el export
+      // si un solo creativo fallaba al cargar — Promise.allSettled aísla
+      // cada fallo, igual que useAttentionTargets ya hace en la rama de
+      // navegación para getContentRecord.
+      const outcomes = await Promise.allSettled(creativeFiles.map(async (file) => {
         const creativeImage = new Image();
         const objectUrl = URL.createObjectURL(file);
         await new Promise<void>((resolve, reject) => { creativeImage.onload = () => resolve(); creativeImage.onerror = reject; creativeImage.src = objectUrl; });
         URL.revokeObjectURL(objectUrl);
-        const outputFormat = file.type === "image/png" ? "image/png" as const : "image/jpeg" as const;
+        const outputFormat: OutputFormat = file.type === "image/png" ? "image/png" : "image/jpeg";
         const blob = await compositeToBlob(creativeImage, logoImage, options, outputFormat);
         return { originalFilename: file.name, outputFormat, blob };
       }));
 
+      const entries = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
+      const failures = creativeFiles
+        .filter((_, index) => outcomes[index].status === "rejected")
+        .map((file) => ({ filename: file.name }));
+      setExportFailures(failures);
+
+      if (entries.length === 0) return; // todos fallaron, no hay nada que exportar
       const zipBlob = await buildLogoStudioZip(entries);
       downloadZip(zipBlob, `snapgad-logos-${new Date().toISOString().slice(0, 10)}.zip`);
     } finally {
@@ -1557,6 +2035,7 @@ export default function LogoStudioPage() {
   return (
     <div>
       <h1>Logo Studio</h1>
+      {loadError ? <p role="alert">{loadError}</p> : null}
       {organizations.length > 0 ? (
         <OrganizationSwitcher
           organizations={organizations}
@@ -1564,15 +2043,29 @@ export default function LogoStudioPage() {
           onOrganizationChange={setActiveOrganizationId}
         />
       ) : null}
-      {activeOrganizationId ? (
+      {activeOrganizationId && logoImageUrl ? (
         <>
-          <LogoUploadPanel organizationId={activeOrganizationId} />
+          {/*
+            Corrección ronda 1 (bug real): key={activeOrganizationId} fuerza
+            un remount completo de LogoUploadPanel al cambiar de
+            organización — sin esto, su estado interno hasLogo se queda con
+            el valor de la organización anterior hasta que el <img> nuevo
+            dispara su propio onError.
+          */}
+          <LogoUploadPanel
+            key={activeOrganizationId}
+            organizationId={activeOrganizationId}
+            onUploadSuccess={() => setLogoCacheBust(Date.now())}
+          />
           <CreativeBatchDropzone onFilesChange={setCreativeFiles} />
           <CompositeControls value={options} onChange={setOptions} />
-          <CompositePreview creativeFile={creativeFiles[0] ?? null} logoImageUrl={`/api/organizations/${activeOrganizationId}/logo`} options={options} />
+          <CompositePreview creativeFile={creativeFiles[0] ?? null} logoImageUrl={logoImageUrl} options={options} />
           <button type="button" onClick={() => void handleExport()} disabled={creativeFiles.length === 0 || isExporting}>
             {isExporting ? "Exportando…" : "Exportar ZIP"}
           </button>
+          {exportFailures.length > 0 ? (
+            <p role="alert">No se pudo procesar: {exportFailures.map((failure) => failure.filename).join(", ")}. El resto del lote sí se exportó.</p>
+          ) : null}
         </>
       ) : null}
     </div>
@@ -1580,7 +2073,7 @@ export default function LogoStudioPage() {
 }
 ```
 
-(Verifica la firma real de `OrganizationSwitcher`/`OrganizationOption` contra `components/aias/organization-switcher.tsx` — el ejemplo de arriba asume la misma forma que ya usa `settings/organizations/page.tsx`, ajusta si difiere.)
+(Verifica la firma real de `OrganizationSwitcher`/`OrganizationOption`/`parseOrganizationsResponse` contra `components/aias/organization-switcher.tsx` — el ejemplo de arriba ya se verificó contra ese archivo real durante la revisión de este plan, debería coincidir sin ajustes, pero confírmalo antes de dar por buena la implementación.)
 
 - [ ] **Step 4: Confirmar que pasa**
 
