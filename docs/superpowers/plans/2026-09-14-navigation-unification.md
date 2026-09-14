@@ -215,38 +215,85 @@ test necesitas un mock que sí distinga tabla, porque vas a alimentar
 — no reutilices el mock compartido de la línea 89 tal cual para este
 caso.
 
-- [ ] **Step 1: Escribir el test que falla (caso completo del bug de ronda 3)**
+**Corrección tras revisión de Codex CLI ronda 1 del plan (bug real):**
+el mock compartido de la línea 89-107 tampoco implementa `.in()` — la
+consulta real que vas a escribir en el Step 3 sí llama `.in("status",
+[...])`. Si dejas ese mock sin tocar, el test EXISTENTE de la línea 84
+(`"scopes list, get, and create operations..."`) va a lanzar `TypeError:
+chain.in is not a function` en cuanto tu código nuevo llame
+`.from("publication_targets")` a través de ese mismo mock compartido —
+no va a recibir `createdRow` reinterpretado como afirmaba una versión
+anterior de este plan, va a **crashear**. Antes de escribir el test
+nuevo (Step 1), primero extiende el `chain` compartido de la línea
+89-107 agregando:
+
+```typescript
+        in: vi.fn(() => Promise.resolve({ data: [], error: null })),
+```
+
+junto a `select`/`eq`/`order`/`maybeSingle` en ese mismo objeto `chain`.
+Esto hace que el test existente siga pasando (tu código nuevo llamará
+`.in()` sobre ese mock y recibirá una lista vacía de targets, así que
+`hasActionableTarget` dará `false` para todo en ese test — no rompe
+ninguna aserción existente, porque ese test no verifica ese campo).
+
+- [ ] **Step 1: Escribir el test que falla (caso completo del bug de ronda 3, incluyendo aislamiento por organización)**
 
 Agrega a `tests/content/supabase-repository.test.ts`, dentro de
 `describe("SupabaseContentRepository", ...)`, un nuevo `it`:
 
 ```typescript
-  it("computes hasActionableTarget from a REVIEW-gated PENDING_REVIEW and an ungated ERROR", async () => {
+  it("computes hasActionableTarget from a REVIEW-gated PENDING_REVIEW and an ungated ERROR, scoped by organization", async () => {
     const draftWithPendingTarget = { ...createdRow, id: "11111111-1111-1111-1111-111111111111", state: "DRAFT" };
     const inReviewWithPendingTarget = { ...createdRow, id: "22222222-2222-2222-2222-222222222222", state: "REVIEW" };
     const approvedWithErrorTarget = { ...createdRow, id: "33333333-3333-3333-3333-333333333333", state: "APPROVED" };
     const publishedNoActionableTarget = { ...createdRow, id: "44444444-4444-4444-4444-444444444444", state: "PUBLISHED" };
-    const contentRows = [draftWithPendingTarget, inReviewWithPendingTarget, approvedWithErrorTarget, publishedNoActionableTarget];
-    const targetRows = [
-      { content_item_id: draftWithPendingTarget.id, status: "PENDING_REVIEW" },
-      { content_item_id: inReviewWithPendingTarget.id, status: "PENDING_REVIEW" },
-      { content_item_id: approvedWithErrorTarget.id, status: "ERROR" },
-    ];
+    const contentRowsByOrg: Record<string, unknown[]> = {
+      [organizationA.organizationId]: [draftWithPendingTarget, inReviewWithPendingTarget, approvedWithErrorTarget, publishedNoActionableTarget],
+    };
+    const targetRowsByOrg: Record<string, unknown[]> = {
+      [organizationA.organizationId]: [
+        { content_item_id: draftWithPendingTarget.id, status: "PENDING_REVIEW" },
+        { content_item_id: inReviewWithPendingTarget.id, status: "PENDING_REVIEW" },
+        { content_item_id: approvedWithErrorTarget.id, status: "ERROR" },
+      ],
+      // Deliberately a DIFFERENT organization's ERROR target on the SAME
+      // content_item_id as organizationA's REVIEW item — proves the merge
+      // is scoped by organization, not just by id, if this leaked in it
+      // would make publishedNoActionableTarget's id wrongly match.
+      [organizationB.organizationId]: [
+        { content_item_id: publishedNoActionableTarget.id, status: "ERROR" },
+      ],
+    };
 
     const from = vi.fn((table: string) => {
       if (table === "publication_targets") {
+        const filters: Array<[string, string]> = [];
         return {
           select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              in: vi.fn(() => Promise.resolve({ data: targetRows, error: null })),
-            })),
+            eq: vi.fn((field: string, value: string) => {
+              filters.push([field, value]);
+              return {
+                in: vi.fn(() => Promise.resolve({
+                  data: targetRowsByOrg[filters.find(([f]) => f === "organization_id")?.[1] ?? ""] ?? [],
+                  error: null,
+                })),
+              };
+            }),
           })),
         };
       }
+      const filters: Array<[string, string]> = [];
       const chain = {
         select: vi.fn(() => chain),
-        eq: vi.fn(() => chain),
-        order: vi.fn(() => Promise.resolve({ data: contentRows, error: null })),
+        eq: vi.fn((field: string, value: string) => {
+          filters.push([field, value]);
+          return chain;
+        }),
+        order: vi.fn(() => Promise.resolve({
+          data: contentRowsByOrg[filters.find(([f]) => f === "organization_id")?.[1] ?? ""] ?? [],
+          error: null,
+        })),
       };
       return chain;
     });
@@ -257,17 +304,20 @@ Agrega a `tests/content/supabase-repository.test.ts`, dentro de
     expect(summaries.find((item) => item.id === draftWithPendingTarget.id)?.hasActionableTarget).toBe(false);
     expect(summaries.find((item) => item.id === inReviewWithPendingTarget.id)?.hasActionableTarget).toBe(true);
     expect(summaries.find((item) => item.id === approvedWithErrorTarget.id)?.hasActionableTarget).toBe(true);
+    // organizationB's ERROR target on this same content_item_id must NOT
+    // leak into organizationA's result:
     expect(summaries.find((item) => item.id === publishedNoActionableTarget.id)?.hasActionableTarget).toBe(false);
   });
 ```
 
-(Ajusta la forma exacta de la cadena mock de `publication_targets`
-—`select().eq().in(...)`— para que coincida con la forma exacta de la
-consulta real que escribas en el Step 3; lo importante del test es que
-`content_items` y `publication_targets` respondan con datos
-**independientes**, y que el caso `draftWithPendingTarget` — un `DRAFT`
-con target `PENDING_REVIEW` de creación — dé `false`, que es exactamente
-el bug de ronda 3 que este test existe para impedir que regrese.)
+(Lo importante del test: `content_items` y `publication_targets`
+responden con datos **independientes** por tabla, el caso
+`draftWithPendingTarget` — un `DRAFT` con target `PENDING_REVIEW` de
+creación — da `false` (el bug de ronda 3 del spec review), y el target
+`ERROR` de `organizationB` sobre el mismo `content_item_id` no se filtra
+hacia el resultado de `organizationA` — cubre el hallazgo de ronda 1 del
+plan review, que señaló que la versión anterior de este test no probaba
+aislamiento por organización.)
 
 - [ ] **Step 2: Confirmar que falla**
 
@@ -365,15 +415,14 @@ agrégalo al objeto de retorno.
 - [ ] **Step 4: Confirmar que pasa**
 
 Run: `npm test -- tests/content/supabase-repository.test.ts`
-Expected: PASS, incluyendo el test existente de la línea 84 (que sigue
-usando el mock compartido — como ese mock no distingue tabla, la segunda
-consulta a `publication_targets` recibirá `[createdRow]` reinterpretado,
-pero `createdRow` no tiene `content_item_id`/`status`, así que
-`targetsResult.data` será `[createdRow]` con esos campos `undefined` —
-confirma que tu código no lanza con eso, simplemente no agrega ningún id
-a ninguno de los dos `Set`s. Si el test existente falla, ajusta el
-manejo para que una fila sin `content_item_id`/`status` reconocible se
-ignore en vez de lanzar.)
+Expected: PASS, incluyendo el test existente de la línea 84 — gracias al
+`in: vi.fn(...)` que agregaste al `chain` compartido antes del Step 1,
+ese test ya no crashea; su segunda consulta a `publication_targets`
+devuelve `{ data: [], error: null }`, así que ningún id entra a
+`pendingReviewIds`/`errorIds` para ese caso (el test no verifica
+`hasActionableTarget`, así que esto no le afecta). Si falla con
+`chain.in is not a function`, confirma que agregaste `in` al `chain`
+correcto (el de la línea 89-107, no uno nuevo).
 
 - [ ] **Step 5: `tsc` limpio en este archivo**
 
@@ -411,8 +460,12 @@ content record"`), usando el mismo patrón (`createDemoRepository()` +
   it("marks hasActionableTarget only once content reaches REVIEW, and always for ERROR targets", async () => {
     const repository = createDemoRepository();
     const draftItem = await repository.createContentItem(brief);
-    // draftItem.state is UPLOADED at creation; its two targets are
-    // PENDING_REVIEW from creation (mirrors 0006_create_content_item_with_asset.sql).
+    // draftItem.state is DRAFT at creation (lib/demo/repository.ts:123 —
+    // createContentItem defaults to "DRAFT"; createContentItemWithAssets
+    // is the one that starts at "UPLOADED", not used here). Its two
+    // targets are PENDING_REVIEW from creation either way
+    // (lib/demo/repository.ts:145-153, mirrors what
+    // 0006_create_content_item_with_asset.sql does for Supabase).
 
     const list = await createContentListHandler({ getRepository: async () => repository })();
     const { items } = (await list.json()) as { items: Array<{ id: string; hasActionableTarget: boolean }> };
@@ -486,6 +539,16 @@ Luego, en `lib/demo/repository.ts:205-219`:
 
 - [ ] **Step 4: Volver a `lib/supabase/repository.ts` (Task 3) para usar la misma función**
 
+**Corrección tras revisión de Codex CLI ronda 1 del plan:** la firma es
+**una sola**, no una elección — `hasActionableTarget(contentState,
+targets)`, exactamente como quedó definida en el Step 3 de esta task.
+`lib/demo/repository.ts` ya la usa así, pasando el arreglo real de
+`PublicationTarget[]` que tiene en `targetsByContentItem`.
+`lib/supabase/repository.ts` no tiene un arreglo real de targets por
+fila (solo los dos `Set`s de ids) — construye un arreglo **sintético**
+con la forma mínima que la función necesita (`{ status }`), no cambies
+la firma de la función para aceptar `Set`s.
+
 Reemplaza el cálculo inline de la Task 3, Step 3:
 
 ```typescript
@@ -494,23 +557,24 @@ Reemplaza el cálculo inline de la Task 3, Step 3:
         errorIds.has(row.id);
 ```
 
-por una llamada a la función compartida, pasando dos "fake targets"
-sintéticos (o, más simple, ajusta la función para aceptar directamente
-los dos `Set`s en vez de un arreglo de targets — decide la forma que
-mejor encaje; si cambias la firma, actualiza también el uso en
-`lib/demo/repository.ts` del Step 3 de este task). Ejemplo si prefieres
-mantener una sola firma basada en `targets`:
+por:
 
 ```typescript
-      const targetsForPredicate = [
+      const targetsForPredicate: Array<{ status: PublicationTargetStatus }> = [
         ...(pendingReviewIds.has(row.id) ? [{ status: "PENDING_REVIEW" as const }] : []),
         ...(errorIds.has(row.id) ? [{ status: "ERROR" as const }] : []),
       ];
+      const hasActionableTargetValue = hasActionableTarget(row.state, targetsForPredicate);
 ```
 
-y usa `hasActionableTarget(row.state, targetsForPredicate)` — así la
-regla vive en un solo lugar y ambos repositorios no pueden divergir por
-accidente. Vuelve a correr `npm test -- tests/content/supabase-repository.test.ts` para confirmar que sigue en PASS tras este cambio.
+(Nombra la variable local `hasActionableTargetValue`, no
+`hasActionableTarget` — ese nombre ya lo usa la función importada y
+sombrearlo confunde la lectura. Usa `hasActionableTargetValue` en el
+objeto de retorno.) Agrega
+`import { hasActionableTarget } from "@/lib/content/actionable-target";`
+al inicio de `lib/supabase/repository.ts`. Vuelve a correr
+`npm test -- tests/content/supabase-repository.test.ts` para confirmar
+que sigue en PASS tras este cambio.
 
 - [ ] **Step 5: Confirmar que pasa**
 
@@ -545,14 +609,27 @@ directamente.
 
 - [ ] **Step 1: Escribir el test que falla — carga solo los ids pedidos, aísla errores por id**
 
+**Corrección tras revisión de Codex CLI ronda 1 del plan:** la
+implementación (Step 3) importa `approveContentTarget` y
+`retryContentTarget` de `@/lib/content/client` además de
+`getContentRecord` — si el mock de ese módulo solo expone
+`getContentRecord`, esas dos quedan `undefined` y el hook crashea al
+llamarlas. El test también debe cubrir el contrato que la spec exige
+explícitamente: `onTargetResolved` se llama tras un approve/retry
+exitoso (y NO se llama si falla).
+
 ```typescript
 /** @vitest-environment jsdom */
 import { renderHook, waitFor, act } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const getContentRecord = vi.fn();
+const approveContentTarget = vi.fn();
+const retryContentTarget = vi.fn();
 vi.mock("@/lib/content/client", () => ({
   getContentRecord: (...args: unknown[]) => getContentRecord(...args),
+  approveContentTarget: (...args: unknown[]) => approveContentTarget(...args),
+  retryContentTarget: (...args: unknown[]) => retryContentTarget(...args),
 }));
 
 import { useAttentionTargets } from "@/lib/content/use-attention-targets";
@@ -560,6 +637,8 @@ import { useAttentionTargets } from "@/lib/content/use-attention-targets";
 function record(id: string, targets: Array<{ id: string; status: string }> = []) {
   return { content: { id, state: "REVIEW" }, targets, drafts: [], auditEvents: [], publicationResults: [] };
 }
+
+const targetA = { id: "target-a", contentItemId: "a", platform: "FACEBOOK" as const, status: "PENDING_REVIEW" as const };
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -586,6 +665,55 @@ describe("useAttentionTargets", () => {
     await waitFor(() => expect(result.current.records.some((r) => r.content.id === "a")).toBe(true));
     expect(result.current.records.some((r) => r.content.id === "b")).toBe(false);
     expect(result.current.failedIds).toContain("b");
+  });
+
+  it("calls onTargetResolved after a successful approve, and refetches that one record", async () => {
+    getContentRecord.mockImplementation((id: string) => Promise.resolve(record(id)));
+    approveContentTarget.mockResolvedValue({ ...targetA, status: "APPROVED" });
+    const onTargetResolved = vi.fn();
+
+    const { result } = renderHook(() => useAttentionTargets(["a"], onTargetResolved));
+    await waitFor(() => expect(result.current.records).toHaveLength(1));
+    getContentRecord.mockClear();
+
+    await act(async () => {
+      await result.current.handleApprove("a", targetA);
+    });
+
+    expect(approveContentTarget).toHaveBeenCalledWith("a", targetA);
+    expect(getContentRecord).toHaveBeenCalledWith("a");
+    expect(onTargetResolved).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call onTargetResolved when approve rejects", async () => {
+    getContentRecord.mockImplementation((id: string) => Promise.resolve(record(id)));
+    approveContentTarget.mockRejectedValue(new Error("boom"));
+    const onTargetResolved = vi.fn();
+
+    const { result } = renderHook(() => useAttentionTargets(["a"], onTargetResolved));
+    await waitFor(() => expect(result.current.records).toHaveLength(1));
+
+    await expect(act(async () => {
+      await result.current.handleApprove("a", targetA);
+    })).rejects.toThrow();
+
+    expect(onTargetResolved).not.toHaveBeenCalled();
+  });
+
+  it("calls onTargetResolved after a successful retry", async () => {
+    getContentRecord.mockImplementation((id: string) => Promise.resolve(record(id)));
+    retryContentTarget.mockResolvedValue({ ...targetA, status: "APPROVED" });
+    const onTargetResolved = vi.fn();
+
+    const { result } = renderHook(() => useAttentionTargets(["a"], onTargetResolved));
+    await waitFor(() => expect(result.current.records).toHaveLength(1));
+
+    await act(async () => {
+      await result.current.handleRetry("a", targetA.id);
+    });
+
+    expect(retryContentTarget).toHaveBeenCalledWith("a", targetA.id);
+    expect(onTargetResolved).toHaveBeenCalledTimes(1);
   });
 });
 ```
@@ -728,8 +856,17 @@ git commit -m "feat: add settings icon"
 - Modify: `app/(app)/library/page.tsx`
 - Test: `tests/components/library-page.test.tsx` (nuevo — no existe hoy ningún test de página para `/library`)
 
-Este es el archivo más grande del plan. Se implementa en sub-pasos, cada
-uno con su propio ciclo test-primero, todos sobre el mismo archivo.
+**Corrección tras revisión de Codex CLI ronda 1 del plan:** la versión
+anterior de esta task solo tenía un ciclo rojo→verde (producción +
+filtro + polling) y dejaba modo demo, query param, approve/retry,
+`onTargetResolved`+contador, y el render de `failedIds` sin test que
+fallara antes de implementarse — varias piezas podían quedar "verdes"
+sin cumplir la spec. Sigue siendo un solo archivo/task (el estado del
+componente es compartido, dividirlo en tasks separadas dejaría el
+archivo roto a medias entre commits), pero ahora son **4 ciclos
+test-primero explícitos** dentro de la misma task: A) producción +
+predicado + polling, B) modo demo, C) query param, D) aprobar/reintentar
++ sincronización del contador + `failedIds`.
 
 **Antes de escribir código, lee estos archivos de referencia exactos:**
 - `app/(app)/review/page.tsx` (líneas 23-25 para el patrón `refresh()`
@@ -738,10 +875,30 @@ uno con su propio ciclo test-primero, todos sobre el mismo archivo.
   se traslada aquí, condicionado a `listContentSummaries()` en vez de
   `getContentRecord()` en bulk).
 - `lib/demo/draft-store.ts` (`readDemoDrafts`, `approveDemoTarget`).
-- `components/content/publication-targets.tsx` (props: `targets`,
-  `onApprove`, `onRetry?`, `disabled?`, `retryDisabled?`).
+- `components/content/publication-targets.tsx` (props exactas:
+  `targets`, `onApprove: (targetId: string) => Promise<...>`,
+  `onRetry?: (targetId: string) => Promise<...>`, `disabled?`,
+  `retryDisabled?` — **ambos callbacks reciben solo `targetId`**, no
+  `contentItemId` — importante para el Ciclo D más abajo).
+- `components/integrations/meta-oauth-page-selector.tsx:219-221` y
+  `app/(app)/settings/organizations/page.tsx:271-275` — el precedente
+  **ya existente en este codebase** para usar `useSearchParams()`: vive
+  dentro de un componente hijo pequeño, y el padre lo envuelve en
+  `<Suspense fallback={null}>` — no se llama `useSearchParams()`
+  directamente en el cuerpo de una página completa. Sigue este mismo
+  patrón exacto para el Ciclo C, no inventes uno nuevo.
+- `tests/components/meta-oauth-page-selector.test.tsx:7-9` — el patrón
+  de mock exacto para testear algo que usa `useSearchParams()`:
+  `const useSearchParams = vi.hoisted(() => vi.fn());` +
+  `vi.mock("next/navigation", () => ({ useSearchParams }));`, luego
+  `useSearchParams.mockReturnValue(new URLSearchParams("..."))` por
+  test.
 
-- [ ] **Step 1: Escribir el test que falla — filtro `attention` usa `hasActionableTarget`, dispara fetch acotado**
+---
+
+#### Ciclo A: producción — predicado + fetch acotado + polling base
+
+- [ ] **Step A1: Escribir el test que falla — filtro `attention` usa `hasActionableTarget`, dispara fetch acotado, y el contador coincide con el filtro**
 
 Crea `tests/components/library-page.test.tsx` siguiendo exactamente el
 patrón de mocking de `tests/components/drafts-page.test.tsx` (mock de
@@ -765,13 +922,18 @@ vi.mock("next/image", () => ({
   // eslint-disable-next-line @next/next/no-img-element
   default: (props: Record<string, unknown>) => <img {...(props as Record<string, string>)} alt={props.alt as string} />,
 }));
-vi.mock("@/lib/supabase/client", () => ({ hasSupabaseBrowserConfig: () => true }));
+const hasSupabaseBrowserConfig = vi.fn(() => true);
+vi.mock("@/lib/supabase/client", () => ({ hasSupabaseBrowserConfig: () => hasSupabaseBrowserConfig() }));
 
 const listContentSummaries = vi.fn();
 const getContentRecord = vi.fn();
+const approveContentTarget = vi.fn();
+const retryContentTarget = vi.fn();
 vi.mock("@/lib/content/client", () => ({
   listContentSummaries: (...args: unknown[]) => listContentSummaries(...args),
   getContentRecord: (...args: unknown[]) => getContentRecord(...args),
+  approveContentTarget: (...args: unknown[]) => approveContentTarget(...args),
+  retryContentTarget: (...args: unknown[]) => retryContentTarget(...args),
 }));
 
 import LibraryPage from "@/app/(app)/library/page";
@@ -787,7 +949,7 @@ afterEach(() => {
 });
 
 describe("LibraryPage attention filter", () => {
-  it("filters by hasActionableTarget, not state, and fetches detail only for the filtered subset", async () => {
+  it("filters by hasActionableTarget, not state; the counter matches; fetches detail only for the filtered subset", async () => {
     listContentSummaries.mockResolvedValue([
       summary("a", "DRAFT", false),
       summary("b", "REVIEW", true),
@@ -805,6 +967,11 @@ describe("LibraryPage attention filter", () => {
 
     await waitFor(() => expect(listContentSummaries).toHaveBeenCalledTimes(1));
     expect(getContentRecord).not.toHaveBeenCalled();
+    // Corrección ronda 1 del plan review: el contador "por revisar" debe
+    // reflejar hasActionableTarget (1 de los 2 items), no
+    // attentionStates.includes(state) (que daría un número distinto: 2,
+    // porque "DRAFT" también estaba en la lista vieja de estados).
+    expect(screen.getByText("1")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Por revisar" }));
 
@@ -832,13 +999,13 @@ describe("LibraryPage polling", () => {
 });
 ```
 
-- [ ] **Step 2: Confirmar que falla**
+- [ ] **Step A2: Confirmar que falla**
 
 Run: `npm test -- tests/components/library-page.test.tsx`
 Expected: FAIL (el tab "Por revisar" no dispara ningún fetch acotado
-todavía; no hay polling).
+todavía; no hay polling; el contador sigue usando el predicado viejo).
 
-- [ ] **Step 3: Implementar — predicado + fetch acotado (producción)**
+- [ ] **Step A3: Implementar — predicado + fetch acotado + contador (producción)**
 
 Reescribe `app/(app)/library/page.tsx`. Puntos clave respecto al
 archivo actual:
@@ -846,6 +1013,14 @@ archivo actual:
 - `matchesFilter`/`attentionStates` (líneas 24-31 hoy) se elimina el uso
   de `content_items.state` para el filtro `ATTENTION` — usa
   `item.hasActionableTarget` en su lugar.
+- **`attentionCount` (línea 66 hoy: `visibleItems.filter((item) =>
+  attentionStates.includes(item.state)).length`) — corrección tras
+  revisión de Codex CLI ronda 1 del plan: este cálculo también debe
+  cambiar a `hasActionableTarget`, si no el contador mostrado contradice
+  lo que el tab realmente filtra.** Ver el cálculo completo (producción
+  + demo) más abajo, después del Ciclo B — se escribe una sola vez ahí
+  porque depende de `drafts` (Ciclo B), pero anticípalo aquí: no dejes
+  `attentionCount` usando `attentionStates` en este paso.
 - Importa `useAttentionTargets` (Task 5) y llámalo con los ids que ya
   pasaron el filtro `attention`, pasando un callback que dispare un
   refetch de `listContentSummaries()`:
@@ -888,14 +1063,121 @@ const attention = useAttentionTargets(
 ```
 
 Cuando `filter === "ATTENTION"` (modo producción), renderiza
-`attention.records` con `PublicationTargets` inline (mismas props que
-`review/page.tsx:104-111` usa hoy — `disabled={!latestDraft ||
-record.content.state !== "REVIEW"}`, `retryDisabled={!latestDraft}`,
-`onApprove`/`onRetry` conectados a `attention.handleApprove`/
-`attention.handleRetry`), en vez de las tarjetas simples que hoy
-renderiza el filtro `attention`.
+`attention.records` con `PublicationTargets` inline (mismo bloque
+visual que `review/page.tsx:99-116` usa hoy), pero **corrección tras
+revisión de Codex CLI ronda 1 del plan (bug real de firma)**:
+`PublicationTargets.onApprove`/`onRetry` reciben solo `targetId` — no
+`contentItemId` — mientras que `attention.handleApprove`/`handleRetry`
+necesitan ambos (el hook maneja varios records a la vez). Pasar el hook
+directamente como prop enviaría argumentos incorrectos. Usa closures que
+cierran sobre `record` y buscan el target exacto:
 
-- [ ] **Step 4: Implementar — modo demo (fuente `readDemoDrafts()`, sin segundo fetch)**
+```typescript
+{attention.records.map((record) => {
+  const latestDraft = record.drafts.at(-1);
+  return (
+    <article key={record.content.id} /* ...mismas clases que review/page.tsx:99... */>
+      {/* ...encabezado igual que hoy... */}
+      <PublicationTargets
+        targets={record.targets}
+        disabled={!latestDraft || record.content.state !== "REVIEW"}
+        retryDisabled={!latestDraft}
+        onApprove={(targetId) => {
+          const target = record.targets.find((candidate) => candidate.id === targetId);
+          if (!target) return Promise.reject(new Error("PUBLICATION_TARGET_NOT_FOUND"));
+          return attention.handleApprove(record.content.id, target);
+        }}
+        onRetry={(targetId) => attention.handleRetry(record.content.id, targetId)}
+      />
+    </article>
+  );
+})}
+{attention.failedIds.map((id) => (
+  <article key={id} role="alert" className="rounded-3xl border border-red-300/25 bg-red-300/[0.05] p-5 text-sm text-red-200">
+    No se pudo cargar el detalle de esta campaña. Actualiza la página para reintentar.
+  </article>
+))}
+```
+
+(El bloque de `attention.failedIds` — corrección tras revisión de Codex
+CLI ronda 1 del plan: sin esto, un id que falla en
+`useAttentionTargets` desaparece silenciosamente de la vista, contrario
+a lo que la spec exige explícitamente — "error visible acotado a esa
+tarjeta".)
+
+- [ ] **Step A4: Confirmar que pasa (solo el ciclo A — demo y query param todavía no existen)**
+
+Run: `npm test -- tests/components/library-page.test.tsx -t "attention filter"`
+Expected: PASS para el test de este ciclo. El test de polling (también
+escrito en el Step A1) puede correr junto — ambos son parte del mismo
+`describe` inicial.
+
+Run: `npm test -- tests/components/library-page.test.tsx -t "polling"`
+Expected: PASS.
+
+---
+
+#### Ciclo B: modo demo — fuente `readDemoDrafts()`, sin segundo fetch
+
+- [ ] **Step B1: Escribir el test que falla**
+
+Agrega a `tests/components/library-page.test.tsx` (mismo archivo, nuevo
+`describe`). Como `hasSupabaseBrowserConfig` ya es un `vi.fn()`
+reconfigurable (ver el mock corregido al inicio del archivo, Step A1),
+cada test de este `describe` llama
+`hasSupabaseBrowserConfig.mockReturnValue(false)` para activar la rama
+demo — no hace falta un archivo de test separado:
+
+```typescript
+const readDemoDrafts = vi.fn();
+const approveDemoTarget = vi.fn();
+vi.mock("@/lib/demo/draft-store", () => ({
+  readDemoDrafts: (...args: unknown[]) => readDemoDrafts(...args),
+  approveDemoTarget: (...args: unknown[]) => approveDemoTarget(...args),
+}));
+
+function demoDraft(id: string, state: string, targets: Array<{ id: string; status: string }>) {
+  return {
+    content: { id, state, service: "bot_whatsapp", niche: "clinicas", contentType: "venta_directa", objective: "agenda_demo" },
+    filename: "creativo.png", mimeType: "image/png", previewDataUrl: "data:image/png;base64,",
+    visualAnalysis: { source: "local-demo" as const, summary: "", detectedClaims: [] },
+    drafts: [], selectedDraftId: "d1", finalCopy: { headline: "", body: "", cta: "", hashtags: [] },
+    warnings: [], targets, publicationResults: [], auditEvents: [], updatedAt: "2026-09-14T00:00:00.000Z",
+  };
+}
+
+describe("LibraryPage demo mode", () => {
+  it("reads readDemoDrafts (not readDemoAssets), needs no second fetch, and links attention cards to /drafts/[id]", async () => {
+    hasSupabaseBrowserConfig.mockReturnValue(false);
+    readDemoDrafts.mockReturnValue([
+      demoDraft("d1", "DRAFT", [{ id: "t1", status: "PENDING_REVIEW" }]),
+      demoDraft("d2", "REVIEW", [{ id: "t2", status: "PENDING_REVIEW" }]),
+    ]);
+
+    const user = userEvent.setup();
+    render(<LibraryPage />);
+    await waitFor(() => expect(readDemoDrafts).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("tab", { name: "Por revisar" }));
+
+    expect(getContentRecord).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: /Abrir/i })).toHaveAttribute("href", "/drafts/d2");
+  });
+});
+```
+
+(Ajusta el selector del link/aserción exacta al texto real que termines
+usando para el link de la tarjeta demo — lo importante del test es:
+`getContentRecord` nunca se llama en modo demo, y la tarjeta `d2`
+—`REVIEW` con target `PENDING_REVIEW`, el caso accionable— efectivamente
+enlaza a `/drafts/d2`.)
+
+- [ ] **Step B2: Confirmar que falla**
+
+Run: `npm test -- tests/components/library-page.test.tsx -t "demo mode"`
+Expected: FAIL — la página todavía usa `readDemoAssets()`, sin link.
+
+- [ ] **Step B3: Implementar — modo demo (fuente `readDemoDrafts()`, sin segundo fetch)**
 
 Reemplaza el uso de `readDemoAssets()`/`DemoBrowserAsset` por
 `readDemoDrafts()`/`DemoDraftRecord` (import desde
@@ -920,37 +1202,214 @@ function demoHasActionableTarget(record: DemoDraftRecord): boolean {
     record.targets.some((t) => t.status === "ERROR")
   );
 }
+
+function matchesDemoFilter(draft: DemoDraftRecord, filter: CampaignFilter): boolean {
+  if (filter === "ATTENTION") return demoHasActionableTarget(draft);
+  if (filter === "SCHEDULED") return draft.content.state === "SCHEDULED";
+  if (filter === "PUBLISHED") return draft.content.state === "PUBLISHED";
+  return true;
+}
 ```
 
 En modo demo, el filtro `ATTENTION` usa `demoHasActionableTarget(draft)`
 directamente sobre el arreglo ya cargado — no invoques
-`useAttentionTargets` en esta rama. Renderiza `PublicationTargets` con
-`onApprove` conectado a un handler que llama `approveDemoTarget(...)`
-seguido de `refreshDemo()` (mismo patrón que `review/page.tsx:43-51`
-hoy). Las tarjetas demo ganan `<Link href={`/drafts/${draft.content.id}`}>`
-(hoy no enlazan a nada — hallazgo de ronda 1 del spec).
-
-- [ ] **Step 5: Query param `?filter=`**
+`useAttentionTargets` en esta rama. Renderiza `PublicationTargets`
+dentro de cada tarjeta demo filtrada, con:
 
 ```typescript
-import { useSearchParams } from "next/navigation";
-// ...
-const searchParams = useSearchParams();
-const [filter, setFilter] = useState<CampaignFilter>(() => {
-  const param = searchParams.get("filter");
-  if (param === "attention") return "ATTENTION";
-  if (param === "scheduled") return "SCHEDULED";
-  if (param === "published") return "PUBLISHED";
-  return "ALL";
+onApprove={(targetId) => {
+  const next = approveDemoTarget(draft.content.id, targetId);
+  const approved = next?.targets.find((t) => t.id === targetId);
+  if (!next || !approved || approved.status !== "APPROVED") {
+    return Promise.reject(new Error("DEMO_TARGET_NOT_APPROVED"));
+  }
+  refreshDemo();
+  return Promise.resolve({ ...approved, status: "APPROVED" as const });
+}}
+```
+
+(mismo patrón que `handleApprove` en `review/page.tsx:43-51` hoy — sin
+`onRetry`, porque ningún target demo llega nunca a `ERROR`, ver el spec,
+sección "Modo demo — los targets nunca llegan a ERROR"). Las tarjetas
+demo ganan `<Link href={`/drafts/${draft.content.id}`}>Abrir →</Link>`
+(hoy no enlazan a nada — hallazgo de ronda 1 del spec; usa el texto
+"Abrir" para que coincida con el test del Step B1).
+
+**`attentionCount`/`visibleItems` unificados (línea 65-67 hoy) —
+corrección tras revisión de Codex CLI ronda 1 del plan, pieza que
+faltaba de la Step A3:**
+
+```typescript
+const visibleItems = isProductionMode ? items : drafts.map((draft) => draft.content);
+const publishedCount = visibleItems.filter((item) => item.state === "PUBLISHED").length;
+const attentionCount = isProductionMode
+  ? items.filter((item) => item.hasActionableTarget).length
+  : drafts.filter(demoHasActionableTarget).length;
+```
+
+(Reemplaza por completo el cálculo viejo de `attentionCount` basado en
+`attentionStates.includes(item.state)` — no debe quedar ningún uso de
+`attentionStates` en el archivo final.)
+
+- [ ] **Step B4: Confirmar que pasa**
+
+Run: `npm test -- tests/components/library-page.test.tsx -t "demo mode"`
+Expected: PASS.
+
+Run: `npm test -- tests/components/library-page.test.tsx -t "attention filter"`
+Expected: sigue en PASS (el contador de producción del Step A1 no se
+rompió al tocar el cálculo compartido).
+
+---
+
+#### Ciclo C: query param `?filter=` (con `<Suspense>`, siguiendo el precedente existente)
+
+- [ ] **Step C1: Escribir el test que falla**
+
+Agrega a `tests/components/library-page.test.tsx`, siguiendo el patrón
+exacto de `tests/components/meta-oauth-page-selector.test.tsx:7-9`
+(`vi.hoisted` + `vi.mock("next/navigation", ...)`) — agrégalo **antes**
+de los demás `vi.mock(...)` del archivo, junto a los otros hoisted:
+
+```typescript
+const useSearchParams = vi.hoisted(() => vi.fn(() => new URLSearchParams()));
+vi.mock("next/navigation", () => ({ useSearchParams }));
+```
+
+```typescript
+describe("LibraryPage query param", () => {
+  it("opens directly on the attention filter when ?filter=attention", async () => {
+    useSearchParams.mockReturnValue(new URLSearchParams("filter=attention"));
+    listContentSummaries.mockResolvedValue([summary("a", "REVIEW", true)]);
+    getContentRecord.mockResolvedValue({
+      content: { id: "a", state: "REVIEW" },
+      targets: [{ id: "t1", contentItemId: "a", platform: "FACEBOOK", status: "PENDING_REVIEW" }],
+      drafts: [], auditEvents: [], publicationResults: [],
+    });
+
+    render(<LibraryPage />);
+
+    expect(screen.getByRole("tab", { name: "Por revisar" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(getContentRecord).toHaveBeenCalledWith("a"));
+  });
 });
 ```
 
-(Inicialización única en el primer render es suficiente — el spec no
-pide sincronización continua URL↔estado al hacer clic en un tab, solo
-que un link externo con `?filter=attention` abra directamente en ese
-filtro.)
+- [ ] **Step C2: Confirmar que falla**
 
-- [ ] **Step 6: Confirmar que pasa**
+Run: `npm test -- tests/components/library-page.test.tsx -t "query param"`
+Expected: FAIL — `useSearchParams` mockeado, pero la página no lo lee
+todavía.
+
+- [ ] **Step C3: Implementar — componente hijo + `<Suspense>`, no `useSearchParams()` en el cuerpo de la página**
+
+**Corrección tras revisión de Codex CLI ronda 1 del plan (bug real):**
+llamar `useSearchParams()` directamente en el cuerpo de `LibraryPage`
+rompe el build de Next 16 — una página que puede prerenderizarse y usa
+`useSearchParams()` sin un límite `<Suspense>` alrededor falla en
+`npm run build`. Este codebase ya tiene el patrón correcto para esto en
+`app/(app)/settings/organizations/page.tsx:271-275`: un componente hijo
+pequeño que llama `useSearchParams()`, envuelto en
+`<Suspense fallback={null}>` por el padre. Síguelo exactamente:
+
+```typescript
+import { Suspense } from "react";
+import { useSearchParams } from "next/navigation";
+
+function FilterFromSearchParams({ onFilter }: { onFilter: (filter: CampaignFilter) => void }) {
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const param = searchParams?.get("filter");
+    if (param === "attention") onFilter("ATTENTION");
+    else if (param === "scheduled") onFilter("SCHEDULED");
+    else if (param === "published") onFilter("PUBLISHED");
+  }, [searchParams, onFilter]);
+  return null;
+}
+```
+
+Dentro de `LibraryPage`, cerca del inicio del JSX de retorno:
+
+```typescript
+<Suspense fallback={null}>
+  <FilterFromSearchParams onFilter={setFilter} />
+</Suspense>
+```
+
+`filter` sigue siendo un `useState<CampaignFilter>("ALL")` normal — este
+componente hijo solo lo actualiza una vez al montar según la URL, no
+sincroniza continuamente (el spec no lo pide, solo que un link externo
+con `?filter=attention` abra directamente en ese filtro).
+
+- [ ] **Step C4: Confirmar que pasa**
+
+Run: `npm test -- tests/components/library-page.test.tsx -t "query param"`
+Expected: PASS.
+
+Run: `npm test -- tests/components/library-page.test.tsx`
+Expected: TODOS los tests del archivo en PASS (ciclos A, B, C juntos).
+
+---
+
+#### Ciclo D: sincronización tras aprobar — el contador y el filtro se actualizan
+
+- [ ] **Step D1: Escribir el test que falla**
+
+Este es el "Test de sincronización" que pide la sección Testing del
+spec — prueba end-to-end que aprobar el último target accionable de una
+campaña la saca del filtro `attention` y baja el contador, sin recargar
+la página:
+
+```typescript
+describe("LibraryPage sync after approve", () => {
+  it("removes the card from the attention filter and decrements the counter after approving its last actionable target", async () => {
+    listContentSummaries
+      .mockResolvedValueOnce([summary("a", "REVIEW", true)])
+      .mockResolvedValueOnce([summary("a", "REVIEW", false)]);
+    getContentRecord.mockResolvedValue({
+      content: { id: "a", state: "REVIEW" },
+      targets: [{ id: "t1", contentItemId: "a", platform: "FACEBOOK", status: "PENDING_REVIEW" }],
+      drafts: [{ headline: "h", body: "b", cta: "c", hashtags: [], id: "d1", contentItemId: "a", visualAnalysis: {}, createdAt: "2026-09-14T00:00:00.000Z" }],
+      auditEvents: [], publicationResults: [],
+    });
+    approveContentTarget.mockResolvedValue({ id: "t1", contentItemId: "a", platform: "FACEBOOK", status: "APPROVED" });
+
+    const user = userEvent.setup();
+    render(<LibraryPage />);
+    await user.click(screen.getByRole("tab", { name: "Por revisar" }));
+    await waitFor(() => expect(getContentRecord).toHaveBeenCalledWith("a"));
+
+    await user.click(screen.getByRole("button", { name: /Aprobar Facebook/i }));
+
+    await waitFor(() => expect(listContentSummaries).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText("h")).not.toBeInTheDocument());
+    expect(screen.getByText("0")).toBeInTheDocument();
+  });
+});
+```
+
+(`approveContentTarget`/`retryContentTarget` ya están mockeados desde
+el Step A1 — este test solo los usa.)
+
+- [ ] **Step D2: Confirmar que falla**
+
+Run: `npm test -- tests/components/library-page.test.tsx -t "sync after approve"`
+Expected: FAIL — antes del Ciclo A/D combinados, nada dispara un
+segundo `listContentSummaries()` tras aprobar.
+
+- [ ] **Step D3: Confirmar que ya pasa (no debería requerir código nuevo)**
+
+Si los Ciclos A-C se implementaron correctamente (`onTargetResolved` →
+`loadSummaries()`, ver Step A3), este test **ya debería pasar sin tocar
+más código** — es una prueba de integración de piezas que ya existen.
+Si falla, el error más probable es que `onTargetResolved` no esté
+conectado correctamente al callback de `useAttentionTargets` en Step A3
+— revisa esa conexión antes de escribir código nuevo aquí.
+
+Run: `npm test -- tests/components/library-page.test.tsx -t "sync after approve"`
+Expected: PASS.
+
+- [ ] **Step D4: Confirmar que pasa**
 
 Run: `npm test -- tests/components/library-page.test.tsx`
 Expected: PASS.
@@ -958,12 +1417,18 @@ Expected: PASS.
 Run: `npm test -- tests/content/campaign-view.test.ts`
 Expected: PASS (sigue sin tocarse su lógica, solo el fixture de Task 2).
 
-- [ ] **Step 7: `tsc`, lint, build**
+- [ ] **Step D5: `tsc`, lint, build**
 
-Run: `npx tsc --noEmit && npm run lint`
+**Corrección tras revisión de Codex CLI ronda 1 del plan:** este paso se
+titulaba "tsc, lint, build" pero el comando real omitía `build` — este
+task es justo el que introduce `useSearchParams()`/`<Suspense>`, así que
+`npm run build` es la única verificación que confirma que Next 16 no
+rechaza el prerender por faltar el límite `Suspense`.
+
+Run: `npx tsc --noEmit && npm run lint && npm run build`
 Expected: limpio.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step D6: Commit**
 
 ```bash
 git add app/\(app\)/library/page.tsx tests/components/library-page.test.tsx
