@@ -54,7 +54,8 @@ function configureAuthenticatedOwner() {
   createSupabaseServerClient.mockResolvedValue({ auth: { getUser }, from: serverFrom });
 }
 
-function configureGraph(pages: Page[]) {
+function configureGraph(pages: Page[], accountPages: Page[][] = [pages]) {
+  let accountPageIndex = 0;
   fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
     const url = new URL(String(input));
     const path = url.pathname;
@@ -66,7 +67,14 @@ function configureGraph(pages: Page[]) {
       return Response.json({ access_token: "long-lived-user-token" });
     }
     if (path.endsWith("/me/accounts")) {
-      return Response.json({ data: pages });
+      const data = accountPages[Math.min(accountPageIndex, accountPages.length - 1)] ?? [];
+      accountPageIndex += 1;
+      return Response.json({
+        data,
+        ...(accountPageIndex < accountPages.length
+          ? { paging: { next: `https://graph.facebook.com/v21.0/me/accounts?after=cursor-${accountPageIndex}` } }
+          : {}),
+      });
     }
 
     const page = pages.find(({ id }) => path.endsWith(`/${id}`));
@@ -180,6 +188,22 @@ describe("GET /api/integrations/meta/callback", () => {
       expires_at: new Date((nowSeconds + 600) * 1000).toISOString(),
     });
     expect(JSON.stringify(insert.mock.calls[0]?.[0])).not.toContain("page-token");
+  });
+
+  it("sigue paging.next y guarda también las páginas que Meta devuelve después", async () => {
+    const firstPage = { id: "page-1", name: "Página Uno", access_token: "page-token-1" };
+    const secondPage = { id: "page-2", name: "Página Dos", access_token: "page-token-2" };
+    configureGraph([firstPage, secondPage], [[firstPage], [secondPage]]);
+
+    const response = await GET(callbackRequest());
+
+    expect(response.status).toBe(302);
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({
+      discovered_pages: [
+        { id: "page-1", name: "Página Uno", hasInstagram: true },
+        { id: "page-2", name: "Página Dos", hasInstagram: true },
+      ],
+    }));
   });
 
   it("nunca incluye tokens de Meta en la respuesta al navegador", async () => {

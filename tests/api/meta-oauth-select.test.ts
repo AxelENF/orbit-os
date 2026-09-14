@@ -82,21 +82,33 @@ function configureSession(overrides: Record<string, unknown> = {}) {
   createSupabaseServiceRoleClient.mockReturnValue({ from: serviceFrom, rpc });
 }
 
-function configureGraph() {
+function configureGraph(accountPages = [
+  [
+    { id: "page-1", name: "Página Uno", access_token: "page-token-1" },
+    { id: "page-2", name: "Página Dos", access_token: "page-token-2" },
+  ],
+]) {
+  let accountPageIndex = 0;
   fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
     const url = new URL(String(input));
     if (url.pathname.endsWith("/me/accounts")) {
       expect(url.searchParams.get("access_token")).toBe("long-lived-user-token");
+      const data = accountPages[Math.min(accountPageIndex, accountPages.length - 1)] ?? [];
+      accountPageIndex += 1;
       return Response.json({
-        data: [
-          { id: "page-1", name: "Página Uno", access_token: "page-token-1" },
-          { id: "page-2", name: "Página Dos", access_token: "page-token-2" },
-        ],
+        data,
+        ...(accountPageIndex < accountPages.length
+          ? { paging: { next: `https://graph.facebook.com/v21.0/me/accounts?after=cursor-${accountPageIndex}&access_token=long-lived-user-token` } }
+          : {}),
       });
     }
-    if (url.pathname.endsWith("/page-1")) {
-      expect(url.searchParams.get("access_token")).toBe("page-token-1");
-      return Response.json({ instagram_business_account: { id: "instagram-account-page-1" } });
+    const page = [
+      { id: "page-1", accessToken: "page-token-1", instagramId: "instagram-account-page-1" },
+      { id: "page-2", accessToken: "page-token-2", instagramId: "instagram-account-page-2" },
+    ].find(({ id }) => url.pathname.endsWith(`/${id}`));
+    if (page) {
+      expect(url.searchParams.get("access_token")).toBe(page.accessToken);
+      return Response.json({ instagram_business_account: { id: page.instagramId } });
     }
     throw new Error(`Unexpected Graph API request: ${url}`);
   });
@@ -166,6 +178,21 @@ describe("POST /api/integrations/meta/connect/select", () => {
     });
     expect(deleteSession).not.toHaveBeenCalled();
     expect(JSON.stringify(rpc.mock.calls)).not.toContain("page-token-2");
+  });
+
+  it("sigue paging.next y permite seleccionar una página de una respuesta posterior", async () => {
+    configureGraph([
+      [{ id: "page-1", name: "Página Uno", access_token: "page-token-1" }],
+      [{ id: "page-2", name: "Página Dos", access_token: "page-token-2" }],
+    ]);
+
+    const response = await POST(selectRequest("page-2"));
+    expect(response.status).toBe(302);
+    expect(rpc).toHaveBeenCalledWith("complete_meta_oauth_selection", expect.objectContaining({
+      p_facebook_page_id: "page-2",
+      p_facebook_page_name: "Página Dos",
+      p_page_access_token: "page-token-2",
+    }));
   });
 
   it("rechaza si el nonce del POST no coincide con la cookie httpOnly", async () => {

@@ -7,7 +7,10 @@ import {
   type OrganizationRole,
 } from "@/lib/organizations/permissions";
 import { META_OAUTH_NONCE_COOKIE } from "@/lib/integrations/meta-oauth-state";
-import { GRAPH_API_BASE } from "@/lib/integrations/meta-graph-client";
+import {
+  collectGraphCollection,
+  GRAPH_API_BASE,
+} from "@/lib/integrations/meta-graph-client";
 import {
   createSupabaseServerClient,
   createSupabaseServiceRoleClient,
@@ -124,7 +127,11 @@ async function graphGet(
   path: string,
   params: Record<string, string>,
 ): Promise<GraphRecord> {
-  const url = new URL(`${GRAPH_API_BASE}/${path.replace(/^\/+/, "")}`);
+  const url = new URL(
+    /^https?:\/\//i.test(path)
+      ? path
+      : `${GRAPH_API_BASE}/${path.replace(/^\/+/, "")}`,
+  );
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
 
   let response: Response;
@@ -279,11 +286,11 @@ export function createMetaOAuthSelectHandler(
 
     try {
       const fetchFn = dependencies.fetchFn ?? fetch;
-      const accounts = await graphGet(fetchFn, "me/accounts", {
+      const accountItems = await collectGraphCollection<unknown>(graphGet.bind(null, fetchFn), "me/accounts", {
         fields: "id,name,access_token",
         access_token: oauthSession.userLongLivedToken,
       });
-      const selectedPage = selectedPageFromAccounts(accounts, payload.data.pageId);
+      const selectedPage = selectedPageFromAccounts({ data: accountItems }, payload.data.pageId);
       const details = await graphGet(fetchFn, selectedPage.id, {
         fields: "instagram_business_account",
         access_token: selectedPage.accessToken,

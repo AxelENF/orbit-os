@@ -4,6 +4,7 @@ export const GRAPH_API_VERSION = "v21.0";
 export const GRAPH_API_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
 
 const GRAPH_API_TIMEOUT_MS = 30_000;
+const MAX_GRAPH_COLLECTION_PAGES = 10;
 const TRANSIENT_ERROR_CODES = new Set([1, 2, 4, 17, 32, 341, 613]);
 const TOKEN_ERROR_SUBCODES = new Set([458, 459, 460, 463, 464, 467]);
 
@@ -130,6 +131,32 @@ export async function callGraphApi(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function collectGraphCollection<T>(
+  fetchPage: (
+    path: string,
+    params: Record<string, string>,
+  ) => Promise<GraphApiResponse>,
+  path: string,
+  params: Record<string, string>,
+): Promise<T[]> {
+  const results: T[] = [];
+  let nextPath = path;
+  let nextParams = params;
+
+  for (let page = 0; page < MAX_GRAPH_COLLECTION_PAGES; page += 1) {
+    const response = await fetchPage(nextPath, nextParams);
+    if (Array.isArray(response.data)) results.push(...(response.data as T[]));
+
+    const paging = isRecord(response.paging) ? response.paging : null;
+    const next = stringValue(paging?.next);
+    if (!next) break;
+    nextPath = next;
+    nextParams = {};
+  }
+
+  return results;
 }
 
 export async function checkTokenHealth(

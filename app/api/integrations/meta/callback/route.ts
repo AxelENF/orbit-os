@@ -7,7 +7,10 @@ import {
   META_OAUTH_STATE_MAX_AGE_SECONDS,
   verifySignedMetaOAuthState,
 } from "@/lib/integrations/meta-oauth-state";
-import { GRAPH_API_BASE } from "@/lib/integrations/meta-graph-client";
+import {
+  collectGraphCollection,
+  GRAPH_API_BASE,
+} from "@/lib/integrations/meta-graph-client";
 import {
   createSupabaseServerClient,
   createSupabaseServiceRoleClient,
@@ -81,7 +84,11 @@ async function graphGet(
   path: string,
   params: Record<string, string>,
 ): Promise<GraphRecord> {
-  const url = new URL(`${GRAPH_API_BASE}/${path.replace(/^\/+/, "")}`);
+  const url = new URL(
+    /^https?:\/\//i.test(path)
+      ? path
+      : `${GRAPH_API_BASE}/${path.replace(/^\/+/, "")}`,
+  );
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
 
   let response: Response;
@@ -112,16 +119,16 @@ async function discoverPages(
   fetchFn: typeof fetch,
   userToken: string,
 ): Promise<Array<MetaPage & DiscoveredPage>> {
-  const accounts = await graphGet(fetchFn, "me/accounts", {
+  const accountItems = await collectGraphCollection<unknown>(graphGet.bind(null, fetchFn), "me/accounts", {
     fields: "id,name,access_token",
     access_token: userToken,
   });
-  if (!Array.isArray(accounts.data) || accounts.data.length === 0) {
+  if (accountItems.length === 0) {
     throw new MetaOAuthCallbackError("META_NO_PAGES");
   }
 
   const pages: Array<MetaPage & DiscoveredPage> = [];
-  for (const item of accounts.data) {
+  for (const item of accountItems) {
     const page = recordValue(item);
     const id = stringValue(page?.id);
     const name = stringValue(page?.name);
