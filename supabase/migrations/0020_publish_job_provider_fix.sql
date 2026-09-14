@@ -33,8 +33,10 @@ begin
 end;
 $$;
 
+drop function if exists public.retry_publish_target(uuid, uuid, uuid);
+
 create or replace function public.retry_publish_target(
-  p_organization_id uuid, p_actor_id uuid, p_publication_target_id uuid
+  p_organization_id uuid, p_actor_id uuid, p_publication_target_id uuid, p_content_item_id uuid
 )
 returns public.publication_targets
 language plpgsql
@@ -49,7 +51,10 @@ begin
     p_organization_id, p_actor_id, array['owner', 'editor']::public.organization_role[]
   );
   select * into target from public.publication_targets
-  where id = p_publication_target_id and organization_id = p_organization_id for update;
+  where id = p_publication_target_id
+    and organization_id = p_organization_id
+    and content_item_id = p_content_item_id
+  for update;
   if not found then raise exception using errcode = 'P0001', message = 'RETRY_TARGET_NOT_FOUND'; end if;
   if target.status <> 'ERROR' then
     raise exception using errcode = 'P0001', message = 'RETRY_TARGET_NOT_IN_ERROR';

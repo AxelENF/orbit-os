@@ -188,6 +188,22 @@ describe("0020 publish job provider fix", () => {
   });
 });
 
+describe("0020 retry target content validation", () => {
+  it("valida content_item_id en el lock inicial y elimina el overload anterior", async () => {
+    const sql = await readProviderFixMigration();
+    const functionMatch = sql.match(
+      /create (?:or replace )?function public\.retry_publish_target[\s\S]*?\$\$;/i,
+    );
+
+    expect(sql).toMatch(/drop function if exists public\.retry_publish_target\(uuid, uuid, uuid\)/i);
+    expect(functionMatch).not.toBeNull();
+    expect(functionMatch?.[0]).toMatch(/p_content_item_id uuid/i);
+    expect(functionMatch?.[0]).toMatch(
+      /select \* into target[\s\S]*?where\s+id = p_publication_target_id\s+and organization_id = p_organization_id\s+and content_item_id = p_content_item_id\s+for update/i,
+    );
+  });
+});
+
 describe("apply_publication_diagnosis SQL", () => {
   it("automation_runs.kind se extiende para aceptar PUBLISH_DIAGNOSIS", async () => {
     const sql = await readMigration();

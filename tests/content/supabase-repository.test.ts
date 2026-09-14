@@ -432,6 +432,7 @@ describe("SupabaseContentRepository", () => {
     expect(rpc).toHaveBeenCalledWith("retry_publish_target", {
       p_organization_id: organizationA.organizationId,
       p_actor_id: organizationA.userId,
+      p_content_item_id: createdRow.id,
       p_publication_target_id: targetRow.id,
     });
   });

@@ -933,6 +933,7 @@ class SupabaseContentRepository
     const { data, error } = await this.client.rpc("retry_publish_target", {
       p_organization_id: this.organization.organizationId,
       p_actor_id: this.organization.userId,
+      p_content_item_id: contentItemId,
       p_publication_target_id: publicationTargetId,
     });
 
