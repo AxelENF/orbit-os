@@ -75,7 +75,7 @@ describe("MetaOAuthSelection", () => {
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "POST",
       credentials: "same-origin",
-      body: JSON.stringify({ nonce, pageId: "page-2" }),
+      body: JSON.stringify({ organizationId, nonce, pageId: "page-2" }),
     });
   });
 

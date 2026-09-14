@@ -8,6 +8,13 @@ const serviceFrom = vi.hoisted(() => vi.fn());
 const fetchMock = vi.hoisted(() => vi.fn());
 const rpc = vi.hoisted(() => vi.fn());
 const deleteSession = vi.hoisted(() => vi.fn());
+const cookieGet = vi.hoisted(() => vi.fn());
+const serviceSelectColumns = vi.hoisted(() => [] as string[]);
+const testEvents = vi.hoisted(() => [] as string[]);
+
+vi.mock("next/headers", () => ({
+  cookies: vi.fn(async () => ({ get: cookieGet })),
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createSupabaseServerClient,
@@ -30,7 +37,10 @@ function configureMembership(role: "owner" | "editor" | "reviewer" | "viewer") {
   const maybeSingle = vi.fn().mockResolvedValue({ data: { role }, error: null });
   const byUser = vi.fn().mockReturnValue({ maybeSingle });
   const byOrganization = vi.fn().mockReturnValue({ eq: byUser });
-  const select = vi.fn().mockReturnValue({ eq: byOrganization });
+  const select = vi.fn().mockImplementation(() => {
+    testEvents.push("membership");
+    return { eq: byOrganization };
+  });
   serverFrom.mockReturnValue({ select });
 }
 
@@ -46,17 +56,24 @@ function configureSession(overrides: Record<string, unknown> = {}) {
     organization_id: organizationId,
     discovered_pages: pages,
     user_long_lived_token: "long-lived-user-token",
+    created_by: userId,
     expires_at: new Date((nowSeconds + 600) * 1000).toISOString(),
     ...overrides,
   };
   const maybeSingle = vi.fn().mockResolvedValue({ data: session, error: null });
-  const afterNonce = vi.fn().mockReturnValue({
-    gt: vi.fn().mockReturnValue({ maybeSingle }),
-    maybeSingle,
+  const select = vi.fn().mockImplementation((columns: string) => {
+    serviceSelectColumns.push(columns);
+    testEvents.push(`session:${columns}`);
+    const query = {
+      eq: vi.fn(),
+      gt: vi.fn(),
+      maybeSingle,
+    };
+    query.eq.mockReturnValue(query);
+    query.gt.mockReturnValue(query);
+    return query;
   });
-  const select = vi.fn().mockReturnValue({ eq: afterNonce });
-  const afterOrganization = vi.fn().mockReturnValue({ eq: deleteSession });
-  const deleteQuery = vi.fn().mockReturnValue({ eq: afterOrganization });
+  const deleteQuery = vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ eq: deleteSession }) });
 
   serviceFrom.mockImplementation((table: string) => {
     if (table !== "organization_meta_oauth_sessions") throw new Error(`Unexpected table: ${table}`);
@@ -89,7 +106,7 @@ function selectRequest(selectedPageId = "page-1") {
   return new Request("https://orbit.example/api/integrations/meta/connect/select", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ nonce, pageId: selectedPageId }),
+    body: JSON.stringify({ organizationId, nonce, pageId: selectedPageId }),
   });
 }
 
@@ -102,6 +119,8 @@ function pagesRequest() {
 describe("POST /api/integrations/meta/connect/select", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    serviceSelectColumns.length = 0;
+    testEvents.length = 0;
     vi.useFakeTimers();
     vi.setSystemTime(new Date(nowSeconds * 1000));
     vi.stubGlobal("fetch", fetchMock);
@@ -109,6 +128,7 @@ describe("POST /api/integrations/meta/connect/select", () => {
     configureSession();
     rpc.mockResolvedValue({ data: { connected: true }, error: null });
     deleteSession.mockResolvedValue({ error: null });
+    cookieGet.mockReturnValue({ value: nonce });
   });
 
   afterEach(() => {
@@ -135,15 +155,55 @@ describe("POST /api/integrations/meta/connect/select", () => {
     expect(response.status).toBe(302);
     expect(new URL(response.headers.get("location")!).searchParams.get("metaOAuth")).toBe("connected");
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(rpc).toHaveBeenCalledWith("upsert_meta_connection", {
+    expect(rpc).toHaveBeenCalledWith("complete_meta_oauth_selection", {
       p_organization_id: organizationId,
+      p_nonce: nonce,
       p_connected_by: userId,
       p_facebook_page_id: "page-1",
       p_facebook_page_name: "Página Uno",
       p_instagram_business_account_id: "instagram-account-page-1",
       p_page_access_token: "page-token-1",
     });
+    expect(deleteSession).not.toHaveBeenCalled();
     expect(JSON.stringify(rpc.mock.calls)).not.toContain("page-token-2");
+  });
+
+  it("rechaza si el nonce del POST no coincide con la cookie httpOnly", async () => {
+    cookieGet.mockReturnValue({ value: "22222222-2222-4222-8222-222222222222" });
+
+    const response = await POST(selectRequest());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "OAUTH_NONCE_MISMATCH" });
+    expect(serviceFrom).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("comprueba membresía antes de leer cualquier campo de la sesión temporal", async () => {
+    configureGraph();
+
+    const response = await POST(selectRequest());
+
+    expect(response.status).toBe(302);
+    expect(testEvents.indexOf("membership")).toBeGreaterThanOrEqual(0);
+    expect(testEvents.indexOf("session:created_by, expires_at")).toBeGreaterThan(
+      testEvents.indexOf("membership"),
+    );
+    expect(testEvents.indexOf("session:organization_id, discovered_pages, user_long_lived_token, expires_at")).toBeGreaterThan(
+      testEvents.indexOf("membership"),
+    );
+  });
+
+  it("rechaza una sesión temporal creada por otro usuario antes de leer su token", async () => {
+    configureSession({ created_by: "20000000-0000-4000-8000-000000000002" });
+
+    const response = await POST(selectRequest());
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "META_OAUTH_SESSION_ACTOR_MISMATCH" });
+    expect(serviceSelectColumns).toEqual(["created_by, expires_at"]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
   });
 
   it("rechaza si la sesión temporal expiró", async () => {
@@ -176,8 +236,8 @@ describe("POST /api/integrations/meta/connect/select", () => {
     const response = await POST(selectRequest());
 
     expect(response.status).toBe(302);
-    expect(deleteSession).toHaveBeenCalled();
-    expect(rpc.mock.invocationCallOrder[0]).toBeLessThan(deleteSession.mock.invocationCallOrder[0]);
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(rpc).toHaveBeenCalledWith("complete_meta_oauth_selection", expect.any(Object));
   });
 });
 

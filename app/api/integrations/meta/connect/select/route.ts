@@ -1,9 +1,12 @@
 import { z } from "zod";
 
+import { cookies } from "next/headers";
+
 import {
   canManageConnections,
   type OrganizationRole,
 } from "@/lib/organizations/permissions";
+import { META_OAUTH_NONCE_COOKIE } from "@/lib/integrations/meta-oauth-state";
 import { GRAPH_API_BASE } from "@/lib/integrations/meta-graph-client";
 import {
   createSupabaseServerClient,
@@ -11,6 +14,7 @@ import {
 } from "@/lib/supabase/server";
 
 const inputSchema = z.object({
+  organizationId: z.string().uuid(),
   nonce: z.string().uuid(),
   pageId: z.string().trim().min(1).max(512),
 });
@@ -26,6 +30,8 @@ type OAuthSession = {
 };
 
 type OAuthSessionPreview = Pick<OAuthSession, "organizationId" | "discoveredPages" | "expiresAt">;
+
+type OAuthSessionBinding = Pick<OAuthSession, "expiresAt"> & { createdBy: string };
 
 type SelectDependencies = {
   fetchFn?: typeof fetch;
@@ -103,6 +109,14 @@ function parseOAuthSession(value: unknown): OAuthSession | null {
   if (!userLongLivedToken) return null;
 
   return { ...preview, userLongLivedToken };
+}
+
+function parseOAuthSessionBinding(value: unknown): OAuthSessionBinding | null {
+  if (!isRecord(value)) return null;
+  const createdBy = stringValue(value.created_by);
+  const expiresAt = stringValue(value.expires_at);
+  if (!createdBy || !expiresAt) return null;
+  return { createdBy, expiresAt };
 }
 
 async function graphGet(
@@ -186,6 +200,23 @@ export function createMetaOAuthSelectHandler(
     } = await supabase.auth.getUser();
     if (sessionError || !user) return jsonError("AUTHENTICATION_REQUIRED", 401);
 
+    const cookieStore = await cookies();
+    if (cookieStore.get(META_OAUTH_NONCE_COOKIE)?.value !== payload.data.nonce) {
+      return jsonError("OAUTH_NONCE_MISMATCH", 400);
+    }
+
+    const { data: membership, error: membershipError } = await supabase
+      .from("organization_members")
+      .select("role")
+      .eq("organization_id", payload.data.organizationId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (membershipError) return jsonError("ORGANIZATION_LOOKUP_FAILED", 503);
+    if (!membership) return jsonError("ORGANIZATION_NOT_FOUND", 404);
+    if (!canManageConnections(membership.role as OrganizationRole)) {
+      return jsonError("ORGANIZATION_ACCESS_DENIED", 403);
+    }
+
     let serviceRole;
     try {
       serviceRole = createSupabaseServiceRoleClient();
@@ -199,7 +230,35 @@ export function createMetaOAuthSelectHandler(
     try {
       ({ data: rawSession, error: sessionLookupError } = await serviceRole
         .from("organization_meta_oauth_sessions")
+        .select("created_by, expires_at")
+        .eq("organization_id", payload.data.organizationId)
+        .eq("nonce", payload.data.nonce)
+        .gt("expires_at", currentTime.toISOString())
+        .maybeSingle());
+    } catch {
+      return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
+    }
+    if (sessionLookupError) return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
+
+    const sessionBinding = parseOAuthSessionBinding(rawSession);
+    const bindingExpiresAtMs = sessionBinding ? new Date(sessionBinding.expiresAt).getTime() : NaN;
+    if (
+      !sessionBinding ||
+      !Number.isFinite(bindingExpiresAtMs) ||
+      bindingExpiresAtMs <= currentTime.getTime()
+    ) {
+      return jsonError("META_OAUTH_SESSION_EXPIRED", 400);
+    }
+
+    if (sessionBinding.createdBy !== user.id) {
+      return jsonError("META_OAUTH_SESSION_ACTOR_MISMATCH", 403);
+    }
+
+    try {
+      ({ data: rawSession, error: sessionLookupError } = await serviceRole
+        .from("organization_meta_oauth_sessions")
         .select("organization_id, discovered_pages, user_long_lived_token, expires_at")
+        .eq("organization_id", payload.data.organizationId)
         .eq("nonce", payload.data.nonce)
         .gt("expires_at", currentTime.toISOString())
         .maybeSingle());
@@ -212,18 +271,6 @@ export function createMetaOAuthSelectHandler(
     const expiresAtMs = oauthSession ? new Date(oauthSession.expiresAt).getTime() : NaN;
     if (!oauthSession || !Number.isFinite(expiresAtMs) || expiresAtMs <= currentTime.getTime()) {
       return jsonError("META_OAUTH_SESSION_EXPIRED", 400);
-    }
-
-    const { data: membership, error: membershipError } = await supabase
-      .from("organization_members")
-      .select("role")
-      .eq("organization_id", oauthSession.organizationId)
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (membershipError) return jsonError("ORGANIZATION_LOOKUP_FAILED", 503);
-    if (!membership) return jsonError("ORGANIZATION_NOT_FOUND", 404);
-    if (!canManageConnections(membership.role as OrganizationRole)) {
-      return jsonError("ORGANIZATION_ACCESS_DENIED", 403);
     }
 
     if (!oauthSession.discoveredPages.some(({ id }) => id === payload.data.pageId)) {
@@ -242,22 +289,16 @@ export function createMetaOAuthSelectHandler(
         access_token: selectedPage.accessToken,
       });
 
-      const { error: upsertError } = await serviceRole.rpc("upsert_meta_connection", {
+      const { error: selectionError } = await serviceRole.rpc("complete_meta_oauth_selection", {
         p_organization_id: oauthSession.organizationId,
+        p_nonce: payload.data.nonce,
         p_connected_by: user.id,
         p_facebook_page_id: selectedPage.id,
         p_facebook_page_name: selectedPage.name,
         p_instagram_business_account_id: instagramBusinessAccountId(details),
         p_page_access_token: selectedPage.accessToken,
       });
-      if (upsertError) throw new MetaOAuthSelectError("META_CONNECTION_PERSIST_FAILED");
-
-      const { error: deleteError } = await serviceRole
-        .from("organization_meta_oauth_sessions")
-        .delete()
-        .eq("nonce", payload.data.nonce)
-        .eq("organization_id", oauthSession.organizationId);
-      if (deleteError) throw new MetaOAuthSelectError("META_OAUTH_SESSION_DELETE_FAILED");
+      if (selectionError) throw new MetaOAuthSelectError("META_CONNECTION_PERSIST_FAILED");
 
       return redirectToSettings(request);
     } catch (error) {

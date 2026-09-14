@@ -17,6 +17,16 @@ async function readProviderFixMigration(): Promise<string> {
   }
 }
 
+async function readOAuthSessionCleanupMigration(): Promise<string> {
+  const path = fileURLToPath(new URL("../../supabase/migrations/0021_meta_oauth_session_cleanup.sql", import.meta.url));
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  }
+}
+
 describe("content_item_assets", () => {
   it("declara la tabla con position acotada entre 0 y 9", async () => {
     const sql = await readMigration();
@@ -91,6 +101,37 @@ describe("organization_meta_oauth_sessions", () => {
   it("discovered_pages exige un array jsonb", async () => {
     const sql = await readMigration();
     expect(sql).toMatch(/discovered_pages jsonb not null check \(jsonb_typeof\(discovered_pages\) = 'array'\)/i);
+  });
+});
+
+describe("0021 Meta OAuth session cleanup", () => {
+  it("completa la selección de forma atómica y elimina la sesión temporal", async () => {
+    const sql = await readOAuthSessionCleanupMigration();
+    const fn = sql.match(/create function public\.complete_meta_oauth_selection[\s\S]*?\$\$;/i)?.[0];
+
+    expect(fn).toBeTruthy();
+    expect(fn).toMatch(/security definer/i);
+    expect(fn).toMatch(/perform public\.upsert_meta_connection/i);
+    expect(fn).toMatch(/delete from public\.organization_meta_oauth_sessions/i);
+    expect(fn!.search(/perform public\.upsert_meta_connection/i)).toBeLessThan(
+      fn!.search(/delete from public\.organization_meta_oauth_sessions/i),
+    );
+    expect(sql).toMatch(/revoke all on function public\.complete_meta_oauth_selection\([^)]*\) from public, anon, authenticated/i);
+    expect(sql).toMatch(/grant execute on function public\.complete_meta_oauth_selection\([^)]*\) to service_role/i);
+  });
+
+  it("borra sesiones expiradas con límite y deja documentada la invocación periódica", async () => {
+    const sql = await readOAuthSessionCleanupMigration();
+    const fn = sql.match(/create function public\.delete_expired_meta_oauth_sessions[\s\S]*?\$\$;/i)?.[0];
+
+    expect(fn).toBeTruthy();
+    expect(fn).toMatch(/p_limit integer default 100/i);
+    expect(fn).toMatch(/expires_at <= now\(\)/i);
+    expect(fn).toMatch(/limit p_limit/i);
+    expect(fn).toMatch(/for update skip locked/i);
+    expect(sql).toMatch(/invoc.*periódicamente|periodic.*invoc/i);
+    expect(sql).toMatch(/revoke all on function public\.delete_expired_meta_oauth_sessions\(integer\) from public, anon, authenticated/i);
+    expect(sql).toMatch(/grant execute on function public\.delete_expired_meta_oauth_sessions\(integer\) to service_role/i);
   });
 });
 

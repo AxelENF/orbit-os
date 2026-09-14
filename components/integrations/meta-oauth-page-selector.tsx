@@ -134,7 +134,7 @@ export function MetaOAuthPageSelector({ nonce, onConnected }: MetaOAuthPageSelec
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ nonce, pageId }),
+        body: JSON.stringify({ organizationId, nonce, pageId }),
       });
       if (!response.ok) throw await readApiError(response, "META_OAUTH_SELECTION_FAILED");
       await onConnected(organizationId);
