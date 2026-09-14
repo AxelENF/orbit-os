@@ -1,5 +1,6 @@
 import type { DurableJob } from "@/lib/automation/durable-job-contract";
 import {
+  checkTokenHealth,
   publishToFacebook,
   publishToInstagram,
   type MetaPublishResult,
@@ -9,6 +10,7 @@ import { MetaPublishError } from "@/lib/integrations/meta-publish-error";
 
 export type MetaPublishProcessorDependencies = {
   fetchFn?: typeof fetch;
+  appToken: string;
   markConnectionError: (organizationId: string) => Promise<void>;
 };
 
@@ -23,6 +25,11 @@ export function createMetaPublishProcessor(
     job: DurableJob<SupabasePublishJobPayload, MetaPublishResult>,
   ): Promise<MetaPublishResult> {
     try {
+      await checkTokenHealth(
+        job.payload.meta.pageAccessToken,
+        dependencies.appToken,
+        dependencies.fetchFn,
+      );
       const publishFn = job.payload.platform === "INSTAGRAM" ? publishToInstagram : publishToFacebook;
       return await publishFn(
         {

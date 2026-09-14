@@ -108,8 +108,11 @@ export async function main(): Promise<void> {
   const publishWorkerEnabled = process.env.SNAPGAD_META_PUBLISH_WORKER_ENABLED === "true";
   const runners: StoppableRunner[] = [runner];
   if (publishWorkerEnabled) {
+    const metaAppId = requiredEnvironment("META_APP_ID");
+    const metaAppSecret = requiredEnvironment("META_APP_SECRET");
     const publishStore = createSupabasePublishWorkerStore(client, { provider: "meta" });
     const publishProcessor = createMetaPublishProcessor({
+      appToken: `${metaAppId}|${metaAppSecret}`,
       markConnectionError: async (organizationId) => {
         const { error } = await client.rpc("mark_meta_connection_error", {
           p_organization_id: organizationId,

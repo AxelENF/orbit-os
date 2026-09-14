@@ -13,8 +13,10 @@ import {
 
 const publishToFacebookMock = vi.hoisted(() => vi.fn());
 const publishToInstagramMock = vi.hoisted(() => vi.fn());
+const checkTokenHealthMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/integrations/meta-graph-client", () => ({
+  checkTokenHealth: checkTokenHealthMock,
   publishToFacebook: publishToFacebookMock,
   publishToInstagram: publishToInstagramMock,
 }));
@@ -99,6 +101,7 @@ describe("createMetaPublishProcessor", () => {
     publishToFacebookMock.mockResolvedValueOnce(result);
     const processor = createMetaPublishProcessor({
       fetchFn,
+      appToken: "meta-app-id|meta-app-secret",
       markConnectionError: vi.fn(),
     });
 
@@ -120,6 +123,7 @@ describe("createMetaPublishProcessor", () => {
     publishToInstagramMock.mockResolvedValueOnce(result);
     const processor = createMetaPublishProcessor({
       fetchFn,
+      appToken: "meta-app-id|meta-app-secret",
       markConnectionError: vi.fn(),
     });
 
@@ -142,8 +146,10 @@ describe("createMetaPublishProcessor", () => {
     publishToFacebookMock.mockResolvedValueOnce(result);
     const processor = createMetaPublishProcessor({
       fetchFn,
+      appToken: "meta-app-id|meta-app-secret",
       markConnectionError: vi.fn(),
     });
+
     const assets = [0, 1, 2].map((position) => ({
       assetId: `${position + 8}${position + 8}${position + 8}${position + 8}${position + 8}${position + 8}${position + 8}${position + 8}-8888-4888-8888-888888888888`,
       position,
@@ -170,7 +176,10 @@ describe("createMetaPublishProcessor", () => {
     const markConnectionError = vi.fn(async () => {
       events.push("mark");
     });
-    const processor = createMetaPublishProcessor({ markConnectionError });
+    const processor = createMetaPublishProcessor({
+      appToken: "meta-app-id|meta-app-secret",
+      markConnectionError,
+    });
 
     await expect(processor(baseJob())).rejects.toBe(error);
     expect(events).toEqual(["publish", "mark"]);
@@ -181,9 +190,34 @@ describe("createMetaPublishProcessor", () => {
     const error = new MetaPublishError("Contenido rechazado", false, false);
     publishToFacebookMock.mockRejectedValueOnce(error);
     const markConnectionError = vi.fn();
-    const processor = createMetaPublishProcessor({ markConnectionError });
+    const processor = createMetaPublishProcessor({
+      appToken: "meta-app-id|meta-app-secret",
+      markConnectionError,
+    });
 
     await expect(processor(baseJob())).rejects.toBe(error);
     expect(markConnectionError).not.toHaveBeenCalled();
+  });
+
+  it("token inválido en debug_token no publica, marca la conexión y no se reintenta", async () => {
+    const error = new MetaPublishError("Token inválido", false, true);
+    const fetchFn = vi.fn<typeof fetch>();
+    checkTokenHealthMock.mockRejectedValueOnce(error);
+    const markConnectionError = vi.fn().mockResolvedValue(undefined);
+    const processor = createMetaPublishProcessor({
+      fetchFn,
+      appToken: "meta-app-id|meta-app-secret",
+      markConnectionError,
+    });
+
+    await expect(processor(baseJob())).rejects.toBe(error);
+
+    expect(checkTokenHealthMock).toHaveBeenCalledWith(
+      "page-token",
+      "meta-app-id|meta-app-secret",
+      fetchFn,
+    );
+    expect(publishToFacebookMock).not.toHaveBeenCalled();
+    expect(markConnectionError).toHaveBeenCalledWith(organizationId);
   });
 });

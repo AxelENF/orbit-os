@@ -83,7 +83,12 @@ export async function callGraphApi(
 ): Promise<GraphApiResponse> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GRAPH_API_TIMEOUT_MS);
-  const url = `${GRAPH_API_BASE}/${path.replace(/^\/+/, "")}`;
+  let url: string | URL = `${GRAPH_API_BASE}/${path.replace(/^\/+/, "")}`;
+  if (method === "GET" && params) {
+    const parsedUrl = new URL(url);
+    for (const [key, value] of Object.entries(params)) parsedUrl.searchParams.set(key, String(value));
+    url = parsedUrl.toString();
+  }
   const headers: HeadersInit = { accept: "application/json" };
   const request: RequestInit = { method, headers, signal: controller.signal };
 
@@ -124,6 +129,27 @@ export async function callGraphApi(
     throw invalidResponse("No se pudo confirmar la respuesta de Meta por un error de red o timeout.");
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+export async function checkTokenHealth(
+  token: string,
+  appToken: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<void> {
+  const response = await callGraphApi(
+    fetchFn,
+    "debug_token",
+    { input_token: token, access_token: appToken },
+    "GET",
+  );
+  const data = isRecord(response.data) ? response.data : null;
+  if (data?.is_valid !== true) {
+    throw new MetaPublishError(
+      "Meta reportó que el token de acceso no es válido.",
+      false,
+      true,
+    );
   }
 }
 

@@ -46,6 +46,8 @@ function stubWorkerEnvironment(): void {
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://supabase.example");
   vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "service-role-key");
   vi.stubEnv("SNAPGAD_COPY_WORKER_MODULE", "worker/providers/copy-processor.ts");
+  vi.stubEnv("META_APP_ID", "meta-app-id");
+  vi.stubEnv("META_APP_SECRET", "meta-app-secret");
 }
 
 beforeEach(() => {
