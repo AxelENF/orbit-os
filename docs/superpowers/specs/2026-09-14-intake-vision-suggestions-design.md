@@ -1,7 +1,7 @@
 # Sugerencias por visión en el intake — diseño
 
-**Fecha:** 2026-09-14 (revisión 2, tras ronda 1 de revisión con Codex CLI)
-**Estado:** Aprobado por Axel de forma anticipada — sesión autónoma ("hazme las cosas, no preguntes, confío en ti"). Las decisiones de diseño que en otro momento se habrían preguntado una por una están documentadas aquí con su razonamiento, para que Axel pueda revisarlas y corregir cualquiera al volver. La ronda 1 de revisión con Codex CLI encontró 6 problemas reales (el más serio: el spec asumía por error el modelo de assets múltiples de la rama paralela sin mergear `feat/meta-publisher-oauth-adapter`) — todos corregidos aquí, marcados inline.
+**Fecha:** 2026-09-14 (revisión 4 — tres rondas de revisión con Codex CLI más una corrección manual final; lista para la fase de plan)
+**Estado:** Aprobado por Axel de forma anticipada — sesión autónoma ("hazme las cosas, no preguntes, confío en ti"). Las decisiones de diseño que en otro momento se habrían preguntado una por una están documentadas aquí con su razonamiento, para que Axel pueda revisarlas y corregir cualquiera al volver. Ronda 1: 6 problemas (el más serio, el spec asumía por error el modelo de assets múltiples de la rama paralela sin mergear `feat/meta-publisher-oauth-adapter`). Ronda 2: 5 problemas más, incluido un bug real de diseño en el tracking de procedencia. Ronda 3 (última automatizada): 3/4 verificados, más una imprecisión de wording sobre qué cuenta como "editado por el usuario" — corregida a mano.
 **Roadmap:** Primer ítem del orden de 4 partes acordado el 2026-09-14 (intake → arquitectura de información/navegación → compositor de logo → capa MCP).
 
 ## Contexto
@@ -126,9 +126,21 @@ usuario acaba de soltar una imagen y está esperando.
 
    Un `Set<keyof FormState>` llamado `userEditedFields` — una vez que un
    campo entra a este set, **nunca vuelve a salir**, sin importar que el
-   usuario lo deje vacío. Cualquier `onChange` disparado por tipeo directo
-   del usuario agrega el campo al set, incluso si el resultado es una
-   cadena vacía. Al aplicar una respuesta de `/api/content/suggestions`,
+   usuario lo deje vacío. **Precisión agregada tras revisión de Codex CLI
+   ronda 3:** "editado por el usuario" cubre **cualquier** origen de
+   cambio disparado por el usuario, no solo tipeo en `<input>`/`<textarea>`
+   — también selección en un `<select>` (`contentType`, `objective`, los
+   dos campos con valor inicial no vacío, son selects hoy) y elección de
+   una opción de `<datalist>`. Todo `onChange` que ya existe en el
+   formulario agrega el campo al set al disparar, sin importar el tipo de
+   control, incluso si el resultado es una cadena vacía. `applyProfile()`
+   (el efecto de defaults de AIAS, ya existente) respeta el mismo set: no
+   sobreescribe ningún campo que ya esté en `userEditedFields`, por la
+   misma razón — si el usuario ya editó algo a mano, ningún origen
+   automático (perfil de AIAS o imagen) debe tocarlo de nuevo, sin
+   importar cuál llegue primero o después.
+
+   Al aplicar una respuesta de `/api/content/suggestions`,
    un campo se sobrescribe si **y solo si** `!userEditedFields.has(field)`
    — nunca ha sido tocado a mano — **y** el valor sugerido no es `null`
    (una sugerencia ausente para un campo nunca escribe `null` sobre un
@@ -207,12 +219,20 @@ número de solicitudes concurrentes del mismo organization_id que pasan el
 chequeo antes de que cualquiera registre su gasto (tres pestañas
 subiendo campañas al mismo tiempo → hasta 3× el costo de una llamada, no
 1×). Lo que sí sigue acotado es el costo *por solicitud*
-(`SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD`, default `0.01` USD) — el
-escenario completo requiere varias personas de la misma organización
-creando campañas en la misma ventana de segundos, y aun así el
-sobregasto total son centavos, no algo que comprometa la integridad del
-presupuesto mensual. Se acepta este riesgo con los ojos abiertos, no
-subestimado. Si esto deja
+(`SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD`, default `0.01` USD). El
+sobregasto agregado real depende de cuántas solicitudes concurrentes del
+mismo organization_id lleguen a competir — no hay un límite de
+concurrencia definido en este spec, así que no se afirma un techo en
+dólares para el escenario agregado (corrección tras revisión de Codex CLI
+ronda 3: la versión anterior decía "serán centavos", una certeza que no
+está respaldada sin ese límite). Se acepta el riesgo explícitamente sin
+cuantificarlo de más: el escenario requiere varias personas de la misma
+organización creando campañas en la misma ventana de segundos, cada
+solicitud individual sigue acotada por
+`SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD`, y un límite de
+concurrencia real (semáforo o reserva atómica sin FK a `automation_jobs`)
+queda fuera de alcance de este spec si el riesgo agregado deja de ser
+aceptable. Si esto deja
 de ser aceptable en el futuro (más de un usuario por organización subiendo
 campañas a la vez, con frecuencia), la solución es la misma reserva
 atómica de `copy-processor.ts` sobre una tabla de reservas sin FK a
