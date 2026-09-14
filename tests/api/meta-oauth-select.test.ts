@@ -14,7 +14,7 @@ vi.mock("@/lib/supabase/server", () => ({
   createSupabaseServiceRoleClient,
 }));
 
-import { POST } from "@/app/api/integrations/meta/connect/select/route";
+import { GET, POST } from "@/app/api/integrations/meta/connect/select/route";
 
 const organizationId = "00000000-0000-4000-8000-000000000001";
 const userId = "10000000-0000-4000-8000-000000000001";
@@ -50,7 +50,10 @@ function configureSession(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
   const maybeSingle = vi.fn().mockResolvedValue({ data: session, error: null });
-  const afterNonce = vi.fn().mockReturnValue({ gt: vi.fn().mockReturnValue({ maybeSingle }) });
+  const afterNonce = vi.fn().mockReturnValue({
+    gt: vi.fn().mockReturnValue({ maybeSingle }),
+    maybeSingle,
+  });
   const select = vi.fn().mockReturnValue({ eq: afterNonce });
   const afterOrganization = vi.fn().mockReturnValue({ eq: deleteSession });
   const deleteQuery = vi.fn().mockReturnValue({ eq: afterOrganization });
@@ -88,6 +91,12 @@ function selectRequest(selectedPageId = "page-1") {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ nonce, pageId: selectedPageId }),
   });
+}
+
+function pagesRequest() {
+  return new Request(
+    `https://orbit.example/api/integrations/meta/connect/select?nonce=${encodeURIComponent(nonce)}`,
+  );
 }
 
 describe("POST /api/integrations/meta/connect/select", () => {
@@ -169,5 +178,40 @@ describe("POST /api/integrations/meta/connect/select", () => {
     expect(response.status).toBe(302);
     expect(deleteSession).toHaveBeenCalled();
     expect(rpc.mock.invocationCallOrder[0]).toBeLessThan(deleteSession.mock.invocationCallOrder[0]);
+  });
+});
+
+describe("GET /api/integrations/meta/connect/select", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(nowSeconds * 1000));
+    configureAuthenticatedOwner();
+    configureSession();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns only the discovered page fields and organization id, never OAuth tokens", async () => {
+    const response = await GET(pagesRequest());
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload).toEqual({ organizationId, pages });
+    expect(JSON.stringify(payload)).not.toContain("long-lived-user-token");
+  });
+
+  it("returns the same clear expiration code when the temporary session is expired", async () => {
+    configureSession({ expires_at: new Date((nowSeconds - 1) * 1000).toISOString() });
+
+    const response = await GET(pagesRequest());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "META_OAUTH_SESSION_EXPIRED",
+      organizationId,
+    });
   });
 });

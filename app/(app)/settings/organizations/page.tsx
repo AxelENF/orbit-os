@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
 import {
   OrganizationSwitcher,
@@ -9,6 +9,7 @@ import {
   type OrganizationOption,
 } from "@/components/aias/organization-switcher";
 import { AiasProfileForm } from "@/components/aias/profile-form";
+import { MetaOAuthSelection } from "@/components/integrations/meta-oauth-page-selector";
 import { canManageConnections } from "@/lib/organizations/permissions";
 import { hasSupabaseBrowserConfig } from "@/lib/supabase/client";
 
@@ -89,6 +90,7 @@ export default function OrganizationsSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [metaConnectionStates, setMetaConnectionStates] = useState<Record<string, MetaConnectionState>>({});
+  const [metaOAuthSelectionComplete, setMetaOAuthSelectionComplete] = useState(false);
   const isProductionMode = hasSupabaseBrowserConfig();
 
   useEffect(() => {
@@ -170,6 +172,35 @@ export default function OrganizationsSettingsPage() {
     }
   }
 
+  async function handleMetaSelectionComplete(organizationId: string) {
+    setMetaOAuthSelectionComplete(true);
+    setMetaConnectionStates((current) => ({
+      ...current,
+      [organizationId]: {
+        ...(current[organizationId] ?? { status: disconnectedMetaStatus }),
+        isLoading: true,
+        error: undefined,
+      },
+    }));
+
+    try {
+      const status = await loadMetaConnectionStatus(organizationId);
+      setMetaConnectionStates((current) => ({
+        ...current,
+        [organizationId]: { status },
+      }));
+    } catch {
+      setMetaConnectionStates((current) => ({
+        ...current,
+        [organizationId]: {
+          ...(current[organizationId] ?? { status: disconnectedMetaStatus }),
+          isLoading: false,
+          error: true,
+        },
+      }));
+    }
+  }
+
   return (
     <div className="mx-auto max-w-5xl">
       <header className="flex flex-col gap-5 border-b border-white/[0.08] pb-7 sm:flex-row sm:items-end sm:justify-between">
@@ -190,6 +221,12 @@ export default function OrganizationsSettingsPage() {
           Ver onboarding
         </Link>
       </header>
+
+      <Suspense fallback={null}>
+        {!metaOAuthSelectionComplete ? (
+          <MetaOAuthSelection onConnected={handleMetaSelectionComplete} />
+        ) : null}
+      </Suspense>
 
       {!isLoading && !error ? (
         <section className="mt-7">

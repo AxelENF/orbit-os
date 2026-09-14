@@ -14,6 +14,7 @@ const inputSchema = z.object({
   nonce: z.string().uuid(),
   pageId: z.string().trim().min(1).max(512),
 });
+const nonceSchema = z.string().uuid();
 
 type GraphRecord = Record<string, unknown>;
 
@@ -23,6 +24,8 @@ type OAuthSession = {
   userLongLivedToken: string;
   expiresAt: string;
 };
+
+type OAuthSessionPreview = Pick<OAuthSession, "organizationId" | "discoveredPages" | "expiresAt">;
 
 type SelectDependencies = {
   fetchFn?: typeof fetch;
@@ -35,9 +38,9 @@ class MetaOAuthSelectError extends Error {
   }
 }
 
-function jsonError(error: string, status: number): Response {
+function jsonError(error: string, status: number, details: Record<string, string> = {}): Response {
   return Response.json(
-    { error },
+    { error, ...details },
     {
       status,
       headers: {
@@ -69,24 +72,37 @@ function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function parseOAuthSession(value: unknown): OAuthSession | null {
-  if (!isRecord(value)) return null;
-  const organizationId = stringValue(value.organization_id);
-  const userLongLivedToken = stringValue(value.user_long_lived_token);
-  const expiresAt = stringValue(value.expires_at);
-  if (!organizationId || !userLongLivedToken || !expiresAt || !Array.isArray(value.discovered_pages)) {
-    return null;
-  }
+function parseDiscoveredPages(value: unknown): OAuthSession["discoveredPages"] | null {
+  if (!Array.isArray(value)) return null;
 
-  const discoveredPages = value.discovered_pages.flatMap((page): OAuthSession["discoveredPages"] => {
+  return value.flatMap((page): OAuthSession["discoveredPages"] => {
     if (!isRecord(page)) return [];
     const id = stringValue(page.id);
     const name = stringValue(page.name);
     if (!id || !name || typeof page.hasInstagram !== "boolean") return [];
     return [{ id, name, hasInstagram: page.hasInstagram }];
   });
+}
 
-  return { organizationId, discoveredPages, userLongLivedToken, expiresAt };
+function parseOAuthSessionPreview(value: unknown): OAuthSessionPreview | null {
+  if (!isRecord(value)) return null;
+  const organizationId = stringValue(value.organization_id);
+  const expiresAt = stringValue(value.expires_at);
+  const discoveredPages = parseDiscoveredPages(value.discovered_pages);
+  if (!organizationId || !expiresAt || !discoveredPages) {
+    return null;
+  }
+
+  return { organizationId, discoveredPages, expiresAt };
+}
+
+function parseOAuthSession(value: unknown): OAuthSession | null {
+  const preview = parseOAuthSessionPreview(value);
+  if (!preview || !isRecord(value)) return null;
+  const userLongLivedToken = stringValue(value.user_long_lived_token);
+  if (!userLongLivedToken) return null;
+
+  return { ...preview, userLongLivedToken };
 }
 
 async function graphGet(
@@ -253,4 +269,84 @@ export function createMetaOAuthSelectHandler(
   };
 }
 
+export function createMetaOAuthPagesHandler(
+  dependencies: Pick<SelectDependencies, "now"> = {},
+): (request: Request) => Promise<Response> {
+  const now = dependencies.now ?? (() => new Date());
+
+  return async function handlePages(request: Request): Promise<Response> {
+    const nonce = nonceSchema.safeParse(new URL(request.url).searchParams.get("nonce")?.trim());
+    if (!nonce.success) return jsonError("INVALID_REQUEST", 400);
+
+    let supabase;
+    try {
+      supabase = await createSupabaseServerClient();
+    } catch {
+      return jsonError("META_INTEGRATION_NOT_CONFIGURED", 503);
+    }
+
+    const {
+      data: { user },
+      error: sessionError,
+    } = await supabase.auth.getUser();
+    if (sessionError || !user) return jsonError("AUTHENTICATION_REQUIRED", 401);
+
+    let serviceRole;
+    try {
+      serviceRole = createSupabaseServiceRoleClient();
+    } catch {
+      return jsonError("META_INTEGRATION_NOT_CONFIGURED", 503);
+    }
+
+    let rawSession: unknown;
+    let sessionLookupError: unknown;
+    try {
+      ({ data: rawSession, error: sessionLookupError } = await serviceRole
+        .from("organization_meta_oauth_sessions")
+        .select("organization_id, discovered_pages, expires_at")
+        .eq("nonce", nonce.data)
+        .maybeSingle());
+    } catch {
+      return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
+    }
+    if (sessionLookupError) return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
+
+    const oauthSession = parseOAuthSessionPreview(rawSession);
+    if (!oauthSession) return jsonError("META_OAUTH_SESSION_EXPIRED", 400);
+
+    const { data: membership, error: membershipError } = await supabase
+      .from("organization_members")
+      .select("role")
+      .eq("organization_id", oauthSession.organizationId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (membershipError) return jsonError("ORGANIZATION_LOOKUP_FAILED", 503);
+    if (!membership) return jsonError("ORGANIZATION_NOT_FOUND", 404);
+    if (!canManageConnections(membership.role as OrganizationRole)) {
+      return jsonError("ORGANIZATION_ACCESS_DENIED", 403);
+    }
+
+    const expiresAtMs = new Date(oauthSession.expiresAt).getTime();
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now().getTime()) {
+      return jsonError("META_OAUTH_SESSION_EXPIRED", 400, {
+        organizationId: oauthSession.organizationId,
+      });
+    }
+
+    return Response.json(
+      {
+        organizationId: oauthSession.organizationId,
+        pages: oauthSession.discoveredPages,
+      },
+      {
+        headers: {
+          "Cache-Control": "no-store",
+          Vary: "Cookie",
+        },
+      },
+    );
+  };
+}
+
+export const GET = createMetaOAuthPagesHandler();
 export const POST = createMetaOAuthSelectHandler();
