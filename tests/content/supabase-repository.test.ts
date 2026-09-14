@@ -102,6 +102,7 @@ describe("SupabaseContentRepository", () => {
           data: (rowsByOrganization[filters.find(([field]) => field === "organization_id")?.[1] ?? ""] ?? [])[0] ?? null,
           error: null,
         })),
+        in: vi.fn(() => Promise.resolve({ data: [], error: null })),
       };
       return chain;
     });
@@ -140,6 +141,73 @@ describe("SupabaseContentRepository", () => {
         expect.arrayContaining([["organization_id", organizationB.organizationId]]),
       ]),
     );
+  });
+
+  it("computes hasActionableTarget from a REVIEW-gated PENDING_REVIEW and an ungated ERROR, scoped by organization", async () => {
+    const draftWithPendingTarget = { ...createdRow, id: "11111111-1111-4111-8111-111111111111", state: "DRAFT" };
+    const inReviewWithPendingTarget = { ...createdRow, id: "22222222-2222-4222-8222-222222222222", state: "REVIEW" };
+    const approvedWithErrorTarget = { ...createdRow, id: "33333333-3333-4333-8333-333333333333", state: "APPROVED" };
+    const publishedNoActionableTarget = { ...createdRow, id: "44444444-4444-4444-8444-444444444444", state: "PUBLISHED" };
+    const contentRowsByOrg: Record<string, unknown[]> = {
+      [organizationA.organizationId]: [draftWithPendingTarget, inReviewWithPendingTarget, approvedWithErrorTarget, publishedNoActionableTarget],
+    };
+    const targetRowsByOrg: Record<string, unknown[]> = {
+      [organizationA.organizationId]: [
+        { content_item_id: draftWithPendingTarget.id, status: "PENDING_REVIEW" },
+        { content_item_id: inReviewWithPendingTarget.id, status: "PENDING_REVIEW" },
+        { content_item_id: approvedWithErrorTarget.id, status: "ERROR" },
+      ],
+      // Deliberately a DIFFERENT organization's ERROR target on the SAME
+      // content_item_id as organizationA's publishedNoActionableTarget
+      // (correction: NOT the REVIEW item) — proves the merge is scoped by
+      // organization, not just by id; if this leaked in, it would flip
+      // publishedNoActionableTarget's expected `false` to `true` below.
+      [organizationB.organizationId]: [
+        { content_item_id: publishedNoActionableTarget.id, status: "ERROR" },
+      ],
+    };
+
+    const from = vi.fn((table: string) => {
+      if (table === "publication_targets") {
+        const filters: Array<[string, string]> = [];
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn((field: string, value: string) => {
+              filters.push([field, value]);
+              return {
+                in: vi.fn(() => Promise.resolve({
+                  data: targetRowsByOrg[filters.find(([f]) => f === "organization_id")?.[1] ?? ""] ?? [],
+                  error: null,
+                })),
+              };
+            }),
+          })),
+        };
+      }
+      const filters: Array<[string, string]> = [];
+      const chain = {
+        select: vi.fn(() => chain),
+        eq: vi.fn((field: string, value: string) => {
+          filters.push([field, value]);
+          return chain;
+        }),
+        order: vi.fn(() => Promise.resolve({
+          data: contentRowsByOrg[filters.find(([f]) => f === "organization_id")?.[1] ?? ""] ?? [],
+          error: null,
+        })),
+      };
+      return chain;
+    });
+    const repository = createSupabaseRepository({ from, rpc: vi.fn() } as never, organizationA);
+
+    const summaries = await repository.listContentSummaries();
+
+    expect(summaries.find((item) => item.id === draftWithPendingTarget.id)?.hasActionableTarget).toBe(false);
+    expect(summaries.find((item) => item.id === inReviewWithPendingTarget.id)?.hasActionableTarget).toBe(true);
+    expect(summaries.find((item) => item.id === approvedWithErrorTarget.id)?.hasActionableTarget).toBe(true);
+    // organizationB's ERROR target on this same content_item_id must NOT
+    // leak into organizationA's result:
+    expect(summaries.find((item) => item.id === publishedNoActionableTarget.id)?.hasActionableTarget).toBe(false);
   });
 
   it("creates the item, both targets, and audit event through one RPC", async () => {

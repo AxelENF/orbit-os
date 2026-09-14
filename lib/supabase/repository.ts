@@ -671,20 +671,36 @@ class SupabaseContentRepository
   }
 
   async listContentSummaries(): Promise<ContentSummary[]> {
-    const { data, error } = await this.client
-      .from("content_items")
-      .select("id, asset_id, service, niche, content_type, objective, campaign_name, offer, funnel_stage, destination, destination_value, campaign_code, state, created_at")
-      .eq("organization_id", this.organization.organizationId)
-      .order("created_at", { ascending: false });
+    const [contentResult, targetsResult] = await Promise.all([
+      this.client
+        .from("content_items")
+        .select("id, asset_id, service, niche, content_type, objective, campaign_name, offer, funnel_stage, destination, destination_value, campaign_code, state, created_at")
+        .eq("organization_id", this.organization.organizationId)
+        .order("created_at", { ascending: false }),
+      this.client
+        .from("publication_targets")
+        .select("content_item_id, status")
+        .eq("organization_id", this.organization.organizationId)
+        .in("status", ["PENDING_REVIEW", "ERROR"]),
+    ]);
 
-    if (error) throw new Error("Unable to list content summaries.");
+    if (contentResult.error) throw new Error("Unable to list content summaries.");
+    if (targetsResult.error) throw new Error("Unable to list content summaries.");
+
+    const pendingReviewIds = new Set<string>();
+    const errorIds = new Set<string>();
+    for (const row of (targetsResult.data ?? []) as Array<{ content_item_id: string; status: string }>) {
+      if (row.status === "PENDING_REVIEW") pendingReviewIds.add(row.content_item_id);
+      if (row.status === "ERROR") errorIds.add(row.content_item_id);
+    }
+
     const rows = z.array(contentItemRowSchema.partial({
       business_line: true,
       format: true,
       cta: true,
       human_description: true,
       allowed_facts: true,
-    })).safeParse(data);
+    })).safeParse(contentResult.data);
     if (!rows.success) throw new Error("Supabase returned invalid content summaries.");
     return rows.data.map((row) => {
       const brief = contentBriefSchema.pick({
@@ -712,10 +728,14 @@ class SupabaseContentRepository
         destination: row.destination,
         destinationValue: row.destination_value,
       });
+      const hasActionableTarget =
+        (row.state === "REVIEW" && pendingReviewIds.has(row.id)) ||
+        errorIds.has(row.id);
       return {
         id: row.id,
         state: row.state,
         createdAt: row.created_at,
+        hasActionableTarget,
         ...brief.data,
         ...(row.asset_id ? { assetId: row.asset_id } : {}),
         ...(campaign.success && row.campaign_code
