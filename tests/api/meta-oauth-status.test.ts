@@ -40,7 +40,7 @@ describe("GET /api/integrations/meta/status", () => {
     createSupabaseServerClient.mockResolvedValue({ auth: { getUser }, from, rpc });
   });
 
-  it("returns the Meta status using the authenticated user as the RPC actor", async () => {
+  it("returns the Meta status without sending a client-controlled RPC actor", async () => {
     const response = await GET(
       new Request(`https://orbit.example/api/integrations/meta/status?organizationId=${organizationId}`),
     );
@@ -53,7 +53,6 @@ describe("GET /api/integrations/meta/status", () => {
     });
     expect(rpc).toHaveBeenCalledWith("get_meta_connection_status", {
       p_organization_id: organizationId,
-      p_actor_id: userId,
     });
   });
 

@@ -47,7 +47,6 @@ export async function GET(request: Request): Promise<Response> {
 
   const { data, error } = await supabase.rpc("get_meta_connection_status", {
     p_organization_id: organizationId.data,
-    p_actor_id: user.id,
   });
   if (error) {
     return error.message === "ORGANIZATION_ACTOR_FORBIDDEN"

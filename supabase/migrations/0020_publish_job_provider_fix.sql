@@ -1,5 +1,40 @@
 -- Ensure Meta publish jobs are visible to the Meta worker.
 
+drop function if exists public.get_meta_connection_status(uuid, uuid);
+
+create or replace function public.get_meta_connection_status(
+  p_organization_id uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  connection public.organization_meta_connections%rowtype;
+begin
+  perform public.assert_organization_actor(
+    p_organization_id, auth.uid(),
+    array['owner', 'editor', 'reviewer']::public.organization_role[]
+  );
+  select * into connection
+  from public.organization_meta_connections
+  where organization_id = p_organization_id;
+  if not found then
+    return jsonb_build_object('status', 'NOT_CONNECTED');
+  end if;
+  return jsonb_build_object(
+    'status', connection.status,
+    'facebookPageName', connection.facebook_page_name,
+    'hasInstagram', connection.instagram_business_account_id is not null,
+    'connectedAt', connection.connected_at
+  );
+end;
+$$;
+
+revoke all on function public.get_meta_connection_status(uuid) from public, anon, authenticated;
+grant execute on function public.get_meta_connection_status(uuid) to authenticated;
+
 create or replace function public.enqueue_publish_automation_job(
   p_organization_id uuid, p_content_item_id uuid, p_publication_target_id uuid
 )

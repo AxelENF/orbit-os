@@ -204,6 +204,24 @@ describe("0020 retry target content validation", () => {
   });
 });
 
+describe("0020 Meta connection status actor binding", () => {
+  it("deriva el actor desde auth.uid y elimina el overload que aceptaba actor del cliente", async () => {
+    const sql = await readProviderFixMigration();
+    const functionMatch = sql.match(
+      /create or replace function public\.get_meta_connection_status[\s\S]*?\$\$;/i,
+    );
+
+    expect(sql).toMatch(/drop function if exists public\.get_meta_connection_status\(uuid, uuid\)/i);
+    expect(functionMatch).not.toBeNull();
+    expect(functionMatch?.[0]).toMatch(/p_organization_id uuid/i);
+    expect(functionMatch?.[0]).not.toMatch(/p_actor_id/i);
+    expect(functionMatch?.[0]).toMatch(
+      /assert_organization_actor\(\s*p_organization_id\s*,\s*auth\.uid\(\)/i,
+    );
+    expect(sql).toMatch(/grant execute on function public\.get_meta_connection_status\(uuid\) to authenticated/i);
+  });
+});
+
 describe("apply_publication_diagnosis SQL", () => {
   it("automation_runs.kind se extiende para aceptar PUBLISH_DIAGNOSIS", async () => {
     const sql = await readMigration();
