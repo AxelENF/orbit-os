@@ -8,11 +8,20 @@ import type { ContentRecord, PublicationTarget } from "@/lib/content/repository"
 export function useAttentionTargets(contentItemIds: string[], onTargetResolved?: () => void) {
   const [records, setRecords] = useState<ContentRecord[]>([]);
   const [failedIds, setFailedIds] = useState<string[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const idsKey = contentItemIds.join(",");
+
+  // isLoading is derived, not synced via a separate setState call in the
+  // effect below: it's true whenever the ids we last finished loading for
+  // don't match the current ids. This satisfies react-hooks/set-state-in-effect
+  // (no setState synchronously at the top of the effect) and avoids
+  // react-hooks/refs (no ref read/write during render either) — both of
+  // which a naive "setIsLoading(true) at the top of the effect" or a
+  // ref-tracked "previous key" comparison during render would trigger.
+  const [loadedForKey, setLoadedForKey] = useState<string | null>(null);
+  const isLoading = loadedForKey !== idsKey;
 
   useEffect(() => {
     let cancelled = false;
-    setIsLoading(true);
 
     Promise.allSettled(contentItemIds.map((id) => getContentRecord(id))).then((results) => {
       if (cancelled) return;
@@ -24,7 +33,7 @@ export function useAttentionTargets(contentItemIds: string[], onTargetResolved?:
       });
       setRecords(nextRecords);
       setFailedIds(nextFailedIds);
-      setIsLoading(false);
+      setLoadedForKey(idsKey);
     });
 
     return () => {
@@ -33,7 +42,7 @@ export function useAttentionTargets(contentItemIds: string[], onTargetResolved?:
     // contentItemIds is derived from a filtered list each render; compare by
     // its joined value so a same-membership array doesn't re-trigger the fetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentItemIds.join(",")]);
+  }, [idsKey]);
 
   const refreshOne = useCallback(async (contentItemId: string) => {
     const refreshed = await getContentRecord(contentItemId);
