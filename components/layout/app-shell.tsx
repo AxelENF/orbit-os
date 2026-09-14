@@ -17,6 +17,7 @@ const navigation = [
   { href: "/history", label: "Resultados", eyebrow: "Aprendizaje", icon: "results" },
   { href: "/pilot", label: "Piloto", eyebrow: "Salida real", icon: "check" },
   { href: "/settings/organizations", label: "Configuración", eyebrow: "Organización", icon: "settings" },
+  { href: "/tools/logo-studio", label: "Logo Studio", eyebrow: "Herramientas", icon: "image" },
 ] satisfies Array<{ href: string; label: string; eyebrow: string; icon: IconName }>;
 
 function isActive(pathname: string, href: string): boolean {
@@ -110,7 +111,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {hasSupabaseBrowserConfig() &&
           pathname !== "/onboarding" &&
           !pathname.startsWith("/onboarding/") &&
-          !pathname.startsWith("/settings/organizations") ? (
+          !pathname.startsWith("/settings/organizations") &&
+          !pathname.startsWith("/tools/logo-studio") ? (
             <div className="mx-auto mb-8 w-full max-w-7xl">
               <OrganizationSwitcher />
             </div>
