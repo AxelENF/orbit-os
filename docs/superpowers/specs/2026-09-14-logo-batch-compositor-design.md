@@ -135,24 +135,41 @@ Memoria de una sesión de brainstorming previa (2026-09-10, `[[project-logo-batc
   ): Promise<Blob> { /* ... */ }
   ```
 
-**Corrección tras revisión de Codex CLI ronda 2 (bug real, no
-cosmético): canvas tainted por CORS.** El logo se carga desde una URL
-firmada de Supabase Storage — un origen distinto al de la app. Dibujar
-una imagen cross-origin en un `<canvas>` sin marcarla explícitamente
-como CORS-safe **mancha** (`taints`) el canvas por diseño del navegador
-(previene exfiltrar píxeles de imágenes de otros orígenes); un canvas
-manchado hace que `toBlob()` falle. Antes de asignar `logoImage.src`,
-es obligatorio: `logoImage.crossOrigin = "anonymous";` — y el bucket de
-Storage debe servir la URL firmada con headers CORS correctos (Supabase
-Storage los envía por defecto en sus URLs firmadas/públicas; verificar
-esto en la práctica durante la implementación, no asumirlo). Si por
-algún motivo no funciona, el plan tiene una alternativa de respaldo sin
-depender de CORS en absoluto: `fetch()` la URL firmada, convertir la
-respuesta a `Blob`, y usar `URL.createObjectURL(blob)` como `src` del
-`<img>` — un `blob:` URL es del mismo origen para efectos de canvas,
-nunca lo mancha, sin importar el origen real de los bytes. Los
-creativos del usuario (`File` locales, nunca network) no tienen este
-problema — solo el logo, por venir de una URL de red.
+**Corrección tras revisión de Codex CLI ronda 3 (el "fallback" de ronda
+2 estaba mal razonado — se descarta, se reemplaza por un rediseño real):**
+la ronda 2 proponía `fetch()` la URL firmada y convertir la respuesta a
+un `blob:` URL "sin depender de CORS" — **eso es incorrecto**: `fetch()`
+a una URL de otro origen necesita exactamente el mismo permiso CORS que
+`<img crossOrigin="anonymous">` para poder LEER el cuerpo de la
+respuesta (`response.blob()`); sin CORS, la respuesta llega "opaca" (no
+legible) o el fetch falla. No existe ninguna forma de leer bytes
+cross-origin en el navegador sin cooperación CORS del servidor — mover
+el fetch a JS no evita el problema, solo lo reubica. Y Supabase no
+documenta de forma explícita que sus URLs firmadas de Storage envíen
+headers CORS permisivos — no es algo para asumir.
+
+**Rediseño real: el logo se sirve por un proxy same-origin, no por una
+URL firmada directa al navegador.** `GET /api/organizations/[id]/logo`
+(la misma ruta ya descrita en "Ruta de API") no devuelve JSON con un
+`logoUrl` — devuelve los **bytes de la imagen directamente**
+(`Content-Type: image/png`, sin `Cache-Control` agresivo ya que el
+logo puede reemplazarse). El servidor descarga el objeto de Storage
+él mismo (server-to-server, sin restricción CORS — CORS es una regla
+del navegador, no aplica a `fetch`/al SDK de Supabase corriendo en el
+servidor) y lo transmite de vuelta. El `<img>`/`<canvas>` del navegador
+entonces apunta a `/api/organizations/{id}/logo` — una ruta **del mismo
+origen que la app** por construcción, así que nunca puede manchar el
+canvas y `crossOrigin`/CORS deja de ser una pregunta abierta. Esto
+también simplifica la detección de "no hay logo todavía": el cliente ya
+no necesita una llamada previa para verificar existencia — un `<img>`
+apuntando a esa ruta dispara su `onError` de forma nativa si el
+servidor responde `404`, sin lógica adicional. Tras subir un logo
+nuevo, el cliente vuelve a apuntar el `<img>` a la misma ruta con un
+parámetro de cache-busting (`?t=${Date.now()}`) para forzar que el
+navegador no sirva la versión anterior desde caché. Los creativos del
+usuario (`File` locales, nunca network) no tienen este problema en
+absoluto — solo el logo, por venir de una ruta que internamente toca
+Storage.
 
 **Corrección tras revisión de Codex CLI ronda 1 (gap real de testing),
 ampliada en ronda 2 (jsdom tampoco "carga" imágenes de verdad):**
@@ -184,12 +201,12 @@ exportación de ZIP también necesita mockear
 `computeLogoPlacement` se prueba aparte, sin ningún mock, como función
 pura.
 - `lib/logo-studio/export-zip.ts` — envuelve `jszip` (dependencia nueva) para empaquetar N blobs en un ZIP y disparar la descarga (`URL.createObjectURL` + un `<a download>` sintético — patrón estándar, sin librería adicional).
-- `app/api/organizations/[id]/logo/route.ts` — `POST` (subir/reemplazar) y `GET` (obtener URL firmada actual, o 404 si no hay logo todavía). Mismo patrón de auth/scoping por organización que las demás rutas de `app/api/organizations/`.
+- `app/api/organizations/[id]/logo/route.ts` — `POST` (subir/reemplazar) y `GET` (proxy same-origin que transmite los bytes de la imagen directamente — ver "canvas tainted por CORS" arriba para el porqué —, o `404` si no hay logo todavía). Mismo patrón de auth/scoping por organización que las demás rutas de `app/api/organizations/`.
 - `supabase/migrations/0018_organization_logos_bucket.sql` — crea el bucket `organization-logos` (privado, igual que `content-assets`) + políticas RLS equivalentes a las de ese bucket, escopeadas por organización.
 
 ### Persistencia del logo — sin tabla nueva (decisión YAGNI)
 
-El logo de cada organización vive en una ruta **fija y predecible**: `{organization_id}/logo.png` dentro del bucket `organization-logos`, con `upsert: true` (a diferencia de `content-assets`, que es inmutable — un logo sí debe poder reemplazarse). No hace falta una tabla ni columna nueva para "saber" si una organización tiene logo: el cliente simplemente intenta `createSignedUrl` sobre esa ruta fija; un error de "objeto no encontrado" se interpreta como "todavía no hay logo" (estado inicial normal, no un error real). Esto evita una migración con tabla nueva para lo que es fundamentalmente un mapeo 1:1 organización→archivo ya expresable por convención de ruta — pero **sí** hace falta una migración para el bucket y sus políticas RLS.
+El logo de cada organización vive en una ruta **fija y predecible**: `{organization_id}/logo.png` dentro del bucket `organization-logos`, con `upsert: true` (a diferencia de `content-assets`, que es inmutable — un logo sí debe poder reemplazarse). No hace falta una tabla ni columna nueva para "saber" si una organización tiene logo: el servidor (dentro de la ruta de API, no el cliente directamente — ver el rediseño de proxy same-origin arriba) intenta `.download(path)` sobre esa ruta fija; un error de "objeto no encontrado" se interpreta como "todavía no hay logo" (estado inicial normal, no un error real — responde `404`, que el `<img onError>` del cliente maneja de forma nativa). Esto evita una migración con tabla nueva para lo que es fundamentalmente un mapeo 1:1 organización→archivo ya expresable por convención de ruta — pero **sí** hace falta una migración para el bucket y sus políticas RLS.
 
 **Políticas RLS del bucket nuevo — corrección tras revisión de Codex CLI ronda 1 (las de `content-assets` no son reutilizables tal cual):** las políticas de `content-assets` esperan una ruta de 3 segmentos y una fila coincidente en `public.assets` — esta ruta es de 2 segmentos y no tiene tabla asociada, así que las políticas se escriben desde cero (reutilizando las mismas funciones Postgres ya existentes, `is_organization_member`/`has_organization_role`, no reinventándolas), y a diferencia de `content-assets` (que nunca se reemplaza, `upsert: false`) esta sí necesita una política `UPDATE` explícita para el reemplazo:
 
@@ -239,12 +256,12 @@ Lectura abierta a cualquier miembro de la organización (ver el logo actual no e
 - `POST` (subir/reemplazar): `Content-Type: multipart/form-data`, no JSON — se lee vía `request.formData()`, no `request.text()`/`JSON.parse`.
   **Contrato concreto — corrección tras revisión de Codex CLI ronda 2 (faltaba especificar):**
   - Campo del FormData: `formData.get("logo")` (un solo `File`).
-  - Respuesta exitosa: `{ logoUrl: string }` (la URL firmada recién generada tras la subida, `200`).
+  - Respuesta exitosa: `{ success: true }` (`200`) — **corrección tras revisión de Codex CLI ronda 3:** ya no `{ logoUrl }` con una URL firmada, porque `GET` ahora es un proxy same-origin (ver rediseño arriba), no devuelve una URL para que el cliente la use directamente. Tras un `POST` exitoso, el cliente vuelve a apuntar su `<img>` a `GET /api/organizations/{id}/logo?t=${Date.now()}` (cache-busting) para ver el logo nuevo.
   - Límite de tamaño: **5 MB** por archivo (cota de seguridad, advisory, igual que el límite de 30 creativos — la revisión de plan puede ajustarlo).
   - Validación server-side del PNG — **corrección tras revisión de Codex CLI ronda 2 (no basta con MIME declarado):** valida la firma real de bytes del archivo (los 8 bytes mágicos de PNG: `89 50 4E 47 0D 0A 1A 0A`), no el `file.type` del `FormData` (controlado por el cliente, falsificable) ni la extensión del nombre. Al subir a Storage, se fuerza siempre `contentType: "image/png"` explícito — nunca se reenvía ciegamente el `file.type` recibido.
   - Códigos de error: `400 INVALID_ORGANIZATION_ID` (UUID inválido), `401 AUTHENTICATION_REQUIRED`, `403 ORGANIZATION_ACCESS_DENIED` (no es owner), `404 ORGANIZATION_NOT_FOUND`, `413 REQUEST_TOO_LARGE`, `422 INVALID_LOGO_FORMAT` (no es un PNG real, falla la validación de firma de bytes), `503 LOGO_UPLOAD_FAILED` (falla real de Storage).
   - Rol requerido: `canManageConnections(membership.role)` (owner-únicamente — reutilizada tal cual de `lib/organizations/permissions.ts`, mismo patrón que `profile/route.ts:222` aplica `canEditCampaign` solo en su handler de escritura; el nombre "connections" referencia el caso de uso original de Meta OAuth, pero la restricción real que expresa — owner-únicamente para configuración a nivel organización — aplica igual de bien aquí; no se crea una función de permiso nueva solo para diferenciar el nombre, sería una duplicación sin diferencia funcional).
-- `GET` (obtener la URL firmada actual): sin gate de rol adicional más allá de la membership — cualquier miembro puede ver el logo actual. Respuesta exitosa: `{ logoUrl: string }` (`200`). Debe distinguir explícitamente "no hay logo todavía" (`404 LOGO_NOT_CONFIGURED` — un estado esperado, no un fallo, detectado por el código de error tipado que devuelve el SDK de Supabase Storage al pedir una URL firmada de un objeto inexistente, no por adivinar a partir de un mensaje de texto) de un error real de Storage (`503 LOGO_LOOKUP_FAILED`).
+- `GET` (proxy same-origin de los bytes de la imagen — ver rediseño arriba): sin gate de rol adicional más allá de la membership — cualquier miembro puede ver el logo actual. Respuesta exitosa: el binario de la imagen, `Content-Type: image/png`, `200`. Internamente llama `storage.from('organization-logos').download(path)`. Debe distinguir explícitamente "no hay logo todavía" (`404 LOGO_NOT_CONFIGURED` — un estado esperado, no un fallo — el `<img onError>` del cliente lo interpreta como "sin logo", no como una falla) de un error real de Storage (`503 LOGO_LOOKUP_FAILED`). **Corrección tras revisión de Codex CLI ronda 3 (predicado vago):** el objeto `error` que devuelve `.download()` del SDK de Supabase Storage debe inspeccionarse para el caso específico de "objeto no encontrado" (en versiones recientes del SDK, vía `error.name`/`error instanceof StorageUnknownError` con un `status`/`statusCode` de 404, o el mensaje literal que use la versión instalada) — el valor exacto a verificar contra `@supabase/supabase-js` de este proyecto durante la implementación (no se fija aquí un string que podría no coincidir con la versión real instalada); cualquier otro error se trata como `503`.
 
 ### Contexto de organización activa — corrección tras revisión de Codex CLI ronda 2 (gap real, no especificado)
 
@@ -254,6 +271,21 @@ El `<OrganizationSwitcher />` que `app-shell.tsx` renderiza automáticamente en 
 3. Renderiza su propia instancia de `<OrganizationSwitcher organizations={...} activeOrganizationId={...} onOrganizationChange={setActiveOrganizationId} />`, separada del widget global del `app-shell`.
 
 `app/(app)/tools/logo-studio/page.tsx` sigue exactamente este mismo patrón (no se inventa uno nuevo): resuelve `activeOrganizationId` por su cuenta, y cuando cambia (el usuario elige otra organización desde el switcher local de esta página), se re-dispara el `GET` del logo actual — así nunca se queda mostrando el logo de una organización distinta a la seleccionada.
+
+**Corrección tras revisión de Codex CLI ronda 3 (bug real: dos
+switchers a la vez):** el `<main>` de `app-shell.tsx` renderiza el
+switcher global automáticamente en cualquier página donde
+`hasSupabaseBrowserConfig() && pathname !== "/onboarding" &&
+!pathname.startsWith("/onboarding/") &&
+!pathname.startsWith("/settings/organizations")` — esa condición
+**no excluye** `/tools/logo-studio`, así que sin un cambio ahí, Logo
+Studio mostraría el switcher global (pasivo, sin callback) **y** el
+switcher local de esta página (con callback) al mismo tiempo — dos
+selectores redundantes, y cambiar el global no actualizaría el estado
+local de la página. Se agrega
+`!pathname.startsWith("/tools/logo-studio")` a esa misma condición en
+`app-shell.tsx`, exactamente el mismo patrón de exclusión que ya existe
+para `/settings/organizations` — no un mecanismo nuevo.
 
 ### Navegación
 
@@ -306,9 +338,21 @@ original — `foto.webp` de entrada se escribe como `foto.jpg` en el ZIP
 original), o el archivo resultante mentiría sobre su propio contenido
 byte a byte.
 
-### URL firmada del logo — expiración durante la sesión (tradeoff aceptado)
+**Orden correcto — corrección tras revisión de Codex CLI ronda 3 (bug
+real, no cosmético):** la detección de colisiones debe correr **después**
+de convertir cada nombre a su extensión de salida final, no sobre los
+nombres originales. Si se detectaran colisiones primero (sobre
+`foto.webp` y `foto.jpg`, dos nombres originales distintos, sin
+colisión aparente) y solo después se convirtiera la extensión, ambos
+terminarían como `foto.jpg` sin que la deduplicación los hubiera
+detectado — exactamente la colisión silenciosa que este mecanismo
+existe para evitar. `export-zip.ts` primero calcula el nombre de salida
+final de cada archivo (extensión según `outputFormat`), y solo entonces
+aplica la deduplicación sobre esa lista ya convertida.
 
-Igual que `content-assets`, la URL firmada del logo se re-obtiene en cada carga de página (sin caché especial) — si expira mientras la página sigue abierta (10 minutos), el `<img>` del logo dejaría de cargar hasta refrescar. Se acepta este tradeoff deliberadamente por consistencia con el patrón ya establecido, en vez de construir un mecanismo de renovación automática solo para este caso — la ventana de 10 minutos es suficiente para una sesión típica de "revisar/reemplazar el logo y seguir".
+### Sin URL firmada expuesta al cliente (obsoleto tras el rediseño de ronda 3)
+
+A diferencia de `content-assets` (donde el cliente sí recibe y usa una URL firmada con expiración de 10 minutos), el rediseño de proxy same-origin de la sección "canvas tainted por CORS" arriba elimina esta preocupación por completo: el navegador nunca ve una URL firmada de Supabase — solo `/api/organizations/{id}/logo`, una ruta propia de la app sin expiración. Cada request a esa ruta resuelve el objeto de Storage server-side, en el momento, sin caché de por medio.
 
 ## Manejo de errores
 
@@ -320,7 +364,8 @@ Igual que `content-assets`, la URL firmada del logo se re-obtiene en cada carga 
 ## Testing
 
 - `computeLogoPlacement()` (lib/logo-studio/compose.ts): tests puros por cada una de las 4 esquinas, tamaños/márgenes distintos, un caso de aspect ratio no cuadrado del logo (confirma que se preserva), el clamp de tamaño extremo (logo muy alto/angosto en `sizePercent` máximo no excede el creativo en ninguna dimensión), y el guard nuevo de `logoNaturalWidth`/`logoNaturalHeight` en `0` (lanza, no divide por cero — hallazgo de ronda 2).
-- `compositeToBlob()`: tests con `HTMLCanvasElement.prototype.getContext`/`toBlob` mockeados y objetos `{ naturalWidth, naturalHeight }` castedos como `HTMLImageElement` en vez de instancias reales de `Image` (jsdom no las decodifica — hallazgo de ronda 2); confirma que el `drawImage` mockeado recibe las coordenadas que predice `computeLogoPlacement`, y que el nombre de archivo final usa la extensión de `outputFormat`, no la del archivo de entrada (WEBP → `.jpg`).
+- `compositeToBlob()`: tests con `HTMLCanvasElement.prototype.getContext`/`toBlob` mockeados y objetos `{ naturalWidth, naturalHeight }` castedos como `HTMLImageElement` en vez de instancias reales de `Image` (jsdom no las decodifica — hallazgo de ronda 2); confirma que el `drawImage` mockeado recibe las coordenadas que predice `computeLogoPlacement`. **Corrección tras revisión de Codex CLI ronda 3:** `compositeToBlob()` no recibe ni devuelve ningún nombre de archivo (solo un `Blob`) — la aserción sobre la extensión final (WEBP → `.jpg`) no le corresponde a este test, sino al de `export-zip.ts` (ver abajo), que es quien combina cada `Blob` con su nombre de salida.
 - Test de API route (`app/api/organizations/[id]/logo/route.ts`): auth/scoping por organización (un usuario no puede subir/leer el logo de otra organización), rol `owner`-únicamente para `POST` (un `editor`/`viewer` recibe `403`), `upsert` permite reemplazar, `GET` sin logo previo responde `404 LOGO_NOT_CONFIGURED` distinguible de un `503` real, subida con bytes que no son un PNG real responde `422 INVALID_LOGO_FORMAT` aunque el `Content-Type` declarado diga `image/png`.
-- Test de componente: `CreativeBatchDropzone` acepta múltiples archivos, rechaza tipos no soportados; `LogoUploadPanel` rechaza un logo no-PNG; el flujo completo (cargar logo + N creativos + exportar) dispara la descarga del ZIP con el número correcto de archivos dentro (se puede inspeccionar el `Blob` del ZIP generado con `jszip` mismo, en el test, para confirmar cuántas entradas tiene; requiere mockear `URL.createObjectURL`/`URL.revokeObjectURL`, no implementados de forma útil en jsdom — hallazgo de ronda 2); cambiar de organización en el switcher local de la página vuelve a pedir el logo de la nueva organización activa (hallazgo de ronda 2).
+- `export-zip.ts` (nuevo bullet, corrección tras revisión de Codex CLI ronda 3 — la aserción de extensión vivía en el bullet equivocado): dado un nombre original `foto.webp` con `outputFormat: "image/jpeg"`, el nombre final dentro del ZIP es `foto.jpg`, no `foto.webp`; dos archivos que colisionan solo DESPUÉS de convertir su extensión (`foto.webp` y `foto.jpg` de entrada, ambos con salida JPEG) se deduplican correctamente (`foto.jpg`, `foto-2.jpg`) — prueba explícita del orden correcto (conversión de extensión antes que deduplicación).
+- Test de componente: `CreativeBatchDropzone` acepta múltiples archivos, rechaza tipos no soportados; `LogoUploadPanel` rechaza un logo no-PNG; el flujo completo (cargar logo + N creativos + exportar) dispara la descarga del ZIP con el número correcto de archivos dentro (se puede inspeccionar el `Blob` del ZIP generado con `jszip` mismo, en el test, para confirmar cuántas entradas tiene; requiere mockear `URL.createObjectURL`/`URL.revokeObjectURL`, no implementados de forma útil en jsdom — hallazgo de ronda 2); cambiar de organización en el switcher local de la página vuelve a pedir el logo de la nueva organización activa (hallazgo de ronda 2); solo se renderiza un switcher de organización en esta página, no dos (hallazgo de ronda 3).
 - Test de `app-shell.tsx`: el nuevo link "Logo Studio" aparece con el ícono `image`; el layout flex-column (portado desde la rama de navegación) no solapa el panel "Estado del sistema" con las 7 entradas de nav de esta rama — replicar el mismo test/verificación manual en navegador que encontró el bug original (verificación visual real en navegador, no una aserción jsdom — jsdom no renderiza layout/posicionamiento CSS real).
