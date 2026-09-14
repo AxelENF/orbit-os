@@ -116,18 +116,35 @@ usuario acaba de soltar una imagen y está esperando.
    cambia de creativo) no podría reemplazar las sugerencias de la primera
    — quedarían atrapadas como "current" para siempre.
 
-   Se necesita rastrear procedencia, no solo presencia: un estado paralelo
-   `suggestedFields: Partial<Record<keyof FormState, true>>` que marca qué
-   campos tienen actualmente un valor **sugerido y no editado por el
-   usuario**. `contentType` y `objective` arrancan marcados como
-   sugeridos (`true`) desde `initialState` aunque no estén vacíos, porque
-   su valor inicial es un default de la UI, no una decisión del usuario.
-   Al aplicar una respuesta de `/api/content/suggestions`, un campo se
-   sobrescribe si `!current[field] || suggestedFields[field]` — vacío, o
-   todavía en estado "sugerido sin tocar". Cualquier edición manual del
-   usuario (los `onChange` existentes de cada input) limpia
-   `suggestedFields[field]` de inmediato, así una sugerencia posterior (de
-   una segunda imagen) nunca pisa algo que el usuario ya decidió a mano.
+   **Segunda corrección, tras revisión de Codex CLI ronda 2:** la primera
+   versión de esta sección marcaba `suggestedFields[field] = false` al
+   editar — pero eso hace que `!current[field]` vuelva a ser cierto en
+   cuanto el usuario borra el campo a mano (lo deja vacío a propósito), y
+   una sugerencia posterior lo volvería a llenar — justo lo que se quería
+   evitar. La procedencia necesita ser un trinquete de un solo sentido, no
+   un booleano que se puede revertir:
+
+   Un `Set<keyof FormState>` llamado `userEditedFields` — una vez que un
+   campo entra a este set, **nunca vuelve a salir**, sin importar que el
+   usuario lo deje vacío. Cualquier `onChange` disparado por tipeo directo
+   del usuario agrega el campo al set, incluso si el resultado es una
+   cadena vacía. Al aplicar una respuesta de `/api/content/suggestions`,
+   un campo se sobrescribe si **y solo si** `!userEditedFields.has(field)`
+   — nunca ha sido tocado a mano — **y** el valor sugerido no es `null`
+   (una sugerencia ausente para un campo nunca escribe `null` sobre un
+   valor existente ni sobre el vacío; simplemente no toca ese campo).
+   `contentType`/`objective` no necesitan ningún truco de inicialización
+   especial con este modelo — su valor inicial no vacío es irrelevante
+   para la condición, que ahora depende solo de si el usuario los tocó.
+
+   Esto también resuelve la precedencia con los defaults de AIAS
+   (`applyProfile()`, ya existente): ese efecto pre-llena `niche`, `cta`,
+   `humanDescription`, etc. sin agregar nada a `userEditedFields` — son un
+   punto de partida genérico, no una decisión del usuario. Una sugerencia
+   de la imagen (más específica que el perfil de la organización) puede
+   reemplazarlos libremente, exactamente el orden de precedencia correcto:
+   AIAS (genérico) → imagen (específico) → usuario (final), y solo el
+   último es irreversible.
 
    Se muestra un banner "✨ Sugerido por tu imagen — revisa antes de
    continuar", separado del banner existente de AIAS.
@@ -184,10 +201,18 @@ sentirse instantáneo, no esperar un ciclo de encolado. La carrera real que
 esto acepta: si dos sugerencias del mismo organization_id se disparan casi
 al mismo tiempo (dos pestañas, dos campañas creándose a la vez), ambas
 podrían pasar el chequeo de presupuesto antes de que cualquiera registre
-su gasto, permitiendo exceder el límite mensual. El blast radius está
-acotado por `SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD` (default
-`0.01` USD) — en el peor caso, el presupuesto se excede por el costo de
-una llamada barata, no por una generación de copy completa. Si esto deja
+su gasto, permitiendo exceder el límite mensual. **Corrección tras revisión de Codex CLI ronda
+2:** el sobregasto NO está acotado a una sola llamada — escala con el
+número de solicitudes concurrentes del mismo organization_id que pasan el
+chequeo antes de que cualquiera registre su gasto (tres pestañas
+subiendo campañas al mismo tiempo → hasta 3× el costo de una llamada, no
+1×). Lo que sí sigue acotado es el costo *por solicitud*
+(`SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD`, default `0.01` USD) — el
+escenario completo requiere varias personas de la misma organización
+creando campañas en la misma ventana de segundos, y aun así el
+sobregasto total son centavos, no algo que comprometa la integridad del
+presupuesto mensual. Se acepta este riesgo con los ojos abiertos, no
+subestimado. Si esto deja
 de ser aceptable en el futuro (más de un usuario por organización subiendo
 campañas a la vez, con frecuencia), la solución es la misma reserva
 atómica de `copy-processor.ts` sobre una tabla de reservas sin FK a
@@ -228,6 +253,12 @@ con timeout, o una respuesta que no cumple el schema esperado. La
 solicitud en sí fue válida (auth correcta, archivo válido) — solo no hubo
 sugerencia que ofrecer. El formulario ya sabe tratar "sin sugerencias"
 como su estado por default.
+
+**Casos adicionales, agregados tras revisión de Codex CLI ronda 2** (la
+versión anterior no los cubría):
+- **Configuración del proveedor ausente** (falta `SNAPGAD_INTAKE_SUGGEST_OPENROUTER_MODEL`, `OPENROUTER_API_KEY`, o los precios) → `503`, mismo patrón que `ContentConfigurationError` ya usa en otras rutas de este proyecto (`INTEGRATION_NOT_CONFIGURED`) — es un error de despliegue, no algo que el usuario pueda resolver reintentando.
+- **Fallo de Supabase al leer el gasto/presupuesto mensual** (`getMonthToDateSpendUsd`/`getMonthlyBudgetUsd` lanzan) → se trata igual que "sin margen de presupuesto": `200` con `suggestions: null`. No tiene sentido bloquear el llenado del formulario porque una lectura de solo-consulta falló; el peor caso es simplemente no ofrecer sugerencia esa vez.
+- **Fallo al registrar el gasto DESPUÉS de una respuesta real de OpenRouter** (`record_interactive_ai_usage` lanza) — este es el caso que sí importa: ya se incurrió en un costo real. No se descarta la sugerencia ya pagada (se regresa `200` con las sugerencias reales igual), pero el fallo de registro se loguea con `console.error` en el servidor (mismo patrón que otros errores no fatales de este proyecto) para que quede visible operacionalmente — un gasto de $0.01 sin registrar no amerita fallarle la solicitud al usuario, pero tampoco debe desaparecer en silencio sin que nadie se entere.
 ```
 
 **Cómo se manda la imagen sin persistirla** (el processor de copy usa una
@@ -252,6 +283,12 @@ inventado para este endpoint.
   del formulario (hoy está dentro de la tercera sección) — es la acción
   que dispara todo lo demás, debe ser lo primero que el usuario toca. Las
   demás secciones no cambian de orden entre sí.
+- `userEditedFields` y los valores del formulario deben vivir en una sola
+  estructura de estado (o actualizarse dentro del mismo `setState`
+  funcional) para evitar una condición de carrera de React entre una
+  respuesta de sugerencias que llega tarde y una edición del usuario que
+  ocurre casi al mismo tiempo — detalle de implementación, no de
+  comportamiento, pero el plan debe resolverlo explícitamente.
 - Los campos que la IA no sugiere (`businessLine` y `service` si no
   vinieron de AIAS, `campaignName`, `funnelStage`, `destination`,
   `destinationValue`, `allowedFacts`) siguen exactamente igual que hoy —
