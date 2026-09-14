@@ -16,6 +16,7 @@ const navigation = [
   { href: "/review", label: "Revisión", eyebrow: "Tu aprobación", icon: "review" },
   { href: "/history", label: "Resultados", eyebrow: "Aprendizaje", icon: "results" },
   { href: "/pilot", label: "Piloto", eyebrow: "Salida real", icon: "check" },
+  { href: "/settings/organizations", label: "Configuración", eyebrow: "Organización", icon: "settings" },
 ] satisfies Array<{ href: string; label: string; eyebrow: string; icon: IconName }>;
 
 function isActive(pathname: string, href: string): boolean {
@@ -81,7 +82,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <summary className="cursor-pointer list-none text-xs font-semibold text-slate-300">Estado del sistema</summary>
           <div className="mt-3 border-t border-white/10 pt-3">
             <RuntimeMode />
-            <p className="mt-1 text-xs leading-5 text-slate-500">La publicación siempre requiere tu aprobación.</p>
+            <p className="mt-1 text-xs leading-5 text-slate-500">Publicamos automático cuando el diagnóstico no marca riesgo; si lo marca, pedimos tu aprobación.</p>
           </div>
         </details>
       </aside>
