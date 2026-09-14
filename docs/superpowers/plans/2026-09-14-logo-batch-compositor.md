@@ -1166,20 +1166,18 @@ describe("LogoUploadPanel", () => {
 
   it("rejects a non-PNG file client-side without calling the API", async () => {
     vi.stubGlobal("fetch", vi.fn());
-    const user = userEvent.setup();
     render(<LogoUploadPanel organizationId="org-1" />);
-    const input = screen.getByLabelText(/subir logo/i);
+    const input = screen.getByLabelText(/subir logo/i) as HTMLInputElement;
     const jpegFile = new File(["fake"], "logo.jpg", { type: "image/jpeg" });
-    // Corrección ronda 1 (hallazgo real): userEvent.upload() por defecto
-    // respeta el atributo `accept` del input y filtra el archivo ANTES de
-    // disparar el evento — el input tiene accept="image/png", así que sin
-    // { applyAccept: false } este test nunca llegaría a ejercer la
-    // validación propia del componente, solo probaría el filtrado nativo
-    // del navegador (que userEvent simula). Verificar `applyAccept` contra
-    // la versión instalada de @testing-library/user-event; si no existe
-    // esa opción en la versión real, usa fireEvent.change(input, { target:
-    // { files: [jpegFile] } }) en su lugar para saltarte el filtro.
-    await user.upload(input, jpegFile, { applyAccept: false });
+    // Corrección ronda 2 del plan review (Issue 5 seguía roto): en
+    // @testing-library/user-event@14.6.7, `applyAccept` NO es una opción
+    // del método de instancia `.upload(element, file, options)` — es una
+    // opción de `userEvent.setup({ applyAccept: false })`. Pasarla como
+    // tercer argumento de `.upload()` no tiene efecto y el archivo se
+    // sigue filtrando por el atributo `accept="image/png"` del input
+    // antes de disparar el evento cambio.
+    const user = userEvent.setup({ applyAccept: false });
+    await user.upload(input, jpegFile);
     expect(screen.getByText(/debe ser un png/i)).toBeInTheDocument();
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -1298,7 +1296,7 @@ Expected: limpio.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add components/logo-studio/logo-upload-panel.tsx components/logo-studio/logo-upload-panel.test.tsx
+git add package.json package-lock.json components/logo-studio/logo-upload-panel.tsx components/logo-studio/logo-upload-panel.test.tsx
 git commit -m "feat: add logo upload panel"
 ```
 
@@ -1340,13 +1338,14 @@ describe("CreativeBatchDropzone", () => {
 
   it("rejects a file with an unsupported type", async () => {
     const onFilesChange = vi.fn();
-    const user = userEvent.setup();
     render(<CreativeBatchDropzone onFilesChange={onFilesChange} />);
     const input = screen.getByLabelText(/cargar creativos/i);
-    // Corrección ronda 1 (mismo hallazgo que Task 7): sin
-    // { applyAccept: false }, userEvent filtra el PDF antes de disparar
-    // el evento, y este test nunca ejercería la validación de react-dropzone.
-    await user.upload(input, new File(["a"], "a.pdf", { type: "application/pdf" }), { applyAccept: false });
+    // Corrección ronda 2 del plan review (mismo hallazgo que Task 7):
+    // `applyAccept` va en `userEvent.setup(...)`, no como tercer
+    // argumento de `.upload()` — ahí no tiene efecto en
+    // @testing-library/user-event@14.6.7.
+    const user = userEvent.setup({ applyAccept: false });
+    await user.upload(input, new File(["a"], "a.pdf", { type: "application/pdf" }));
     expect(screen.getByText(/tipo de archivo no soportado/i)).toBeInTheDocument();
   });
 
@@ -1669,10 +1668,19 @@ describe("CompositePreview", () => {
     await waitFor(() => expect(screen.getByRole("img", { name: /preview/i })).toBeInTheDocument());
 
     rerender(<CompositePreview creativeFile={fileB} logoImageUrl="/logo" options={{ corner: "bottom-right", sizePercent: 15, marginPercent: 4 }} />);
-    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("img", { name: /preview/i })).toBeInTheDocument());
 
+    // Corrección ronda 2 del plan review (Issue 7 — test no hermético):
+    // para el reemplazo de fileA por fileB ya ocurrieron 2 revocaciones
+    // (la URL intermedia del creativo de fileA, y la del preview
+    // compuesto anterior) — comprobar `>= 2` DESPUÉS de desmontar no
+    // probaba que el cleanup de unmount específicamente corriera, porque
+    // ya se cumplía antes de llamar unmount(). Se captura el conteo justo
+    // antes de desmontar y se exige que aumente en exactamente 1 —
+    // la única revocación que puede venir del cleanup de unmount.
+    const callsBeforeUnmount = revokeObjectURL.mock.calls.length;
     unmount();
-    expect(revokeObjectURL.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(revokeObjectURL.mock.calls.length).toBe(callsBeforeUnmount + 1);
   });
 });
 ```
@@ -1712,16 +1720,28 @@ export function CompositePreview({
     }
     let cancelled = false;
     setHasError(false);
+    // Corrección ronda 2 del plan review: limpia el preview anterior de
+    // inmediato al empezar una carga nueva — antes se quedaba mostrando
+    // la imagen VIEJA mientras la nueva componía, en vez de pasar a
+    // "Generando preview…" de una vez.
+    setPreviewUrl(null);
 
     async function render() {
       const creativeImage = new Image();
       const logoImage = new Image();
       const creativeUrl = URL.createObjectURL(creativeFile!);
-      await Promise.all([
-        new Promise<void>((resolve, reject) => { creativeImage.onload = () => resolve(); creativeImage.onerror = reject; creativeImage.src = creativeUrl; }),
-        new Promise<void>((resolve, reject) => { logoImage.onload = () => resolve(); logoImage.onerror = reject; logoImage.src = logoImageUrl; }),
-      ]);
-      URL.revokeObjectURL(creativeUrl);
+      try {
+        await Promise.all([
+          new Promise<void>((resolve, reject) => { creativeImage.onload = () => resolve(); creativeImage.onerror = reject; creativeImage.src = creativeUrl; }),
+          new Promise<void>((resolve, reject) => { logoImage.onload = () => resolve(); logoImage.onerror = reject; logoImage.src = logoImageUrl; }),
+        ]);
+      } finally {
+        // Corrección ronda 2 (fuga real de recursos): revocar SIEMPRE,
+        // incluso si una de las dos cargas falla — la versión anterior
+        // solo revocaba en el camino feliz, dejando el blob: URL vivo si
+        // el logo (o el creativo) fallaba al cargar.
+        URL.revokeObjectURL(creativeUrl);
+      }
       if (cancelled) return;
 
       const blob = await compositeToBlob(creativeImage, logoImage, options, "image/png");
@@ -1815,6 +1835,7 @@ en este task, ninguno cosmético:**
 /** @vitest-environment jsdom */
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/logo-studio/export-zip", () => ({
@@ -1878,56 +1899,87 @@ describe("LogoStudioPage", () => {
 
   it("remounts the logo panel (and its stale hasLogo state) when the active organization changes", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(organizationsResponse()));
+    const user = userEvent.setup();
     render(<LogoStudioPage />);
     await screen.findByText(/SnapGad/i);
 
     const img1 = screen.getByRole("img", { name: /logo/i, hidden: true }) as HTMLImageElement;
     expect(img1.src).toContain("/api/organizations/org-1/logo");
 
-    await waitFor(() => screen.getByLabelText("Organización activa"));
-    (screen.getByLabelText("Organización activa") as HTMLSelectElement).value = "org-2";
+    // Corrección ronda 2 del plan review (Issue 8 — test efectivamente
+    // vacío): asignar `.value` directamente no dispara `onChange` en un
+    // <select> controlado de React — `userEvent.selectOptions` sí dispara
+    // el evento real que OrganizationSwitcher escucha.
+    await user.selectOptions(screen.getByLabelText("Organización activa"), "org-2");
 
-    // La aserción exacta del disparo de cambio depende de cómo se conecte
-    // el OrganizationSwitcher local — como mínimo, tras seleccionar
-    // "org-2", el <img> del logo debe apuntar a
-    // /api/organizations/org-2/logo, nunca seguir en org-1.
+    await waitFor(() => {
+      const img2 = screen.getByRole("img", { name: /logo/i, hidden: true }) as HTMLImageElement;
+      expect(img2.src).toContain("/api/organizations/org-2/logo");
+      expect(img2.src).not.toContain("org-1");
+    });
   });
 
   it("exports successfully composited creatives even when one fails to load, instead of aborting the whole ZIP (Promise.allSettled, not Promise.all)", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(organizationsResponse()));
     vi.stubGlobal("Image", FakeImage);
-    vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn().mockReturnValue("blob:fake"), revokeObjectURL: vi.fn() });
+    // Corrección ronda 2 del plan review (Issue 8 — el mock anterior no
+    // podía funcionar): createObjectURL devolvía siempre el mismo string
+    // "blob:fake" sin importar el archivo, así que FakeImage nunca podía
+    // distinguir cuál era "corrupt". Aquí la URL incluye el nombre del
+    // archivo, que es justo lo que FakeImage.src revisa.
+    const createObjectURL = vi.fn((file: File) => `blob:${file.name}`);
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+    const user = userEvent.setup();
     render(<LogoStudioPage />);
     await screen.findByText(/SnapGad/i);
 
-    // Simula que CreativeBatchDropzone ya entregó 2 archivos, uno "corrupto"
-    // (su Image simulada dispara onerror por el nombre) — la forma exacta
-    // de inyectar esto depende de cómo quede estructurado el estado del
-    // page; ajusta esta parte de la prueba a la implementación real,
-    // pero la aserción final no debe cambiar:
-    // await user.upload(dropzoneInput, [goodFile, corruptFile]);
-    // await user.click(screen.getByRole("button", { name: /exportar/i }));
+    const goodFile = new File(["a"], "good.png", { type: "image/png" });
+    const corruptFile = new File(["b"], "corrupt.png", { type: "image/png" });
+    await user.upload(screen.getByLabelText(/cargar creativos/i), [goodFile, corruptFile]);
+    await user.click(screen.getByRole("button", { name: /exportar/i }));
 
-    // await waitFor(() => expect(buildLogoStudioZip).toHaveBeenCalledWith(
-    //   expect.arrayContaining([expect.objectContaining({ originalFilename: "good.png" })]),
-    // ));
-    // expect(buildLogoStudioZip).toHaveBeenCalledWith(
-    //   expect.not.arrayContaining([expect.objectContaining({ originalFilename: "corrupt.png" })]),
-    // );
-    // expect(screen.getByText(/no se pudo procesar/i)).toBeInTheDocument(); // error visible, no silencioso
+    await waitFor(() => expect(buildLogoStudioZip).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ originalFilename: "good.png" })]),
+    ));
+    expect(buildLogoStudioZip).toHaveBeenCalledWith(
+      expect.not.arrayContaining([expect.objectContaining({ originalFilename: "corrupt.png" })]),
+    );
+    // Error visible, no silencioso — contradiría el manejo de errores de la spec.
+    expect(await screen.findByText(/no se pudo procesar/i)).toHaveTextContent("corrupt.png");
+  });
+
+  it("shows a visible error (not a silent rejected promise) when the logo itself fails to load during export", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(organizationsResponse()));
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn((file: File) => `blob:${file.name}`), revokeObjectURL: vi.fn() });
+    const user = userEvent.setup();
+    render(<LogoStudioPage />);
+    await screen.findByText(/SnapGad/i);
+    // El proxy de logo de esta organización no existe (404) — se simula
+    // haciendo que la URL del logo contenga "corrupt" para que FakeImage
+    // dispare onerror también para el logo, no solo para creativos.
+    // (Ajusta si el mock de logoImageUrl real no incluye ese string —
+    // lo importante es forzar que la CARGA DEL LOGO específicamente
+    // falle, no un creativo.)
+
+    await user.upload(screen.getByLabelText(/cargar creativos/i), new File(["a"], "good.png", { type: "image/png" }));
+    await user.click(screen.getByRole("button", { name: /exportar/i }));
+
+    // Corrección ronda 2 del plan review (bug real, Issue nuevo): el botón
+    // llama `() => void handleExport()` — sin un try/catch de nivel
+    // superior en handleExport, un rechazo aquí (falla del logo, o de
+    // buildLogoStudioZip) desaparece en silencio, sin ningún mensaje
+    // visible. Debe aparecer un error, no un cuelgue silencioso.
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
   });
 });
 ```
 
-(Los dos últimos tests quedan con partes comentadas — completa la
-interacción real con `CreativeBatchDropzone` (Task 8) durante la
-implementación, una vez que sepas cómo el page conecta
-`onFilesChange` con su propio estado. Las aserciones finales (no
-comentadas) son las que debes cumplir: cambiar de organización actualiza
-el `<img>` del logo, y un creativo corrupto no aborta el export completo
-ni desaparece en silencio. No dejes ninguno de los dos tests
-efectivamente vacío en el commit final — es el hallazgo directo de
-ronda 1 del plan review.)
+(Ajusta el detalle exacto de cómo se fuerza el fallo del logo en el
+último test una vez que conozcas la forma final de `logoImageUrl` en la
+implementación — lo que no debe cambiar es la aserción final: cualquier
+fallo no capturado dentro de `handleExport` debe terminar en un mensaje
+visible, nunca en una promesa rechazada sin manejar.)
 
 - [ ] **Step 2: Confirmar que falla**
 
@@ -1972,9 +2024,17 @@ export default function LogoStudioPage() {
   const [options, setOptions] = useState<CompositeOptions>({ corner: "bottom-right", sizePercent: 15, marginPercent: 4 });
   const [isExporting, setIsExporting] = useState(false);
   const [exportFailures, setExportFailures] = useState<ExportFailure[]>([]);
+  // Corrección ronda 2 (recomendación aplicada): error de nivel superior,
+  // distinto de exportFailures (que es por creativo) — cubre fallos que
+  // no son culpa de ningún archivo individual (el logo mismo no carga, o
+  // buildLogoStudioZip falla).
+  const [topLevelExportError, setTopLevelExportError] = useState<string | null>(null);
   // Corrección ronda 1: contador de cache-bust compartido — se incrementa
   // vía LogoUploadPanel.onUploadSuccess (Task 7) para que CompositePreview
   // (Task 10) también deje de usar la versión cacheada del logo anterior.
+  // Corrección ronda 2 (recomendación aplicada): contador monotónico en
+  // vez de Date.now() — evita, aunque sea de forma remota, dos subidas en
+  // el mismo milisegundo produciendo el mismo valor de cache-bust.
   const [logoCacheBust, setLogoCacheBust] = useState(0);
 
   useEffect(() => {
@@ -2000,6 +2060,15 @@ export default function LogoStudioPage() {
     if (!activeOrganizationId || !logoImageUrl || creativeFiles.length === 0) return;
     setIsExporting(true);
     setExportFailures([]);
+    setTopLevelExportError(null);
+    // Corrección ronda 2 del plan review (bug real): el botón dispara
+    // `() => void handleExport()` — sin este try/catch envolviendo TODA
+    // la función, un fallo al cargar el logo mismo o en
+    // buildLogoStudioZip rechazaba la promesa devuelta por handleExport,
+    // que el `void` del botón descarta sin más: ningún mensaje visible,
+    // contradiciendo el manejo de errores de la spec. El
+    // Promise.allSettled de abajo sigue aislando fallos POR CREATIVO
+    // (exportFailures); este try/catch cubre todo lo demás.
     try {
       const logoImage = new Image();
       await new Promise<void>((resolve, reject) => { logoImage.onload = () => resolve(); logoImage.onerror = reject; logoImage.src = logoImageUrl; });
@@ -2024,9 +2093,14 @@ export default function LogoStudioPage() {
         .map((file) => ({ filename: file.name }));
       setExportFailures(failures);
 
-      if (entries.length === 0) return; // todos fallaron, no hay nada que exportar
+      if (entries.length === 0) {
+        setTopLevelExportError("No se pudo procesar ningún creativo del lote.");
+        return;
+      }
       const zipBlob = await buildLogoStudioZip(entries);
       downloadZip(zipBlob, `snapgad-logos-${new Date().toISOString().slice(0, 10)}.zip`);
+    } catch {
+      setTopLevelExportError("No se pudo generar el ZIP. Verifica que la organización tenga un logo subido e inténtalo de nuevo.");
     } finally {
       setIsExporting(false);
     }
@@ -2055,7 +2129,7 @@ export default function LogoStudioPage() {
           <LogoUploadPanel
             key={activeOrganizationId}
             organizationId={activeOrganizationId}
-            onUploadSuccess={() => setLogoCacheBust(Date.now())}
+            onUploadSuccess={() => setLogoCacheBust((value) => value + 1)}
           />
           <CreativeBatchDropzone onFilesChange={setCreativeFiles} />
           <CompositeControls value={options} onChange={setOptions} />
@@ -2066,6 +2140,7 @@ export default function LogoStudioPage() {
           {exportFailures.length > 0 ? (
             <p role="alert">No se pudo procesar: {exportFailures.map((failure) => failure.filename).join(", ")}. El resto del lote sí se exportó.</p>
           ) : null}
+          {topLevelExportError ? <p role="alert">{topLevelExportError}</p> : null}
         </>
       ) : null}
     </div>
