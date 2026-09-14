@@ -231,7 +231,10 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
     })();
 
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- userEditedFields se lee vía userEditedFieldsRef.current dentro del callback, a propósito: no queremos re-disparar el fetch en cada edición del usuario, solo cuando cambia el archivo.
+    // userEditedFields se lee vía userEditedFieldsRef.current dentro del
+    // callback, a propósito: no queremos re-disparar el fetch en cada
+    // edición del usuario, solo cuando cambia el archivo. Una ref no
+    // necesita estar en las dependencias del efecto.
   }, [latestFile, isProductionMode]);
 
   const parsedBrief = useMemo(
