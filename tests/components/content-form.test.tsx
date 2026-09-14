@@ -177,9 +177,15 @@ describe("ContentForm", () => {
   it("sends every selected asset under the assets FormData field in production mode", async () => {
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon-key");
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ content: { id: "content-1" } }),
+    // Selecting an asset in production mode also fires the (unrelated) image
+    // suggestion request from the "image suggestion provenance" tests below —
+    // the mock has to tell that apart from the real submission by URL instead
+    // of assuming a single call.
+    const fetchMock = vi.fn().mockImplementation(async (input) => {
+      if (String(input) === "/api/content/suggestions") {
+        return jsonResponse({ suggestions: null });
+      }
+      return { ok: true, json: async () => ({ content: { id: "content-1" } }) } as Response;
     });
     vi.stubGlobal("fetch", fetchMock);
     const files = [
@@ -191,8 +197,9 @@ describe("ContentForm", () => {
     completeBriefFields(files);
     fireEvent.click(screen.getByRole("button", { name: "Generar borradores" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/content", expect.anything()));
+    const submissionCall = fetchMock.mock.calls.find(([url]) => url === "/api/content");
+    const request = submissionCall?.[1] as RequestInit;
     const body = request.body as FormData;
     expect(body.getAll("assets")).toEqual(files);
     expect(body.get("asset")).toBeNull();

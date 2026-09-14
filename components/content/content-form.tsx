@@ -193,9 +193,10 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
 
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [suggestionsApplied, setSuggestionsApplied] = useState(false);
+  const latestFile = files.at(-1) ?? null;
 
   useEffect(() => {
-    if (!asset || !isProductionMode) return;
+    if (!latestFile || !isProductionMode) return;
     let cancelled = false;
     // The loading state reflects the lifecycle of the optional request.
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -205,7 +206,7 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
     void (async () => {
       try {
         const formData = new FormData();
-        formData.append("asset", asset);
+        formData.append("asset", latestFile);
         const response = await fetch("/api/content/suggestions", { method: "POST", body: formData, credentials: "same-origin" });
         if (!response.ok || cancelled) return;
         const payload = (await response.json()) as { suggestions: Record<string, unknown> | null };
@@ -231,7 +232,7 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- userEditedFields se lee vía userEditedFieldsRef.current dentro del callback, a propósito: no queremos re-disparar el fetch en cada edición del usuario, solo cuando cambia el archivo.
-  }, [asset, isProductionMode]);
+  }, [latestFile, isProductionMode]);
 
   const parsedBrief = useMemo(
     () =>
@@ -323,6 +324,81 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
 
   return (
     <form className="space-y-6" onSubmit={handleSubmit} noValidate>
+      <section className="grid gap-6 rounded-3xl border border-white/[0.08] bg-[#091735] p-5 shadow-2xl shadow-black/10 sm:p-7 lg:grid-cols-[1.05fr_0.95fr]">
+        <div className="space-y-6">
+          <AssetDropzone isProductionMode={isProductionMode} value={files} onChange={(nextFiles) => {
+            setFiles(nextFiles);
+            setSuccess(false);
+            setSubmitError(null);
+          }} />
+
+          <div>
+            <label className="text-sm font-semibold text-slate-100" htmlFor="cta">
+              CTA <span className="text-orange-300" aria-hidden="true">*</span>
+            </label>
+            <input
+              aria-label="CTA"
+              aria-required="true"
+              aria-invalid={hasAttemptedSubmit && !state.cta.trim()}
+              aria-describedby="cta-help"
+              className={inputClasses()}
+              id="cta"
+              required
+              value={state.cta}
+              onChange={(event) => updateField("cta", event.target.value)}
+              placeholder="Ej. Escribe AGENDA por WhatsApp"
+            />
+            <p className="mt-2 text-xs leading-5 text-slate-500" id="cta-help">
+              Una sola acción clara para la persona que verá el creativo.
+            </p>
+          </div>
+        </div>
+
+        <div className="space-y-6">
+          <div>
+            <label className="text-sm font-semibold text-slate-100" htmlFor="human-description">
+              Descripción humana <span className="text-orange-300" aria-hidden="true">*</span>
+            </label>
+            <textarea
+              aria-label="Descripción humana"
+              aria-required="true"
+              aria-invalid={hasAttemptedSubmit && !state.humanDescription.trim()}
+              aria-describedby="description-help"
+              className={`${inputClasses()} min-h-32 resize-y`}
+              id="human-description"
+              required
+              value={state.humanDescription}
+              onChange={(event) => updateField("humanDescription", event.target.value)}
+              placeholder="Qué debe comunicar el creativo y para quién."
+            />
+            <p className="mt-2 text-xs leading-5 text-slate-500" id="description-help">
+              Describe el dolor, el resultado y el tipo de negocio al que va dirigido.
+            </p>
+          </div>
+
+          <div>
+            <label className="text-sm font-semibold text-slate-100" htmlFor="allowed-facts">
+              Hechos permitidos <span className="text-orange-300" aria-hidden="true">*</span>
+            </label>
+            <textarea
+              aria-label="Hechos permitidos"
+              aria-required="true"
+              aria-invalid={hasAttemptedSubmit && splitAllowedFacts(state.allowedFactsText).length === 0}
+              aria-describedby="facts-help"
+              className={`${inputClasses()} min-h-32 resize-y`}
+              id="allowed-facts"
+              required
+              value={state.allowedFactsText}
+              onChange={(event) => updateField("allowedFactsText", event.target.value)}
+              placeholder={"Un hecho por línea.\nEj. Atiende solicitudes.\nEj. Agenda citas."}
+            />
+            <p className="mt-2 text-xs leading-5 text-slate-500" id="facts-help">
+              Solo se usarán hechos escritos aquí; no agregues promesas, precios o métricas sin respaldo.
+            </p>
+          </div>
+        </div>
+      </section>
+
       <section className="rounded-3xl border border-white/[0.08] bg-[#091735] p-5 shadow-2xl shadow-black/10 sm:p-7">
         <div className="mb-6 flex flex-col gap-2 border-b border-white/10 pb-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -480,81 +556,6 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
               onChange={(value) => updateField("destinationValue", value)}
               placeholder="https://wa.me/521..."
             />
-          </div>
-        </div>
-      </section>
-
-      <section className="grid gap-6 rounded-3xl border border-white/[0.08] bg-[#091735] p-5 shadow-2xl shadow-black/10 sm:p-7 lg:grid-cols-[1.05fr_0.95fr]">
-        <div className="space-y-6">
-          <AssetDropzone isProductionMode={isProductionMode} value={files} onChange={(nextFiles) => {
-            setFiles(nextFiles);
-            setSuccess(false);
-            setSubmitError(null);
-          }} />
-
-          <div>
-            <label className="text-sm font-semibold text-slate-100" htmlFor="cta">
-              CTA <span className="text-orange-300" aria-hidden="true">*</span>
-            </label>
-            <input
-              aria-label="CTA"
-              aria-required="true"
-              aria-invalid={hasAttemptedSubmit && !state.cta.trim()}
-              aria-describedby="cta-help"
-              className={inputClasses()}
-              id="cta"
-              required
-              value={state.cta}
-              onChange={(event) => updateField("cta", event.target.value)}
-              placeholder="Ej. Escribe AGENDA por WhatsApp"
-            />
-            <p className="mt-2 text-xs leading-5 text-slate-500" id="cta-help">
-              Una sola acción clara para la persona que verá el creativo.
-            </p>
-          </div>
-        </div>
-
-        <div className="space-y-6">
-          <div>
-            <label className="text-sm font-semibold text-slate-100" htmlFor="human-description">
-              Descripción humana <span className="text-orange-300" aria-hidden="true">*</span>
-            </label>
-            <textarea
-              aria-label="Descripción humana"
-              aria-required="true"
-              aria-invalid={hasAttemptedSubmit && !state.humanDescription.trim()}
-              aria-describedby="description-help"
-              className={`${inputClasses()} min-h-32 resize-y`}
-              id="human-description"
-              required
-              value={state.humanDescription}
-              onChange={(event) => updateField("humanDescription", event.target.value)}
-              placeholder="Qué debe comunicar el creativo y para quién."
-            />
-            <p className="mt-2 text-xs leading-5 text-slate-500" id="description-help">
-              Describe el dolor, el resultado y el tipo de negocio al que va dirigido.
-            </p>
-          </div>
-
-          <div>
-            <label className="text-sm font-semibold text-slate-100" htmlFor="allowed-facts">
-              Hechos permitidos <span className="text-orange-300" aria-hidden="true">*</span>
-            </label>
-            <textarea
-              aria-label="Hechos permitidos"
-              aria-required="true"
-              aria-invalid={hasAttemptedSubmit && splitAllowedFacts(state.allowedFactsText).length === 0}
-              aria-describedby="facts-help"
-              className={`${inputClasses()} min-h-32 resize-y`}
-              id="allowed-facts"
-              required
-              value={state.allowedFactsText}
-              onChange={(event) => updateField("allowedFactsText", event.target.value)}
-              placeholder={"Un hecho por línea.\nEj. Atiende solicitudes.\nEj. Agenda citas."}
-            />
-            <p className="mt-2 text-xs leading-5 text-slate-500" id="facts-help">
-              Solo se usarán hechos escritos aquí; no agregues promesas, precios o métricas sin respaldo.
-            </p>
           </div>
         </div>
       </section>
