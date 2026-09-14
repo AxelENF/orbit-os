@@ -836,7 +836,19 @@ async function withDependencies<T>(
     download: (path: string) => supabase.storage.from("organization-logos").download(path),
     upload: (path: string, body: ArrayBuffer, options: { upsert: boolean; contentType: string }) => supabase.storage.from("organization-logos").upload(path, body, options),
   };
-  return handlerFactory(deps)(request, context);
+  // Corrección ronda 3 del plan review (bug real): el `return` anterior
+  // no tenía `await` ni try/catch propio — el try/catch de arriba solo
+  // cubre `createSupabaseServerClient()`. Un rechazo inesperado dentro
+  // del handler (p. ej. `download`/`upload`/`file.arrayBuffer()` o
+  // `context.params` lanzando algo que ninguna rama ya mapeada
+  // contempla) escapaba como una excepción sin manejar en vez de un 503
+  // limpio. Envolver también esta llamada cierra ese hueco como red de
+  // seguridad final.
+  try {
+    return await handlerFactory(deps)(request, context);
+  } catch {
+    return jsonError("LOGO_LOOKUP_FAILED", 503);
+  }
 }
 
 export async function GET(request: Request, context: RouteContext): Promise<Response> {
@@ -1950,17 +1962,37 @@ describe("LogoStudioPage", () => {
 
   it("shows a visible error (not a silent rejected promise) when the logo itself fails to load during export", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(organizationsResponse()));
-    vi.stubGlobal("Image", FakeImage);
+    // Corrección ronda 3 del plan review (Issue 6 seguía roto — el
+    // comentario anterior decía "ajusta después" sin ajustar nada):
+    // logoImageUrl es una ruta real (`/api/organizations/org-1/logo`),
+    // nunca contiene "corrupt", así que el `FakeImage` compartido nunca
+    // habría fallado para el logo. Un contador de orden de instancias
+    // tampoco sirve aquí: CompositePreview (Task 10) crea sus propias
+    // instancias de Image de forma independiente y puede adelantarse a
+    // handleExport. La señal confiable es estructural: los creativos
+    // siempre cargan desde un `blob:` URL (ver createObjectURL abajo); el
+    // logo carga directamente desde la ruta del proxy, nunca un `blob:`
+    // URL — se distingue por eso, no por contenido de texto ni orden.
+    class LogoFailsFakeImage {
+      onload: (() => void) | null = null;
+      onerror: ((event: unknown) => void) | null = null;
+      naturalWidth = 1080;
+      naturalHeight = 1350;
+      #src = "";
+      set src(value: string) {
+        this.#src = value;
+        queueMicrotask(() => {
+          if (!value.startsWith("blob:")) this.onerror?.(new Event("error"));
+          else this.onload?.();
+        });
+      }
+      get src() { return this.#src; }
+    }
+    vi.stubGlobal("Image", LogoFailsFakeImage);
     vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn((file: File) => `blob:${file.name}`), revokeObjectURL: vi.fn() });
     const user = userEvent.setup();
     render(<LogoStudioPage />);
     await screen.findByText(/SnapGad/i);
-    // El proxy de logo de esta organización no existe (404) — se simula
-    // haciendo que la URL del logo contenga "corrupt" para que FakeImage
-    // dispare onerror también para el logo, no solo para creativos.
-    // (Ajusta si el mock de logoImageUrl real no incluye ese string —
-    // lo importante es forzar que la CARGA DEL LOGO específicamente
-    // falle, no un creativo.)
 
     await user.upload(screen.getByLabelText(/cargar creativos/i), new File(["a"], "good.png", { type: "image/png" }));
     await user.click(screen.getByRole("button", { name: /exportar/i }));
@@ -1970,16 +2002,26 @@ describe("LogoStudioPage", () => {
     // superior en handleExport, un rechazo aquí (falla del logo, o de
     // buildLogoStudioZip) desaparece en silencio, sin ningún mensaje
     // visible. Debe aparecer un error, no un cuelgue silencioso.
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    //
+    // Corrección ronda 3 (bug real: posibles múltiples role="alert"):
+    // CompositePreview también recibe el mismo logoImageUrl y fallará su
+    // propia carga de forma independiente, mostrando SU PROPIO alert —
+    // correcto, no es un bug, son dos componentes reportando el mismo
+    // problema real por separado. Por eso se busca por el TEXTO
+    // específico del mensaje de handleExport, no por
+    // getByRole("alert") (singular, lanzaría con más de un match).
+    expect(await screen.findByText(/no se pudo generar el zip/i)).toBeInTheDocument();
   });
 });
 ```
 
-(Ajusta el detalle exacto de cómo se fuerza el fallo del logo en el
-último test una vez que conozcas la forma final de `logoImageUrl` en la
-implementación — lo que no debe cambiar es la aserción final: cualquier
-fallo no capturado dentro de `handleExport` debe terminar en un mensaje
-visible, nunca en una promesa rechazada sin manejar.)
+(El mecanismo de arriba (`LogoFailsFakeImage`, distinción por `blob:`
+vs. ruta real) es la implementación final para forzar el fallo del
+logo, no un placeholder pendiente de completar — no dejes esto
+comentado ni a medias en el commit final. Lo que no debe cambiar es la
+aserción final: cualquier fallo no capturado dentro de `handleExport`
+debe terminar en un mensaje visible, nunca en una promesa rechazada sin
+manejar.)
 
 - [ ] **Step 2: Confirmar que falla**
 
@@ -2080,8 +2122,16 @@ export default function LogoStudioPage() {
       const outcomes = await Promise.allSettled(creativeFiles.map(async (file) => {
         const creativeImage = new Image();
         const objectUrl = URL.createObjectURL(file);
-        await new Promise<void>((resolve, reject) => { creativeImage.onload = () => resolve(); creativeImage.onerror = reject; creativeImage.src = objectUrl; });
-        URL.revokeObjectURL(objectUrl);
+        try {
+          // Corrección ronda 3 del plan review (bug real, misma clase de
+          // fuga ya arreglada en CompositePreview/Task 10 pero que faltaba
+          // aplicar aquí): si la carga de la imagen rechaza, la línea de
+          // revokeObjectURL de abajo nunca se ejecutaba — el objectUrl de
+          // cada creativo que falla se quedaba vivo indefinidamente.
+          await new Promise<void>((resolve, reject) => { creativeImage.onload = () => resolve(); creativeImage.onerror = reject; creativeImage.src = objectUrl; });
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
         const outputFormat: OutputFormat = file.type === "image/png" ? "image/png" : "image/jpeg";
         const blob = await compositeToBlob(creativeImage, logoImage, options, outputFormat);
         return { originalFilename: file.name, outputFormat, blob };
@@ -2091,12 +2141,22 @@ export default function LogoStudioPage() {
       const failures = creativeFiles
         .filter((_, index) => outcomes[index].status === "rejected")
         .map((file) => ({ filename: file.name }));
-      setExportFailures(failures);
 
+      // Corrección ronda 3 del plan review (bug real: dos role="alert"
+      // simultáneos posibles): cuando TODOS los creativos fallan, antes se
+      // seteaban exportFailures Y topLevelExportError a la vez, generando
+      // dos elementos role="alert" al mismo tiempo — findByRole("alert")
+      // (singular) en un test lanzaría por encontrar más de uno. Ahora son
+      // mutuamente excluyentes por construcción: el caso "todos fallaron"
+      // solo setea topLevelExportError y sale antes de tocar
+      // exportFailures; exportFailures solo se setea en el camino donde sí
+      // hay algo que exportar (puede ser fallos parciales, o vacío si todo
+      // salió bien).
       if (entries.length === 0) {
-        setTopLevelExportError("No se pudo procesar ningún creativo del lote.");
+        setTopLevelExportError(`No se pudo procesar ningún creativo del lote (${failures.length} fallaron).`);
         return;
       }
+      setExportFailures(failures);
       const zipBlob = await buildLogoStudioZip(entries);
       downloadZip(zipBlob, `snapgad-logos-${new Date().toISOString().slice(0, 10)}.zip`);
     } catch {
