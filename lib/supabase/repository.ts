@@ -876,7 +876,8 @@ class SupabaseContentRepository
     const { data: targets, error: targetsError } = await this.client
       .from("publication_targets")
       .select("id, platform")
-      .eq("content_item_id", contentItemId);
+      .eq("content_item_id", contentItemId)
+      .eq("organization_id", this.organization.organizationId);
     if (targetsError) throw new Error("Unable to read publication targets for diagnosis.");
 
     for (const target of targets ?? []) {

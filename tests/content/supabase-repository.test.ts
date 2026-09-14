@@ -437,6 +437,58 @@ describe("SupabaseContentRepository", () => {
     });
   });
 
+  it("scopes publication diagnosis target reads to the trusted organization", async () => {
+    const targetFilters: Array<[string, string]> = [];
+    const targetQuery = {
+      select: vi.fn(() => targetQuery),
+      eq: vi.fn((field: string, value: string) => {
+        targetFilters.push([field, value]);
+        return targetQuery;
+      }),
+      then: vi.fn((resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) =>
+        Promise.resolve({ data: [], error: null }).then(resolve, reject)),
+    };
+    const brandQuery = {
+      select: vi.fn(() => brandQuery),
+      eq: vi.fn(() => brandQuery),
+      maybeSingle: vi.fn().mockResolvedValue({
+        data: {
+          aias_profile: {
+            businessName: "SnapGad",
+            industry: "Tecnología",
+            offerings: ["POS"],
+            idealCustomer: "Pequeñas empresas",
+            tone: "Claro",
+            defaultCta: "Escribe por WhatsApp",
+            timezone: "America/Mexico_City",
+          },
+        },
+        error: null,
+      }),
+    };
+    const from = vi.fn((table: string) =>
+      table === "publication_targets" ? targetQuery : brandQuery,
+    );
+    const repository = createSupabaseRepository({ from } as never, organizationA);
+
+    await repository.applyPublicationDiagnosisForContentItem(createdRow.id, {
+      id: "d32c92ce-9e2b-4aa2-9c39-5c5d97746156",
+      contentItemId: createdRow.id,
+      headline: "Control al cierre",
+      body: "Consulta las ventas registradas.",
+      cta: "Escribe POS",
+      hashtags: [],
+      checksum: "checksum",
+      version: 1,
+      createdAt: "2026-09-02T18:02:00.000Z",
+    });
+
+    expect(targetFilters).toEqual(expect.arrayContaining([
+      ["content_item_id", createdRow.id],
+      ["organization_id", organizationA.organizationId],
+    ]));
+  });
+
   it("enqueues a copy job atomically in the trusted organization", async () => {
     const jobId = "d32c92ce-9e2b-4aa2-9c39-5c5d97746156";
     const idempotencyKey = "4a150496-852d-46d4-8f25-951f6512db73";

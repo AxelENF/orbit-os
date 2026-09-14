@@ -182,7 +182,7 @@ describe("0020 publish job provider fix", () => {
       );
       expect(functionMatch).not.toBeNull();
       expect(functionMatch?.[0]).toMatch(
-        /insert into public\.automation_jobs\s*\([^)]*\bprovider\b[^)]*\)\s*values\s*\([^;]*'meta'/is,
+        /insert into public\.automation_jobs\s*\([^)]*\bprovider\b[^)]*\)\s*values\s*\([^;]*'meta'/i,
       );
     }
   });
@@ -200,6 +200,12 @@ describe("0020 retry target content validation", () => {
     expect(functionMatch?.[0]).toMatch(/p_content_item_id uuid/i);
     expect(functionMatch?.[0]).toMatch(
       /select \* into target[\s\S]*?where\s+id = p_publication_target_id\s+and organization_id = p_organization_id\s+and content_item_id = p_content_item_id\s+for update/i,
+    );
+    expect(sql).toMatch(
+      /revoke all on function public\.retry_publish_target\(uuid, uuid, uuid, uuid\) from public, anon, authenticated/i,
+    );
+    expect(sql).toMatch(
+      /grant execute on function public\.retry_publish_target\(uuid, uuid, uuid, uuid\) to service_role/i,
     );
   });
 });

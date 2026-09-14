@@ -107,3 +107,6 @@ begin
   return updated_target;
 end;
 $$;
+
+revoke all on function public.retry_publish_target(uuid, uuid, uuid, uuid) from public, anon, authenticated;
+grant execute on function public.retry_publish_target(uuid, uuid, uuid, uuid) to service_role;
