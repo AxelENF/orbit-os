@@ -34,3 +34,56 @@ begin
   return jsonb_build_object('created', true, 'jobId', created_job.id);
 end;
 $$;
+
+-- A legacy n8n request is still an in-flight publication until its callback
+-- with the same target and idempotency key has been recorded. Keep the same
+-- trigger name installed by 0022 and extend its guard in this additive
+-- migration so manual evidence cannot race a real n8n delivery.
+create or replace function public.guard_manual_publication_delivery_race()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if old.status <> 'APPROVED'::public.publication_status
+     or new.status <> 'PUBLISHED'::public.publication_status
+     or new.remote_post_id is not null then
+    return new;
+  end if;
+
+  if exists (
+    select 1
+    from public.automation_jobs
+    where publication_target_id = old.id
+      and kind = 'PUBLISH'
+      and status = 'PROCESSING'
+  ) then
+    raise exception using
+      errcode = 'P0001',
+      message = 'MANUAL_DELIVERY_PUBLISH_IN_PROGRESS';
+  end if;
+
+  if exists (
+    select 1
+    from public.automation_runs as publish_request
+    where publish_request.organization_id = old.organization_id
+      and publish_request.publication_target_id = old.id
+      and publish_request.kind = 'PUBLISH_REQUEST'
+      and not exists (
+        select 1
+        from public.automation_runs as publish_callback
+        where publish_callback.organization_id = publish_request.organization_id
+          and publish_callback.publication_target_id = publish_request.publication_target_id
+          and publish_callback.kind = 'PUBLISH_CALLBACK'
+          and publish_callback.idempotency_key = publish_request.idempotency_key
+      )
+  ) then
+    raise exception using
+      errcode = 'P0001',
+      message = 'MANUAL_DELIVERY_PUBLISH_IN_PROGRESS';
+  end if;
+
+  return new;
+end;
+$$;
