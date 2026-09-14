@@ -945,6 +945,13 @@ function summary(id: string, state: string, hasActionableTarget: boolean) {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  // vi.clearAllMocks() clears call history but NOT a .mockReturnValue()
+  // override (only .mockReset() does that) — without this line, Cycle B's
+  // hasSupabaseBrowserConfig.mockReturnValue(false) would leak into every
+  // later test in this file, silently flipping them into demo mode. This
+  // re-arms the production default after every test, regardless of what
+  // that test changed it to.
+  hasSupabaseBrowserConfig.mockReturnValue(true);
   vi.useRealTimers();
 });
 
