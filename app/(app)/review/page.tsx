@@ -81,8 +81,8 @@ export default function ReviewPage() {
       <div className="flex flex-col gap-5 border-b border-white/[0.08] pb-8 md:flex-row md:items-end md:justify-between">
         <div>
           <p className="font-mono text-[0.68rem] uppercase tracking-[0.24em] text-[#A8C7FF]/80">Cola de revisión</p>
-          <h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-white sm:text-4xl">Aprueba antes de publicar.</h1>
-          <p className="mt-4 max-w-2xl text-sm leading-6 text-slate-400">Facebook e Instagram son decisiones separadas. Una aprobación no crea una publicación ni llama a Meta.</p>
+          <h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-white sm:text-4xl">Revisa y aprueba cada destino.</h1>
+          <p className="mt-4 max-w-2xl text-sm leading-6 text-slate-400">Facebook e Instagram son decisiones separadas. Una aprobación puede encolar la publicación automática en Meta.</p>
         </div>
         <span className="rounded-full border border-[#FF4D00]/25 bg-[#FF4D00]/10 px-3 py-2 font-mono text-[0.62rem] uppercase tracking-[0.15em] text-orange-100/80">{isProductionMode ? productionRecords.filter((record) => record.targets.some((target) => target.status === "PENDING_REVIEW")).length : pendingRecords.length} pendientes</span>
       </div>
@@ -110,7 +110,7 @@ export default function ReviewPage() {
                     onRetry={(targetId) => handleProductionRetry(record.content.id, targetId)}
                   />
                 </div>
-                <p className="mt-4 rounded-xl border border-orange-200/15 bg-orange-200/[0.035] p-4 text-xs leading-5 text-slate-400">La aprobación se registra en Supabase por destino. Publicar sigue requiriendo una orden separada y no se ejecuta aquí.</p>
+                <p className="mt-4 rounded-xl border border-orange-200/15 bg-orange-200/[0.035] p-4 text-xs leading-5 text-slate-400">La aprobación se registra en Supabase por destino y puede encolar la publicación automática. Una entrega manual se registra como evidencia por separado.</p>
               </article>
             );
           })}
