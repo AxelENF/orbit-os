@@ -2,7 +2,7 @@
 
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ContentForm } from "@/components/content/content-form";
 import type { AiasOrganizationProfile } from "@/lib/aias/contracts";
@@ -65,6 +65,29 @@ const completeBriefFields = (files = [new File(["png"], "creativo.png", { type: 
   });
   return files;
 };
+
+function jsonResponse(payload: unknown): Response {
+  return {
+    ok: true,
+    json: async () => payload,
+  } as Response;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
+function selectAsset(name = "creativo.png") {
+  fireEvent.change(screen.getByLabelText("Creativo final de Canva"), {
+    target: {
+      files: [new File(["png"], name, { type: "image/png" })],
+    },
+  });
+}
 
 describe("ContentForm", () => {
   afterEach(() => {
@@ -173,5 +196,179 @@ describe("ContentForm", () => {
     const body = request.body as FormData;
     expect(body.getAll("assets")).toEqual(files);
     expect(body.get("asset")).toBeNull();
+  });
+
+  describe("image suggestion provenance", () => {
+    const previousSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const previousSupabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+    beforeEach(() => {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "test-anon-key";
+    });
+
+    afterEach(() => {
+      if (previousSupabaseUrl === undefined) {
+        delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+      } else {
+        process.env.NEXT_PUBLIC_SUPABASE_URL = previousSupabaseUrl;
+      }
+      if (previousSupabaseAnonKey === undefined) {
+        delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      } else {
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = previousSupabaseAnonKey;
+      }
+      vi.restoreAllMocks();
+    });
+
+    it("las sugerencias de la imagen llenan contentType/objective aunque tengan un valor default no vacío", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse({
+          suggestions: {
+            contentType: "venta_directa",
+            objective: "agenda_demo",
+          },
+        }),
+      );
+      render(<ContentForm aiasProfile={aiasProfile} onSubmit={vi.fn()} />);
+
+      selectAsset();
+
+      await waitFor(() => {
+        expect(screen.getByLabelText("Tipo de contenido")).toHaveValue("venta_directa");
+        expect(screen.getByLabelText("Objetivo")).toHaveValue("agenda_demo");
+      });
+    });
+
+    it("una edición manual del usuario nunca se sobrescribe por una sugerencia posterior, incluso si el usuario la deja vacía", async () => {
+      const suggestionResponse = deferred<Response>();
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        expect(String(input)).toBe("/api/content/suggestions");
+        return suggestionResponse.promise;
+      });
+      render(<ContentForm aiasProfile={aiasProfile} onSubmit={vi.fn()} />);
+
+      selectAsset();
+      await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(1));
+      fireEvent.change(screen.getByLabelText("Rubro del negocio"), {
+        target: { value: "manual" },
+      });
+      fireEvent.change(screen.getByLabelText("Rubro del negocio"), {
+        target: { value: "" },
+      });
+
+      suggestionResponse.resolve(
+        jsonResponse({ suggestions: { niche: "clinicas" } }),
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("✨ Sugerido por tu imagen — revisa antes de continuar.")).toBeInTheDocument();
+      });
+      expect(screen.getByLabelText("Rubro del negocio")).toHaveValue("");
+    });
+
+    it("una edición manual en un <select> también cuenta como editado", async () => {
+      const suggestionResponse = deferred<Response>();
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        expect(String(input)).toBe("/api/content/suggestions");
+        return suggestionResponse.promise;
+      });
+      render(<ContentForm aiasProfile={aiasProfile} onSubmit={vi.fn()} />);
+
+      selectAsset();
+      await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(1));
+      fireEvent.change(screen.getByLabelText("Tipo de contenido"), {
+        target: { value: "prueba" },
+      });
+
+      suggestionResponse.resolve(
+        jsonResponse({ suggestions: { contentType: "venta_directa" } }),
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("✨ Sugerido por tu imagen — revisa antes de continuar.")).toBeInTheDocument();
+      });
+      expect(screen.getByLabelText("Tipo de contenido")).toHaveValue("prueba");
+    });
+
+    it("una segunda imagen reemplaza las sugerencias no tocadas de la primera", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        jsonResponse({ suggestions: { niche: "clinicas" } }),
+      ).mockResolvedValueOnce(
+        jsonResponse({ suggestions: { niche: "spas" } }),
+      );
+      render(<ContentForm aiasProfile={aiasProfile} onSubmit={vi.fn()} />);
+
+      selectAsset("creativo-1.png");
+      await waitFor(() => expect(screen.getByLabelText("Rubro del negocio")).toHaveValue("clinicas"));
+
+      selectAsset("creativo-2.png");
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(screen.getByLabelText("Rubro del negocio")).toHaveValue("spas");
+      });
+    });
+
+    it("applyProfile() (defaults de AIAS) no sobrescribe un campo ya editado por el usuario", async () => {
+      const organizationsResponse = deferred<Response>();
+      const profileResponse = deferred<Response>();
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "/api/organizations") return organizationsResponse.promise;
+        if (url.startsWith("/api/organizations/")) return profileResponse.promise;
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      render(<ContentForm onSubmit={vi.fn()} />);
+
+      fireEvent.change(screen.getByLabelText("Descripción humana"), {
+        target: { value: "Descripción escrita por el usuario" },
+      });
+      fireEvent.change(screen.getByLabelText("Descripción humana"), {
+        target: { value: "" },
+      });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+      organizationsResponse.resolve(
+        jsonResponse({
+          organizations: [{ id: "org-1", name: "Org", role: "owner" }],
+          activeOrganizationId: "org-1",
+        }),
+      );
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+      profileResponse.resolve(jsonResponse({ profile: { profile: aiasProfile } }));
+
+      await waitFor(() => {
+        expect(screen.getByText("Sugerencias cargadas desde el perfil AIAS. Revísalas antes de generar copy.")).toBeInTheDocument();
+      });
+      expect(screen.getByLabelText("Descripción humana")).toHaveValue("");
+    });
+
+    it("un campo sugerido en null no toca el campo existente", async () => {
+      const secondSuggestionResponse = deferred<Response>();
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (input) => {
+        expect(String(input)).toBe("/api/content/suggestions");
+        return jsonResponse({ suggestions: { offer: "Automatización de agenda" } });
+      }).mockImplementationOnce(async (input) => {
+        expect(String(input)).toBe("/api/content/suggestions");
+        return secondSuggestionResponse.promise;
+      });
+      render(<ContentForm aiasProfile={aiasProfile} onSubmit={vi.fn()} />);
+
+      selectAsset("creativo-1.png");
+      await waitFor(() => expect(screen.getByLabelText("Oferta concreta")).toHaveValue("Automatización de agenda"));
+
+      selectAsset("creativo-2.png");
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.getByText("Analizando tu creativo…")).toBeInTheDocument());
+
+      secondSuggestionResponse.resolve(jsonResponse({ suggestions: { offer: null } }));
+
+      await waitFor(() => {
+        expect(screen.getByText("✨ Sugerido por tu imagen — revisa antes de continuar.")).toBeInTheDocument();
+      });
+      expect(screen.getByLabelText("Oferta concreta")).toHaveValue("Automatización de agenda");
+    });
   });
 });

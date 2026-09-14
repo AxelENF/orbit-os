@@ -1,7 +1,7 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   parseAiasOrganizationProfile,
@@ -127,6 +127,13 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
   const [success, setSuccess] = useState(false);
   const [createdItemId, setCreatedItemId] = useState<string | null>(null);
   const [aiasSuggestionsLoaded, setAiasSuggestionsLoaded] = useState(false);
+  const [userEditedFields, setUserEditedFields] = useState<Set<keyof FormState>>(
+    () => new Set(),
+  );
+  const userEditedFieldsRef = useRef(userEditedFields);
+  // This ref intentionally mirrors state during render so async callbacks read the latest edits.
+  // eslint-disable-next-line react-hooks/refs
+  userEditedFieldsRef.current = userEditedFields;
   const [demoRepository] = useState(() => createDemoRepository());
   const isProductionMode = hasSupabaseBrowserConfig();
 
@@ -137,13 +144,13 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
       const defaults = buildAiasContentDefaults(profile);
       setState((current) => ({
         ...current,
-        businessLine: current.businessLine || defaults.businessLine,
-        service: current.service || defaults.service,
-        niche: current.niche || defaults.niche,
-        cta: current.cta || defaults.cta,
-        humanDescription: current.humanDescription || defaults.humanDescription,
-        allowedFactsText: current.allowedFactsText || defaults.allowedFacts.join("\n"),
-        forbiddenClaims: current.forbiddenClaims.length ? current.forbiddenClaims : defaults.forbiddenClaims,
+        businessLine: userEditedFieldsRef.current.has("businessLine") ? current.businessLine : (current.businessLine || defaults.businessLine),
+        service: userEditedFieldsRef.current.has("service") ? current.service : (current.service || defaults.service),
+        niche: userEditedFieldsRef.current.has("niche") ? current.niche : (current.niche || defaults.niche),
+        cta: userEditedFieldsRef.current.has("cta") ? current.cta : (current.cta || defaults.cta),
+        humanDescription: userEditedFieldsRef.current.has("humanDescription") ? current.humanDescription : (current.humanDescription || defaults.humanDescription),
+        allowedFactsText: userEditedFieldsRef.current.has("allowedFactsText") ? current.allowedFactsText : (current.allowedFactsText || defaults.allowedFacts.join("\n")),
+        forbiddenClaims: userEditedFieldsRef.current.has("forbiddenClaims") ? current.forbiddenClaims : (current.forbiddenClaims.length ? current.forbiddenClaims : defaults.forbiddenClaims),
       }));
       setAiasSuggestionsLoaded(true);
     }
@@ -184,6 +191,48 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
     };
   }, [aiasProfile, isProductionMode]);
 
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [suggestionsApplied, setSuggestionsApplied] = useState(false);
+
+  useEffect(() => {
+    if (!asset || !isProductionMode) return;
+    let cancelled = false;
+    // The loading state reflects the lifecycle of the optional request.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSuggestionsLoading(true);
+    setSuggestionsApplied(false);
+
+    void (async () => {
+      try {
+        const formData = new FormData();
+        formData.append("asset", asset);
+        const response = await fetch("/api/content/suggestions", { method: "POST", body: formData, credentials: "same-origin" });
+        if (!response.ok || cancelled) return;
+        const payload = (await response.json()) as { suggestions: Record<string, unknown> | null };
+        if (!payload.suggestions || cancelled) return;
+
+        setState((current) => {
+          const next = { ...current };
+          for (const [key, value] of Object.entries(payload.suggestions!)) {
+            const field = key as keyof FormState;
+            if (value === null || value === undefined) continue;
+            if (userEditedFieldsRef.current.has(field)) continue;
+            (next as Record<string, unknown>)[field] = value;
+          }
+          return next;
+        });
+        if (!cancelled) setSuggestionsApplied(true);
+      } catch {
+        // Análisis opcional — el formulario sigue siendo 100% usable sin él.
+      } finally {
+        if (!cancelled) setSuggestionsLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- userEditedFields se lee vía userEditedFieldsRef.current dentro del callback, a propósito: no queremos re-disparar el fetch en cada edición del usuario, solo cuando cambia el archivo.
+  }, [asset, isProductionMode]);
+
   const parsedBrief = useMemo(
     () =>
       campaignBriefSchema.safeParse({
@@ -213,6 +262,12 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
     value: FormState[Key],
   ) {
     setState((current) => ({ ...current, [field]: value }));
+    setUserEditedFields((current) => {
+      if (current.has(field)) return current;
+      const next = new Set(current);
+      next.add(field);
+      return next;
+    });
     setSuccess(false);
     setSubmitError(null);
   }
@@ -354,6 +409,16 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
       {aiasSuggestionsLoaded ? (
         <p className="rounded-xl border border-cyan-200/15 bg-cyan-200/[0.04] px-4 py-3 text-xs leading-5 text-cyan-100">
           Sugerencias cargadas desde el perfil AIAS. Revísalas antes de generar copy.
+        </p>
+      ) : null}
+      {suggestionsLoading ? (
+        <p className="rounded-xl border border-cyan-200/15 bg-cyan-200/[0.04] px-4 py-3 text-xs leading-5 text-cyan-100">
+          Analizando tu creativo…
+        </p>
+      ) : null}
+      {suggestionsApplied && !suggestionsLoading ? (
+        <p className="rounded-xl border border-cyan-200/15 bg-cyan-200/[0.04] px-4 py-3 text-xs leading-5 text-cyan-100">
+          ✨ Sugerido por tu imagen — revisa antes de continuar.
         </p>
       ) : null}
 
