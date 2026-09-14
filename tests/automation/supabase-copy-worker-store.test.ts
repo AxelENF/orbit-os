@@ -160,6 +160,27 @@ describe("SupabaseCopyWorkerStore", () => {
     expect(rpc).toHaveBeenNthCalledWith(2, "delete_expired_meta_oauth_sessions", { p_limit: 100 });
   });
 
+  it("returns recovered jobs when expired Meta OAuth session cleanup fails", async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { recovered: 2 }, error: null })
+      .mockResolvedValueOnce({ data: null, error: { message: "cleanup unavailable" } });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new SupabaseCopyWorkerStore(clientWith(rpc) as never);
+
+    try {
+      await expect(store.recoverExpired()).resolves.toBe(2);
+      expect(consoleError).toHaveBeenCalledWith(
+        JSON.stringify({
+          message: "Unable to clean expired Meta OAuth sessions.",
+          error: "cleanup unavailable",
+        }),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("records a retry when the claimed asset cannot be delivered", async () => {
     const rpc = vi
       .fn()

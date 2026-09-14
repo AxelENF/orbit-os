@@ -330,10 +330,22 @@ export class SupabaseCopyWorkerStore
     // DurableJobRunner invokes recoverExpired at startup and on every recovery
     // interval. Keep OAuth cleanup here so abandoned token-bearing sessions use
     // the existing periodic worker maintenance without a new scheduler.
-    const { error: cleanupError } = await this.client.rpc("delete_expired_meta_oauth_sessions", {
-      p_limit: limit,
-    });
-    if (cleanupError) throw new Error("Unable to clean expired Meta OAuth sessions.");
+    try {
+      const { error: cleanupError } = await this.client.rpc("delete_expired_meta_oauth_sessions", {
+        p_limit: limit,
+      });
+      if (cleanupError) {
+        console.error(JSON.stringify({
+          message: "Unable to clean expired Meta OAuth sessions.",
+          error: normalizeError(cleanupError.message),
+        }));
+      }
+    } catch (error: unknown) {
+      console.error(JSON.stringify({
+        message: "Unable to clean expired Meta OAuth sessions.",
+        error: normalizeError(error),
+      }));
+    }
 
     return parsed.data.recovered;
   }

@@ -35,10 +35,12 @@ begin
 end;
 $$;
 
--- A legacy n8n request is still an in-flight publication until its callback
--- with the same target and idempotency key has been recorded. Keep the same
--- trigger name installed by 0022 and extend its guard in this additive
--- migration so manual evidence cannot race a real n8n delivery.
+-- Defense in depth for a future n8n path that records request/callback rows
+-- in automation_runs. Today preparePublishRequest/requestN8nPublish only
+-- validate the approved target and deliver HTTP; they do not insert
+-- PUBLISH_REQUEST, so this check offers no production protection yet. Keep
+-- the guard ready for the day that instrumentation is added, so manual
+-- evidence cannot race a real n8n delivery.
 create or replace function public.guard_manual_publication_delivery_race()
 returns trigger
 language plpgsql
