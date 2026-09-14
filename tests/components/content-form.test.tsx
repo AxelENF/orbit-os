@@ -247,6 +247,39 @@ describe("ContentForm", () => {
       });
     });
 
+    it("limpia los banners de sugerencias cuando se rechaza el archivo seleccionado", async () => {
+      const secondSuggestionResponse = deferred<Response>();
+      const fetchMock = vi.spyOn(globalThis, "fetch")
+        .mockImplementationOnce(async () => jsonResponse({ suggestions: { niche: "clinicas" } }))
+        .mockImplementationOnce(async () => secondSuggestionResponse.promise);
+      render(<ContentForm aiasProfile={aiasProfile} onSubmit={vi.fn()} />);
+
+      selectAsset("creativo-1.png");
+      await waitFor(() => {
+        expect(screen.getByText("✨ Sugerido por tu imagen — revisa antes de continuar.")).toBeInTheDocument();
+      });
+
+      fireEvent.change(screen.getByLabelText("Creativo final de Canva"), {
+        target: { files: [new File(["txt"], "invalido.txt", { type: "text/plain" })] },
+      });
+      await waitFor(() => {
+        expect(screen.queryByText("✨ Sugerido por tu imagen — revisa antes de continuar.")).not.toBeInTheDocument();
+      });
+
+      selectAsset("creativo-2.png");
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.getByText("Analizando tu creativo…")).toBeInTheDocument());
+
+      fireEvent.change(screen.getByLabelText("Creativo final de Canva"), {
+        target: { files: [new File(["txt"], "otro-invalido.txt", { type: "text/plain" })] },
+      });
+      await waitFor(() => {
+        expect(screen.queryByText("Analizando tu creativo…")).not.toBeInTheDocument();
+      });
+
+      secondSuggestionResponse.resolve(jsonResponse({ suggestions: { niche: "spas" } }));
+    });
+
     it("una edición manual del usuario nunca se sobrescribe por una sugerencia posterior, incluso si el usuario la deja vacía", async () => {
       const suggestionResponse = deferred<Response>();
       vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

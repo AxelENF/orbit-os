@@ -196,10 +196,15 @@ export function ContentForm({ onSubmit, repository, aiasProfile }: ContentFormPr
   const latestFile = files.at(-1) ?? null;
 
   useEffect(() => {
-    if (!latestFile || !isProductionMode) return;
+    if (!latestFile) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSuggestionsLoading(false);
+      setSuggestionsApplied(false);
+      return;
+    }
+    if (!isProductionMode) return;
     let cancelled = false;
     // The loading state reflects the lifecycle of the optional request.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSuggestionsLoading(true);
     setSuggestionsApplied(false);
 
