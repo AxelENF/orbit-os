@@ -258,9 +258,10 @@ Agrega a `tests/content/supabase-repository.test.ts`, dentro de
         { content_item_id: approvedWithErrorTarget.id, status: "ERROR" },
       ],
       // Deliberately a DIFFERENT organization's ERROR target on the SAME
-      // content_item_id as organizationA's REVIEW item — proves the merge
-      // is scoped by organization, not just by id, if this leaked in it
-      // would make publishedNoActionableTarget's id wrongly match.
+      // content_item_id as organizationA's publishedNoActionableTarget
+      // (correction: NOT the REVIEW item) — proves the merge is scoped by
+      // organization, not just by id; if this leaked in, it would flip
+      // publishedNoActionableTarget's expected `false` to `true` below.
       [organizationB.organizationId]: [
         { content_item_id: publishedNoActionableTarget.id, status: "ERROR" },
       ],
@@ -570,11 +571,25 @@ por:
 (Nombra la variable local `hasActionableTargetValue`, no
 `hasActionableTarget` — ese nombre ya lo usa la función importada y
 sombrearlo confunde la lectura. Usa `hasActionableTargetValue` en el
-objeto de retorno.) Agrega
-`import { hasActionableTarget } from "@/lib/content/actionable-target";`
-al inicio de `lib/supabase/repository.ts`. Vuelve a correr
-`npm test -- tests/content/supabase-repository.test.ts` para confirmar
-que sigue en PASS tras este cambio.
+objeto de retorno.) Agrega al inicio de `lib/supabase/repository.ts`:
+
+```typescript
+import { hasActionableTarget } from "@/lib/content/actionable-target";
+```
+
+**Corrección tras revisión de Codex CLI ronda 2 del plan (bug real,
+rompía `tsc`):** el snippet usa el tipo `PublicationTargetStatus` en
+`Array<{ status: PublicationTargetStatus }>` pero la instrucción
+anterior solo pedía importar `hasActionableTarget` — sin importar
+también el tipo, `tsc` falla con `Cannot find name
+'PublicationTargetStatus'`. `lib/supabase/repository.ts` probablemente
+ya importa varios tipos de `@/lib/content/repository`; agrega
+`PublicationTargetStatus` a esa misma línea de import existente (no
+crees una línea de import nueva si ya hay una desde ese módulo).
+
+Vuelve a correr `npm test -- tests/content/supabase-repository.test.ts`
+y `npx tsc --noEmit` para confirmar que sigue en PASS/limpio tras este
+cambio.
 
 - [ ] **Step 5: Confirmar que pasa**
 
@@ -962,7 +977,12 @@ describe("LibraryPage attention filter", () => {
       summary("b", "REVIEW", true),
     ]);
     getContentRecord.mockResolvedValue({
-      content: { id: "b", state: "REVIEW" },
+      // Corrección ronda 2 del plan review: la tarjeta renderizada lee
+      // record.content.service/.niche (mismo patrón que
+      // review/page.tsx:100) — sin estos campos, .replaceAll("_", " ")
+      // sobre undefined tumba el test con un TypeError, no con la
+      // aserción que se está probando.
+      content: { id: "b", state: "REVIEW", service: "bot_whatsapp", niche: "clinicas" },
       targets: [{ id: "target-1", contentItemId: "b", platform: "FACEBOOK", status: "PENDING_REVIEW" }],
       drafts: [],
       auditEvents: [],
@@ -1069,9 +1089,34 @@ const attention = useAttentionTargets(
 );
 ```
 
+**Corrección tras revisión de Codex CLI ronda 2 del plan (bug real,
+tarjetas duplicadas):** el archivo actual renderiza `filteredItems`
+(producción) siempre que `filteredItems.length > 0`, sin importar qué
+filtro esté activo — porque `filteredItems` ya viene pre-filtrada por
+`filter`. Si simplemente agregas el bloque de `attention.records` de
+abajo SIN tocar ese render existente, cuando `filter === "ATTENTION"`
+aparecerán **dos tarjetas por campaña**: la tarjeta simple de siempre
+(de `filteredItems.map(...)`, sin controles) y la tarjeta nueva con
+`PublicationTargets` inline (de `attention.records.map(...)`, abajo).
+Corrige el render existente de `filteredItems` para que **excluya**
+explícitamente el caso `attention`:
+
+```typescript
+{isProductionMode && !isLoading && filter !== "ATTENTION" && filteredItems.length > 0 ? (
+  <section /* ...igual que hoy... */>{/* ...tarjetas simples de filteredItems, sin cambios... */}</section>
+) : null}
+```
+
+y agrega el bloque de `attention.records` (abajo) como una rama
+**alternativa**, activa solo cuando `filter === "ATTENTION"` — nunca
+ambas a la vez. La sección "Nada pendiente"/estado vacío también debe
+distinguir el caso `ATTENTION` sin resultados del caso genérico
+`filteredItems.length === 0`, para no mostrarlo dos veces tampoco.
+
 Cuando `filter === "ATTENTION"` (modo producción), renderiza
 `attention.records` con `PublicationTargets` inline (mismo bloque
-visual que `review/page.tsx:99-116` usa hoy), pero **corrección tras
+visual que `review/page.tsx:99-116` usa hoy — en vez del bloque de
+`filteredItems` que acabas de excluir arriba), pero **corrección tras
 revisión de Codex CLI ronda 1 del plan (bug real de firma)**:
 `PublicationTargets.onApprove`/`onRetry` reciben solo `targetId` — no
 `contentItemId` — mientras que `attention.handleApprove`/`handleRetry`
@@ -1218,10 +1263,61 @@ function matchesDemoFilter(draft: DemoDraftRecord, filter: CampaignFilter): bool
 }
 ```
 
+**Corrección tras revisión de Codex CLI ronda 2 del plan (error real de
+tipos):** `DemoDraftRecord.content` sigue siendo `ContentItem` — y
+`ContentItem` **no** tiene `hasActionableTarget` (ese campo solo existe
+en `ContentSummary`, Task 2). El archivo actual ya llama
+`campaignTitle(asset.content)`/`campaignDescription(asset.content)`
+dentro de las tarjetas demo (`library/page.tsx`, bloque `!isProductionMode`)
+— ambas funciones están tipadas para recibir `ContentSummary`
+(`lib/content/campaign-view.ts:16,30`). Pasar `draft.content` (un
+`ContentItem`) directamente ahí ya no compila, porque le falta el campo
+requerido. Agrega un adaptador junto a las funciones de arriba:
+
+```typescript
+function toDemoSummary(draft: DemoDraftRecord): ContentSummary {
+  return { ...draft.content, hasActionableTarget: demoHasActionableTarget(draft) };
+}
+```
+
+y en el JSX de las tarjetas demo, cambia `campaignTitle(asset.content)`/
+`campaignDescription(asset.content)` (con `asset: DemoBrowserAsset`) por
+`campaignTitle(toDemoSummary(draft))`/`campaignDescription(toDemoSummary(draft))`
+(con `draft: DemoDraftRecord`, la nueva variable de iteración tras
+cambiar de `assets`/`filteredAssets` a `drafts`/`filteredDrafts` en este
+mismo Ciclo B). No pases `draft.content` crudo a ninguna función tipada
+como `ContentSummary` en ningún otro punto del archivo — usa
+`toDemoSummary(draft)` cada vez.
+
 En modo demo, el filtro `ATTENTION` usa `demoHasActionableTarget(draft)`
 directamente sobre el arreglo ya cargado — no invoques
-`useAttentionTargets` en esta rama. Renderiza `PublicationTargets`
-dentro de cada tarjeta demo filtrada, con:
+`useAttentionTargets` en esta rama.
+
+**Precisión tras revisión de Codex CLI ronda 2 del plan (mismo riesgo de
+duplicado que en Cycle A, aplicado a demo):** a diferencia de
+producción, aquí **no crees un segundo bloque JSX** — el render demo ya
+es un único `filteredDrafts.map((draft) => <article>...</article>)`
+(reemplaza `filteredAssets`/`assets` por `filteredDrafts`/`drafts` en
+ese mismo bloque existente, no agregues uno nuevo). Dentro de esa MISMA
+`<article>`, agrega `PublicationTargets` **condicionado al filtro**, no
+incondicional:
+
+```typescript
+{filter === "ATTENTION" ? (
+  <PublicationTargets
+    targets={draft.targets}
+    disabled={draft.content.state !== "REVIEW"}
+    onApprove={(targetId) => { /* ...ver abajo... */ }}
+  />
+) : null}
+```
+
+(Cuando `filter === "ATTENTION"`, `filteredDrafts` ya solo contiene
+drafts accionables — así que en la práctica esta condición es
+redundante con el filtro, pero escribirla explícita dentro del mismo
+`<article>`, en vez de un bloque separado, es lo que garantiza que nunca
+puede haber dos tarjetas por campaña como si podría pasar en
+producción.) El `onApprove`:
 
 ```typescript
 onApprove={(targetId) => {
@@ -1267,6 +1363,57 @@ Run: `npm test -- tests/components/library-page.test.tsx -t "attention filter"`
 Expected: sigue en PASS (el contador de producción del Step A1 no se
 rompió al tocar el cálculo compartido).
 
+- [ ] **Step B5: Escribir el test de sincronización demo que falla (hallazgo de ronda 2 del plan review — el spec lo exige explícitamente y no tenía test)**
+
+La sección "Modo demo" del spec (revisión 4) exige que aprobar el último
+target accionable de una campaña demo la saque del filtro `attention` y
+baje el contador — el equivalente demo exacto del "Test de
+sincronización" del Ciclo D, pero vía `approveDemoTarget()` +
+`refresh()`/`readDemoDrafts()` en vez de `onTargetResolved` +
+`listContentSummaries()`. Agrega a `tests/components/library-page.test.tsx`, dentro de `describe("LibraryPage demo mode", ...)`:
+
+```typescript
+  it("removes the demo card from the attention filter and decrements the counter after approving its last target", async () => {
+    hasSupabaseBrowserConfig.mockReturnValue(false);
+    const draftBeforeApproval = demoDraft("d1", "REVIEW", [{ id: "t1", status: "PENDING_REVIEW" }]);
+    readDemoDrafts
+      .mockReturnValueOnce([draftBeforeApproval])
+      .mockReturnValue([{ ...draftBeforeApproval, targets: [{ id: "t1", status: "APPROVED" }] }]);
+    approveDemoTarget.mockReturnValue({
+      content: draftBeforeApproval.content,
+      targets: [{ id: "t1", status: "APPROVED" }],
+    });
+
+    const user = userEvent.setup();
+    render(<LibraryPage />);
+    await user.click(screen.getByRole("tab", { name: "Por revisar" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Aprobar Facebook/i })).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /Aprobar Facebook/i }));
+
+    expect(approveDemoTarget).toHaveBeenCalledWith("d1", "t1");
+    await waitFor(() => expect(readDemoDrafts).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("0")).toBeInTheDocument();
+  });
+```
+
+(Ajusta la forma exacta del target — `{ id: "t1", status: "..." }` está
+simplificado; usa la forma completa de `PublicationTarget`, con
+`contentItemId`/`platform`, igual que en `demoDraft()`. La plataforma
+del target de este fixture debe ser `FACEBOOK` para que el botón
+"Aprobar Facebook" exista.)
+
+- [ ] **Step B6: Confirmar que ya pasa (no debería requerir código nuevo si el Step B3 está bien implementado)**
+
+Si `onApprove` en el Step B3 ya llama `approveDemoTarget(...)` seguido
+de `refreshDemo()` correctamente, este test debería pasar sin más
+cambios — es una prueba de integración, igual que el Step D3 del Ciclo
+D lo es para producción. Si falla, revisa esa conexión antes de escribir
+código nuevo.
+
+Run: `npm test -- tests/components/library-page.test.tsx -t "demo mode"`
+Expected: PASS (todos los tests de este `describe`, incluido el nuevo).
+
 ---
 
 #### Ciclo C: query param `?filter=` (con `<Suspense>`, siguiendo el precedente existente)
@@ -1283,13 +1430,32 @@ const useSearchParams = vi.hoisted(() => vi.fn(() => new URLSearchParams()));
 vi.mock("next/navigation", () => ({ useSearchParams }));
 ```
 
+**Corrección tras revisión de Codex CLI ronda 2 del plan (mismo tipo de
+fuga que `hasSupabaseBrowserConfig`, esta vez sin arreglar):** este test
+llama `useSearchParams.mockReturnValue(new URLSearchParams("filter=attention"))`
+— como el `afterEach` global (Step A1) solo usa `vi.clearAllMocks()`
+(que no deshace `mockReturnValue`), ese override sobrevive a este test y
+se filtra al Ciclo D, que corre después en el mismo archivo. El test de
+sincronización del Ciclo D "por casualidad" sigue pasando porque hace
+click explícito en el tab "Por revisar" sin importar el filtro inicial
+— pero el aislamiento entre tests queda roto igual. Agrega esta línea al
+mismo `afterEach` del Step A1, junto a la de
+`hasSupabaseBrowserConfig.mockReturnValue(true)`:
+
+```typescript
+  useSearchParams.mockReturnValue(new URLSearchParams());
+```
+
+(Vuelve al Step A1 y agrégala ahí mismo, en el `afterEach` — no crees un
+`afterEach` nuevo en este ciclo.)
+
 ```typescript
 describe("LibraryPage query param", () => {
   it("opens directly on the attention filter when ?filter=attention", async () => {
     useSearchParams.mockReturnValue(new URLSearchParams("filter=attention"));
     listContentSummaries.mockResolvedValue([summary("a", "REVIEW", true)]);
     getContentRecord.mockResolvedValue({
-      content: { id: "a", state: "REVIEW" },
+      content: { id: "a", state: "REVIEW", service: "bot_whatsapp", niche: "clinicas" },
       targets: [{ id: "t1", contentItemId: "a", platform: "FACEBOOK", status: "PENDING_REVIEW" }],
       drafts: [], auditEvents: [], publicationResults: [],
     });
@@ -1374,7 +1540,7 @@ describe("LibraryPage sync after approve", () => {
       .mockResolvedValueOnce([summary("a", "REVIEW", true)])
       .mockResolvedValueOnce([summary("a", "REVIEW", false)]);
     getContentRecord.mockResolvedValue({
-      content: { id: "a", state: "REVIEW" },
+      content: { id: "a", state: "REVIEW", service: "bot_whatsapp", niche: "clinicas" },
       targets: [{ id: "t1", contentItemId: "a", platform: "FACEBOOK", status: "PENDING_REVIEW" }],
       drafts: [{ headline: "h", body: "b", cta: "c", hashtags: [], id: "d1", contentItemId: "a", visualAnalysis: {}, createdAt: "2026-09-14T00:00:00.000Z" }],
       auditEvents: [], publicationResults: [],
