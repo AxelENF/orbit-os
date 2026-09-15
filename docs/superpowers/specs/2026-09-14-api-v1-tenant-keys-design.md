@@ -1,37 +1,34 @@
 # API v1 con claves por organización — diseño
 
-**Fecha:** 2026-09-14 (revisado 2026-09-15 tras ronda 1 de Codex CLI)
+**Fecha:** 2026-09-14 (revisado 2026-09-15 tras rondas 1 y 2 de Codex CLI)
 **Estado:** Diseñado en vivo con Axel (preguntas de clarificación una a una, decisiones confirmadas en el momento) — no es una sesión autónoma retroactiva como las anteriores. Sesión en modo autónomo por instrucción explícita de Axel para la ejecución posterior ("despliega subagents en codex para la realización").
 **Roadmap:** Primera mitad del cuarto ítem del orden de 4 partes acordado el 2026-09-14 (intake ✅ → navegación/IA ✅ → compositor de logo ✅ → **capa MCP**). La capa MCP resultó ser dos sub-proyectos independientes, decisión tomada durante este mismo brainstorm: **(1) esta API v1** y **(2) la envoltura MCP encima de ella**, cada una con su propio ciclo spec→plan→revisión. Este documento cubre solo (1).
-**Rama:** `feat/api-v1-tenant-keys`, creada sobre `feat/logo-batch-compositor` (no sobre `feat/personal-pilot-hardening` directamente) — **dependencia real, no arbitraria:** la composición de logo server-side (ver más abajo) reutiliza `lib/logo-studio/compose.ts` y la ruta `app/api/organizations/[id]/logo/route.ts`, que solo existen en esa rama.
+**Rama:** `feat/api-v1-tenant-keys`, creada sobre `feat/logo-batch-compositor` (no sobre `feat/personal-pilot-hardening` directamente) — **dependencia real, no arbitraria:** la composición de logo server-side (ver más abajo) reutiliza `lib/logo-studio/compose.ts` y la ruta `app/api/organizations/[id]/logo/route.ts`, que solo existen en esa rama. Siguiente migración: `0019` (confirmado en ronda 2 — `0018_organization_logos_bucket.sql` ya existe, heredado de la rama de logo).
 
-**Corrección ronda 1 (hallazgo real):** la siguiente migración de esta rama es `0019`, no `0018` — `supabase/migrations/0018_organization_logos_bucket.sql` ya existe, heredado de `feat/logo-batch-compositor`. El "0018 distinto en cada rama hermana" documentado en memoria aplica a ramas independientes partiendo de `feat/personal-pilot-hardening`; esta rama, al estar apilada sobre la de logo, no repite ese patrón — simplemente continúa la numeración que ya trae.
-
-**Advertencia de dependencia entre ramas, importante para la secuencia de merge (no bloquea este spec, pero Axel debe saberlo):** esta rama NO incluye el publisher real de Meta (`feat/meta-publisher-oauth-adapter` es una rama hermana distinta, no mergeada, no ancestro de `feat/personal-pilot-hardening`). En esta rama, `lib/integrations/meta-publisher.ts` sigue siendo solo un preflight de configuración (`meta-publisher.ts:16-19`, comentario propio: "Deliberately a configuration boundary, not a publisher"). El endpoint de publicación de este spec (ver más abajo) está diseñado para funcionar correctamente hoy Y para heredar automáticamente el comportamiento real de ADR-008 el día que esa rama se mergee — pero no se puede validar contra un publisher real hasta entonces.
+**Advertencia de dependencia entre ramas, importante para la secuencia de merge (no bloquea este spec, pero Axel debe saberlo):** esta rama NO incluye el publisher real de Meta (`feat/meta-publisher-oauth-adapter` es una rama hermana distinta, no mergeada). En esta rama, `lib/integrations/meta-publisher.ts` sigue siendo solo un preflight de configuración. El endpoint de publicación de este spec está diseñado para funcionar correctamente hoy contra el mecanismo real que ya existe (n8n) y para heredar automáticamente el comportamiento de ADR-008 el día que ese mecanismo exista — ver la sección de publicación.
 
 ## Contexto
 
-`docs/vault/06-marketing-automation-handoff.md` (2026-09-12) ya registraba la intención original de Axel: exponer el pipeline (generar imagen externamente, poner logo, generar copy, publicar) como herramientas orquestables por un agente, con el sistema funcionando "principalmente a través de MCP". Existe además un plan nunca implementado, `docs/superpowers/plans/2026-09-07-operations-and-extensibility.md`, que ya proponía la arquitectura base: una API v1 versionada como contrato estable, con MCP como envoltura delgada sobre un subconjunto de esa API. Esa arquitectura sigue siendo válida; lo que cambió es el contexto que la rodea:
+`docs/vault/06-marketing-automation-handoff.md` (2026-09-12) ya registraba la intención original de Axel: exponer el pipeline como herramientas orquestables por un agente, con el sistema funcionando "principalmente a través de MCP". Existe además un plan nunca implementado, `docs/superpowers/plans/2026-09-07-operations-and-extensibility.md`, que ya proponía la arquitectura base (API v1 versionada + MCP como envoltura delgada). Esa arquitectura sigue siendo válida; lo que cambió es el contexto:
 
-- Ese plan de 2026-09-07 es anterior a **ADR-008** (2026-09-12), que ya permite publicación automática por defecto con el diagnóstico determinista como única red de seguridad. El plan viejo proponía que MCP nunca pudiera aprobar ni publicar — una restricción que hoy sería más estricta que lo que el propio sistema automático ya se permite a sí mismo.
-- Ninguna pieza de ese plan viejo (`api_keys`, `/api/v1/*`, MCP) se implementó nunca — se verificó en este brainstorm (`grep` de `api_keys`/`apiKey` en el código real no encontró nada fuera de docs).
-- **Corrección ronda 1 (hallazgo real, matiza el punto anterior):** ADR-008 es una decisión de producto adoptada, pero su propio texto (`docs/vault/02-decisions.md:69`) dice explícitamente: *"esta ADR registra la decisión de producto; el diseño técnico de cómo el publisher real de Meta consulta el diagnóstico antes de publicar... todavía no está especificado."* El mecanismo de "publicar automáticamente salvo que el diagnóstico marque riesgo" **no existe como código ejecutable todavía, en ninguna rama** — solo existe la función de diagnóstico (`lib/aias/publication-diagnosis.ts`) de forma aislada, y el flujo de publicación actual (`lib/integrations/n8n-client.ts`) sigue exigiendo que un target ya esté `APPROVED` antes de intentar publicarlo. Este spec se diseña para no bloquearse en esa pieza faltante — ver la sección de publicación más abajo.
-- Axel también había mencionado por separado una carpeta local de 8 kits standalone de Claude Code (memoria `project_orbit_os_claude_kits_reference.md`) como posible inspiración para "hacer más cosas con un agente vía MCP". Se preguntó explícitamente si debían incorporarse — **Axel los descartó para este alcance** ("olvidalo, eso lo dejamos out, prioriza el marketer"). No son parte de este documento ni del siguiente.
+- Ese plan de 2026-09-07 es anterior a **ADR-008** (2026-09-12), que permite publicación automática por defecto con el diagnóstico determinista como red de seguridad — más permisivo que la restricción "MCP nunca publica" que proponía el plan viejo.
+- Ninguna pieza de ese plan viejo se implementó nunca (verificado por grep).
+- **ADR-008 es una decisión de producto adoptada, no un mecanismo ya ejecutable.** Su propio texto (`docs/vault/02-decisions.md:69`) dice explícitamente que el diseño técnico de cómo el publisher real consulta el diagnóstico "todavía no está especificado." Este spec no se bloquea en esa pieza faltante — ver la sección de publicación.
+- **Hallazgo adicional de la ronda 2 de revisión, relevante para cualquier trabajo futuro de publicación (no solo este spec):** incluso el mecanismo de publicación que SÍ existe hoy (`lib/integrations/n8n-client.ts` + `preparePublishRequest`) tiene un vacío real — el callback de confirmación (`supabase/migrations/0003_ingest_publish_result_callback.sql:82-93`) exige una fila previa en `automation_runs` de tipo `PUBLISH_REQUEST`, pero `preparePublishRequest` (`lib/supabase/repository.ts:992-1017`) nunca la crea — solo el repositorio de demo lo simula (`lib/demo/repository.ts:480-505`). Esto significa que el flujo de publicación real, hoy, puede devolver `202` y fallar después con `PUBLISH_REQUEST_NOT_FOUND` en el callback. Es un vacío preexistente del pipeline de publicación, no introducido por este spec — se documenta aquí porque el endpoint `/publish` de esta API lo hereda tal cual, y corregirlo de raíz pertenece a quien sea dueño del pipeline de publicación, no a esta API. Axel debe saber que esto ya era así antes de este spec.
+- Axel también había mencionado por separado una carpeta local de 8 kits standalone de Claude Code — **descartados explícitamente para este alcance** ("olvidalo, eso lo dejamos out, prioriza el marketer").
 
 ## Decisiones de alcance (tomadas en el brainstorm, en orden)
 
-1. **¿Quién se conecta?** Cada organización cliente de Orbit OS, no solo Axel — implica el sistema completo de claves por tenant, no una conexión local personal.
-2. **¿Qué nivel de acción tiene un agente conectado?** El mismo que el pipeline automático de ADR-008 tendrá una vez que exista — ver la advertencia sobre esa pieza pendiente arriba. No hay una capa de permisos más restrictiva que la que el sistema ya se permite a sí mismo.
-3. **¿Entran los 8 kits locales?** No. Fuera de alcance, descartado explícitamente. El foco es el pipeline de marketing existente ("el marketer").
-4. **¿Un spec o dos?** Dos — API v1 primero (este documento), capa MCP después, cada uno con su propio ciclo de revisión.
-5. **¿Scopes finos por acción o clave con acceso completo?** Clave con acceso completo por organización. Los scopes finos (`campaigns:read`, `publish:execute`, etc.) se descartan por ahora — no hay ninguna restricción real que estén protegiendo, dado el punto 2. Se documenta como decisión deliberada, no como omisión.
-6. **¿Compositor de logo incluido?** Sí, con dos ajustes de tamaño confirmados por Axel: el logo de la organización baja de 5MB a **2MB** de límite; el creativo adjunto usa el límite que **ya rige el pipeline compartido** (`MAX_ASSET_BYTES` en `lib/content/asset-validation.ts`, 20MB) — no un número nuevo inventado para esta API.
+1. **¿Quién se conecta?** Cada organización cliente de Orbit OS — implica el sistema completo de claves por tenant.
+2. **¿Qué nivel de acción tiene un agente conectado?** El mismo que el pipeline automático de ADR-008 tendrá una vez que exista.
+3. **¿Entran los 8 kits locales?** No.
+4. **¿Un spec o dos?** Dos — API v1 primero, capa MCP después.
+5. **¿Scopes finos o clave con acceso completo?** Clave con acceso completo por organización, deliberadamente.
+6. **¿Compositor de logo incluido?** Sí — logo baja a **2MB** de límite (ver corrección de consistencia más abajo), creativo usa el límite ya existente del pipeline compartido (`MAX_ASSET_BYTES`, 20MB).
 
 ## Arquitectura
 
 ### Autenticación: `organization_api_keys`
-
-Tabla nueva, mismo patrón de `organization_integrations` (`supabase/migrations/0008_tenancy_foundation.sql:37-46`):
 
 ```sql
 create table if not exists public.organization_api_keys (
@@ -46,82 +43,149 @@ create table if not exists public.organization_api_keys (
   revoked_at timestamptz
 );
 
--- Corrección ronda 1 (hallazgo real): RLS filtra FILAS, no columnas — una
--- política de "solo el owner puede leer" no impide que una consulta directa
--- pida la columna key_hash si el rol tiene privilegio sobre ella. Se revoca
--- el privilegio de columna explícitamente; key_hash solo es legible por el
--- rol de servicio (usado exclusivamente dentro de la función de
--- verificación server-only, nunca en una ruta que devuelva la fila entera
--- al cliente).
-revoke select (key_hash) on public.organization_api_keys from authenticated;
+alter table public.organization_api_keys enable row level security;
 ```
 
-- La clave se genera una sola vez (`sk_live_<32+ bytes aleatorios>`), se muestra completa solo en el momento de creación, y se persiste **hasheada** (`key_hash`, sha-256 sobre el secreto completo — apto para secretos de alta entropía generados por el sistema, a diferencia de bcrypt que está pensado para contraseñas de baja entropía escritas por humanos). `key_prefix` guarda los primeros caracteres visibles (p. ej. `sk_live_a1b2`) para que el dueño identifique cuál clave es cuál sin volver a ver el secreto completo.
-- RLS: solo el owner de la organización puede crear, listar (metadatos, nunca `key_hash` — protegido además a nivel de columna, ver arriba) o revocar claves — mismo gate que `organization_integrations` ya usa (`has_organization_role(organization_id, array['owner']::public.organization_role[])`).
+**Corrección ronda 2 (hallazgo real — la ronda 1 solo describía la intención en prosa, sin SQL que la implemente):** la versión anterior de este spec creaba la tabla y prometía RLS "mismo patrón que `organization_integrations`" pero nunca escribía el `enable row level security` ni las políticas. Además, una política genérica `for all` con solo el chequeo de rol owner permitiría a un owner editar `created_by` de una clave para atribuirla a otro usuario. Resolución: **sin políticas de INSERT/UPDATE de propósito general.** Toda escritura pasa por dos RPCs `security definer` dedicadas — mismo patrón que el resto del esquema usa para mutaciones sensibles (p. ej. `approve_publication_target`):
 
-### Principal de la request (corrección ronda 1 — el diseño anterior no producía lo que el resto del sistema exige)
+```sql
+create policy "Owners read their api keys" on public.organization_api_keys
+  for select to authenticated
+  using (public.has_organization_role(organization_id, array['owner']::public.organization_role[]));
 
-**Hallazgo real:** el diseño original de este spec resolvía solo `organization_id` desde la clave y lo trataba como contexto ya confiado. Pero `createContentRepository` (`lib/content/repository-factory.ts:140-193`) construye un `OrganizationContext` con `organizationId`, `userId` **y** `role`, y ese contexto se pasa a `createSupabaseRepository`, cuyos RPCs exigen `assert_organization_actor` con un miembro real con rol (`supabase/migrations/0009_tenantize_content_and_jobs.sql:95-114`). Resolver solo el id de organización no alcanza — y crear un actor sintético (un `auth.users` falso para "la clave") es una complejidad nueva que rompe supuestos del resto del esquema (perfiles, auditoría) sin necesidad real.
+-- Sin policy de insert/update/delete: solo las RPCs de abajo pueden escribir
+-- esta tabla, y corren con privilegios de servicio, no con los del caller.
 
-**Resolución:** la clave de API actúa **con la identidad del owner que la creó** (`created_by`). Al verificar la clave:
-1. Hashear el secreto recibido, buscar la fila en `organization_api_keys` con `revoked_at is null`.
-2. Si no hay match → `401 INVALID_API_KEY`.
-3. Si hay match, resolver `organization_id` y `created_by` de esa fila, y construir el mismo `OrganizationContext` que ya usa el resto del sistema, mirando el rol real de `created_by` en `organization_members` para esa organización (debe seguir siendo owner — si el owner perdió ese rol o fue removido después de crear la clave, la clave deja de funcionar hasta que otro owner la reemplace; esto es intencional, no un bug).
-4. Construir un repositorio nuevo con `createSupabaseServiceRoleClient()` + ese `OrganizationContext`, exactamente como ya hace `createContentRepository` — se reutiliza `createSupabaseRepository` sin modificarlo.
+create function public.create_organization_api_key(p_organization_id uuid, p_label text)
+returns table (id uuid, key_prefix text, secret text)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_secret text := 'sk_live_' || encode(gen_random_bytes(32), 'hex');
+  v_hash text := encode(digest(v_secret, 'sha256'), 'hex');
+  v_prefix text := left(v_secret, 12);
+  v_id uuid;
+begin
+  if not public.has_organization_role(p_organization_id, array['owner']::public.organization_role[]) then
+    raise exception using errcode = 'P0001', message = 'NOT_ORGANIZATION_OWNER';
+  end if;
+  insert into public.organization_api_keys (organization_id, label, key_hash, key_prefix, created_by)
+  values (p_organization_id, p_label, v_hash, v_prefix, auth.uid())
+  returning organization_api_keys.id into v_id;
+  return query select v_id, v_prefix, v_secret;
+end;
+$$;
 
-Esto significa que ninguna RPC ni política existente necesita cambiar: para el resto del sistema, una request autenticada por API key es indistinguible en shape de una request de sesión, solo cambia cómo se llegó a `userId`/`role`.
+create function public.revoke_organization_api_key(p_key_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_organization_id uuid;
+begin
+  select organization_id into v_organization_id
+  from public.organization_api_keys where id = p_key_id;
+  if v_organization_id is null
+     or not public.has_organization_role(v_organization_id, array['owner']::public.organization_role[]) then
+    raise exception using errcode = 'P0001', message = 'NOT_ORGANIZATION_OWNER';
+  end if;
+  update public.organization_api_keys set revoked_at = now()
+  where id = p_key_id and revoked_at is null;
+end;
+$$;
 
-**Corrección ronda 1 (aislamiento por request):** el repositorio se construye **de cero en cada request** — nunca se reutiliza ni se cachea entre requests concurrentes (a diferencia del `demoRepository` singleton de `repository-factory.ts:106-110`, que existe solo para el modo demo sin red). La API v1 además **rechaza explícitamente el modo demo**: si `getContentRepositoryMode()` devuelve `"demo"` o `"misconfigured"`, la ruta responde `503 INTEGRATION_NOT_CONFIGURED` en vez de servir datos de demostración a una integración externa real.
+revoke all on function public.create_organization_api_key(uuid, text) from public, anon;
+revoke all on function public.revoke_organization_api_key(uuid) from public, anon;
+grant execute on function public.create_organization_api_key(uuid, text) to authenticated;
+grant execute on function public.revoke_organization_api_key(uuid) to authenticated;
+```
+
+- El secreto se genera server-side dentro de la RPC (nunca lo elige el caller), se devuelve **una sola vez** en la respuesta de creación, y se persiste hasheado (sha-256, apto para secretos de alta entropía generados por el sistema — no bcrypt, pensado para contraseñas humanas de baja entropía).
+- **Corrección ronda 2 (hallazgo real — la ronda 1 proponía `revoke select (key_hash) ... from authenticated`, que no tiene efecto si el rol ya tiene `SELECT` a nivel de tabla, que es como Supabase concede privilegios por defecto):**
+
+```sql
+revoke select on public.organization_api_keys from authenticated;
+grant select (id, organization_id, label, key_prefix, created_by, created_at, last_used_at, revoked_at)
+  on public.organization_api_keys to authenticated;
+```
+
+  Esto sí logra el aislamiento: `authenticated` pierde el privilegio de tabla completo y recupera solo las columnas seguras — `key_hash` queda fuera de ese grant, así que ninguna consulta directa con el cliente autenticado normal puede leerla, sin importar qué permita RLS a nivel de fila. La verificación de la clave (ver más abajo) corre con el cliente de **service role**, que **no está sujeto a RLS ni a estos grants de `authenticated`** — es un rol de Postgres distinto con su propio acceso completo por diseño de Supabase, no algo que dependa de estos GRANT/REVOKE.
+
+### Gestión de claves — HTTP (nuevo, ausente en la versión anterior)
+
+**Corrección ronda 2 (hallazgo real):** la versión anterior de este spec nunca definió cómo un owner realmente crea o revoca una clave desde la aplicación — solo describía la tabla. Estas rutas son **autenticadas por sesión** (el owner ya logueado en el dashboard), no por API key — son gestión, no la superficie v1 en sí:
+
+- `POST /api/organizations/:id/api-keys` — body `{ label: string }`, llama a `create_organization_api_key`, responde `{ id, keyPrefix, secret }` (una sola vez).
+- `GET /api/organizations/:id/api-keys` — lista metadatos (nunca `secret` ni `key_hash`).
+- `DELETE /api/organizations/:id/api-keys/:keyId` — llama a `revoke_organization_api_key`.
+
+### Autenticación de la superficie v1: header y verificación
+
+Cada request a `/api/v1/*` lleva `Authorization: Bearer <secreto>`. Verificación:
+
+1. Hashear el secreto recibido (sha-256), buscar en `organization_api_keys` con `revoked_at is null`, usando el cliente de **service role** (necesario porque no hay `auth.uid()` para una request externa — no hay sesión de la que depender).
+2. Sin match → `401 INVALID_API_KEY`.
+3. Con match, resolver `organization_id` y `created_by`. Buscar el rol real de `created_by` en `organization_members` para esa organización.
+4. **Corrección ronda 2 (hallazgo real):** la ronda 1 asumía que si el owner pierde su rol, "la clave deja de funcionar" — pero nada en el código fuerza eso: `OrganizationContext` (`lib/organizations/context.ts:7-13`) acepta cualquier `OrganizationRole`, y las RPCs no todas exigen `owner` específicamente. Ahora la verificación **exige explícitamente `role === "owner"`** — si `created_by` ya no es owner de esa organización (cambió de rol, o ya no es miembro), la clave se trata como inválida: `401 INVALID_API_KEY`, el mismo código que una clave inexistente, sin distinguir el motivo al caller externo.
+5. Con un owner válido confirmado, construir el mismo `OrganizationContext` que ya usa el resto del sistema (`{organizationId, userId: created_by, role: "owner"}`) y un repositorio **nuevo, construido para esta request únicamente** — nunca cacheado ni reutilizado entre requests concurrentes (a diferencia del `demoRepository` singleton de `repository-factory.ts:106-110`, que existe solo para el modo demo).
+6. La API v1 **rechaza el modo demo/no-configurado explícitamente**: si `getContentRepositoryMode()` no es `"supabase"`, la ruta responde `503 INTEGRATION_NOT_CONFIGURED`.
+7. **Corrección ronda 2 (manejo de errores faltante):** `requireOrganizationContext` (usado internamente al construir el contexto) puede lanzar `OrganizationAccessError` (`lib/organizations/context.ts:23-28`) si la membresía desapareció entre el paso 3 y el 5 — las rutas nuevas capturan ese tipo de error explícitamente y responden `401 INVALID_API_KEY`, igual que cualquier otro fallo de autenticación de esta superficie. No se deja que escape como una excepción sin manejar.
 
 ### Superficie v1 — `/api/v1/campaigns`
 
-Todas las rutas reutilizan la lógica de `lib/content/repository.ts` ya existente — esta API es una fachada de autenticación distinta sobre el mismo dominio, no un pipeline paralelo.
+- **`GET /api/v1/campaigns`** — lista las campañas de la organización resuelta por la clave. Equivalente a `GET /api/content`.
+- **`GET /api/v1/campaigns/:id`** — detalle, mismo shape que `ContentRecord` (content, asset, targets, drafts, auditEvents, publicationResults, finalCopy). No incluye un campo de "diagnóstico" — esa pieza depende del diseño técnico pendiente de ADR-008, no se inventa aquí.
+- **`POST /api/v1/campaigns`** — crea una campaña. Mismo contrato que `POST /api/content`: `multipart/form-data`, campo `brief` (`campaignBriefSchema`) y campo `asset` (`validateAsset`/`MAX_ASSET_BYTES`, 20MB). Si la organización tiene un logo configurado, se estampa automáticamente server-side antes de seguir el pipeline (ver composición de logo). Sin logo configurado, la campaña se crea igual, sin error.
 
-- **`GET /api/v1/campaigns`** — lista las campañas de la organización resuelta por la clave. Equivalente a `GET /api/content` (`app/api/content/route.ts:24-48`) pero con auth por clave.
-- **`GET /api/v1/campaigns/:id`** — detalle de una campaña. Devuelve el mismo shape que ya expone `ContentRecord` (`lib/content/repository.ts:239-247`: content, asset, targets, drafts, auditEvents, publicationResults, finalCopy). **Corrección ronda 1:** el spec original prometía un campo de "estado del diagnóstico" que no existe en `ContentRecord` — se retira esa promesa de este documento. Exponer el diagnóstico de riesgo de ADR-008 (`lib/aias/publication-diagnosis.ts`, una función distinta a `createCampaignPreflight`) es una extensión natural una vez que el diseño técnico pendiente de ADR-008 exista; no se inventa aquí sobre una pieza que todavía no está especificada.
-- **`POST /api/v1/campaigns`** — crea una campaña. Mismo contrato que `POST /api/content` (`app/api/content/route.ts:68-147`): `multipart/form-data` con campo `brief` (JSON validado por `campaignBriefSchema`, `lib/content/campaign.ts:16-23`) y campo `asset` (el creativo, validado por `validateAsset`/`MAX_ASSET_BYTES`). **Diferencia real con el camino humano:** si la organización tiene un logo configurado, el logo se estampa sobre el creativo automáticamente, server-side, antes de seguir el resto del pipeline — ver la sección de composición de logo. Si la organización no tiene logo todavía, la campaña se crea igual, sin logo, sin error.
-- **`POST /api/v1/campaigns/:id/publish`** — dispara la publicación de un target específico.
-  **Corrección ronda 1 (contrato incompleto en la versión anterior):** el body requiere `publicationTargetId` (una campaña puede tener targets de Facebook e Instagram simultáneamente — el llamador elige cuál) y acepta un `idempotencyKey` opcional (si se omite, se genera uno nuevo), igual que ya exige `lib/content/repository.ts:114-118` / `lib/integrations/n8n-client.ts:13-30`.
-  **Corrección ronda 1 (clasificación de errores):** `preparePublishRequest` (`lib/supabase/repository.ts:992-1007`) devuelve el mismo `PublishTargetConflictError` tanto para "el target no existe / no pertenece a esta organización" como para "existe pero no está `APPROVED` todavía" — colapsar ambos en la respuesta filtraría a un caller externo si un target de OTRA organización existe o no. La ruta hace la distinción ella misma, en dos pasos: (1) una consulta propia de existencia+pertenencia por `organization_id`, que responde `404 TARGET_NOT_FOUND` si no hay fila para esta organización, sin filtrar si existe para otra; (2) solo si (1) pasa, llama a `preparePublishRequest` y traduce cualquier conflicto restante (ya sabemos que el target existe y es de esta organización) a `409 TARGET_NOT_APPROVED`.
-  **Sobre "publicar sin aprobación humana" (ver advertencia de la cabecera):** hoy, esto significa que el target debe haber llegado a estado `APPROVED` por el camino que sea (hoy: revisión humana vía `/review`; en el futuro: automáticamente, cuando el mecanismo técnico de ADR-008 exista). Este endpoint no implementa ni simula ese mecanismo — llama al mismo `preparePublishRequest` que ya usa el resto del sistema, así que heredará el comportamiento de ADR-008 automáticamente el día que esa pieza se construya, sin necesitar cambios aquí.
+- **`POST /api/v1/campaigns/:id/publish`** — publica un target específico.
+
+  **Corrección ronda 2 (hallazgo real de seguridad — el contrato anterior era explotable):** `n8nPublishRequestInputSchema` (`lib/integrations/n8n-client.ts:13-30`) exige `contentItemId`, `publicationTargetId`, `assetUrl` **y** `copy`, y `requestN8nPublish` reenvía `assetUrl`/`copy` tal cual al webhook de n8n **sin compararlos con lo almacenado**. La ruta interna de n8n (`app/api/integrations/n8n/publish/route.ts`) es segura porque su único caller legítimo hoy es interno. Un caller externo de API v1 NO debe poder declarar su propio `assetUrl`/`copy` — podría publicar contenido distinto del que realmente fue generado/aprobado. Por eso, el body público de este endpoint acepta **solo** `{ publicationTargetId: string, idempotencyKey?: string }`; la ruta **deriva** `contentItemId` (de la URL `:id`), `assetUrl` y `copy` leyendo el `ContentRecord` ya almacenado, y arma el payload completo para `requestN8nPublish` con esos valores server-side, nunca con lo que mande el caller.
+
+  **Corrección ronda 2 (clasificación de errores todavía incompleta en la ronda 1):** la ronda 1 solo distinguía 404 (no existe/no es de esta organización) de 409 (existe pero no está `APPROVED`), pero `preparePublishRequest` (`lib/supabase/repository.ts:1003`) colapsa un **error real de consulta** en el mismo `PublishTargetConflictError` que "no encontrado" — un fallo transitorio de base de datos no debe convertirse en un falso `409 TARGET_NOT_APPROVED`. La ruta ahora distingue tres casos explícitamente: (1) consulta propia de existencia+pertenencia por `organization_id` que no encuentra fila → `404 TARGET_NOT_FOUND`; (2) esa misma consulta lanza una excepción real → `503 TARGET_LOOKUP_FAILED`; (3) fila encontrada pero no `APPROVED` → `409 TARGET_NOT_APPROVED`. Solo llegando limpio a (3) con estado `APPROVED` se procede a `requestN8nPublish`.
+
+  **Vacío heredado, no de este spec (ver Contexto):** aun con lo anterior correcto, la falta de un registro `automation_runs`/`PUBLISH_REQUEST` en `preparePublishRequest` puede hacer que una publicación aparentemente aceptada falle después en el callback. Este spec no lo oculta ni lo intenta resolver — lo hereda igual que ya lo hereda hoy la ruta interna de n8n.
 
 ### Composición de logo server-side
 
-Justificación de por qué esto no rompe la promesa de "las imágenes nunca salen del navegador" del compositor de logo original: esa promesa era específica al uso manual e interactivo en `/tools/logo-studio`, con una persona operando un navegador. Una llamada de API hecha por un agente externo no tiene navegador en el medio — el creativo viaja por HTTP de todas formas, es inherente a ser una API. La promesa nunca aplicó a este camino.
+Justificación de por qué esto no rompe la promesa de "las imágenes nunca salen del navegador" del compositor de logo original: esa promesa era específica al uso manual e interactivo en `/tools/logo-studio` — una llamada de API no tiene navegador en el medio, el creativo viaja por HTTP de todas formas.
 
-- La matemática pura de posicionamiento (`computeLogoPlacement`, `lib/logo-studio/compose.ts:5-30`) es agnóstica de entorno (no usa DOM, verificado) y se reutiliza tal cual.
-- El renderizado (`compositeToBlob`, `lib/logo-studio/compose.ts:32-59`) sí depende de `document.createElement("canvas")` y `Image`, ambos inexistentes en Node — necesita un puerto server-side equivalente (a decidir en el plan: `sharp` o `@napi-rs/canvas` son las opciones típicas de Node; la elección concreta y su justificación quedan para la fase de plan, no de spec).
-- El logo de la organización se descarga del mismo bucket `organization-logos` que ya usa la ruta manual (`app/api/organizations/[id]/logo/route.ts`) — no se duplica almacenamiento.
-- Límite del logo: baja de 5MB a **2MB**. **Corrección ronda 1 (hallazgo real):** `MAX_LOGO_BYTES` hoy solo se valida en el `POST` de subida (`app/api/organizations/[id]/logo/route.ts:11,146-155`) — el `GET`/descarga no revalida tamaño ni intenta decodificar el archivo. El flujo server-side nuevo debe validar tamaño y decodificación del logo **descargado** antes de compositarlo, no asumir que ya es válido solo porque pasó la subida en algún momento anterior (pudo subirse antes de bajar el límite a 2MB, por ejemplo).
-- Límite del creativo: `MAX_ASSET_BYTES` (20MB, `lib/content/asset-validation.ts:8`) — el que ya rige `POST /api/content`, heredado sin cambios.
-- **Corrección ronda 1 (hallazgo real, integridad del resultado):** el resultado de componer el logo sobre el creativo cambia bytes, y potencialmente MIME y dimensiones — no se puede persistir directamente. El asset compuesto pasa por **el mismo `validateAsset`** (`lib/content/asset-validation.ts:135-...`) que ya corre sobre cualquier asset antes de `createContentItemWithAsset`, recalculando dimensiones, MIME y checksum sobre el resultado final, no sobre el creativo original.
+- `computeLogoPlacement` (`lib/logo-studio/compose.ts:5-30`) es agnóstico de entorno y se reutiliza tal cual.
+- `compositeToBlob` depende de DOM (canvas/`Image`) y necesita un puerto server-side (`sharp` o `@napi-rs/canvas` — decisión concreta en el plan, no en el spec).
+- El logo se descarga del mismo bucket `organization-logos` que ya usa la ruta manual — no se duplica almacenamiento.
+- **Corrección ronda 2 (inconsistencia real, no resuelta en la ronda 1):** la ronda 1 decía "el logo baja a 2MB" pero nunca comprometía el cambio concreto — `MAX_LOGO_BYTES` en `app/api/organizations/[id]/logo/route.ts:11` seguía en 5MB. Ahora es explícito: **esa constante cambia a `2 * 1024 * 1024` como parte de este plan**, aplicada tanto al `POST` de subida como a la validación del objeto descargado para composición (el `GET`/download hoy no revalida tamaño ni decodificación en absoluto, `:88-100,214-217` — el flujo nuevo sí lo hace). Un solo límite, un solo lugar de verdad, sin una subida manual pudiendo "colar" un logo que luego rompe la composición por API. Un logo ya subido por encima de 2MB antes de este cambio (borde teórico — no hay ningún logo real subido todavía en ningún entorno) se trata en la composición como fallo controlado (`503 LOGO_TOO_LARGE`), no como crash.
+- El resultado compuesto se revalida con el mismo `validateAsset` que corre sobre cualquier asset antes de persistir — recalcula dimensiones, MIME y checksum sobre el archivo final, no sobre el creativo original.
 
-**Explícitamente fuera de alcance:** el flujo humano `/library/new` no cambia — sigue sin estampar el logo automáticamente. Extender ese comportamiento ahí es una mejora válida pero distinta (toca el pipeline manual existente, no solo la superficie de API nueva); queda anotada como pendiente futuro, no se mezcla en este spec ni en su plan.
+**Explícitamente fuera de alcance:** el flujo humano `/library/new` no cambia — sigue sin estampar el logo automáticamente.
 
 ## Seguridad y auditoría
 
-- Aislamiento entre organizaciones: ninguna clave de la organización A puede leer o modificar datos de la organización B — cubierto por tests dedicados, mismo estándar que ya se aplicó al bucket de logos.
-- **Corrección ronda 1 (schema real):** `audit_events.actor_id` es `uuid references public.profiles(id)` (`supabase/migrations/0001_content_os.sql:96-104`), no un campo de texto libre — la idea original de escribir `"api_key:<label>"` ahí no encaja. En su lugar: `actor_id` guarda el `uuid` real del owner (`created_by`, el mismo principal resuelto arriba — ya es un `profiles.id` válido, sin cambios de esquema), y la columna `metadata jsonb` (ya existente en la tabla, `0001_content_os.sql:103`) lleva `{"via": "api_key", "api_key_id": "...", "api_key_label": "..."}`. Esto distingue una acción disparada por API de una hecha en sesión de navegador sin tocar el esquema de auditoría.
-- **Corrección ronda 1 (alcance real de "revocación inmediata"):** una clave revocada deja de **autenticar** desde el siguiente request en adelante — no cancela requests ya en vuelo, y no invalida URLs firmadas ya emitidas durante una request anterior (las URLs firmadas de `getContentRecord`, `lib/supabase/repository.ts:754-758`, ya duran 10 minutos por diseño, independientemente de la clave que las pidió). Es el mismo límite que ya existe para cualquier otra revocación de acceso en este sistema; no se promete algo más fuerte de lo que la arquitectura actual puede dar.
-- Sin rate-limiting en esta primera versión — recorte deliberado de alcance (YAGNI), no un descuido. Se agrega si se vuelve un problema real medido, no de forma preventiva.
-- Sin scopes finos por acción — ver decisión 5 arriba.
+- Aislamiento entre organizaciones: cubierto por tests dedicados, mismo estándar que Logo Studio.
+- **Corrección ronda 2 (hallazgo real — el mecanismo de la ronda 1 no existía):** la ronda 1 proponía que `actor_id` fuera el `uuid` del owner y `metadata` cargara `{"via": "api_key", ...}`, y afirmaba que ninguna RPC necesitaba cambiar. Falso: las RPCs actuales insertan `metadata` con `jsonb_build_object(...)` de campos fijos, sin ningún parámetro para adjuntar contexto extra (ver p. ej. `supabase/migrations/0009_tenantize_content_and_jobs.sql:207-211`). Las RPCs relevantes para acciones que la API v1 puede disparar (creación de campaña, solicitud de publicación) se extienden con un parámetro opcional `p_actor_metadata jsonb default '{}'::jsonb`, fusionado (`||`) dentro del `jsonb_build_object` existente — la lista exacta de RPCs a tocar se enumera en el plan. `actor_id` sigue siendo el `uuid` real del owner (sin cambios de esquema); `metadata` gana `{"via": "api_key", "apiKeyId": "...", "apiKeyLabel": "..."}` cuando la acción vino de una clave.
+- Revocación: una clave revocada deja de **autenticar** desde el siguiente request en adelante — no cancela requests ya en vuelo ni invalida URLs firmadas ya emitidas (10 minutos de validez, `lib/supabase/repository.ts:754-758`, sin cambios).
+- Sin rate-limiting en esta primera versión — recorte deliberado (YAGNI).
+- Sin scopes finos por acción — decisión deliberada de Axel.
 
 ## Fuera de alcance (explícito)
 
-- Scopes granulares por acción (`campaigns:read`, `publish:execute`, ...).
+- Scopes granulares por acción.
 - Estampado automático de logo en el flujo manual `/library/new`.
 - Los 8 kits locales de Claude Code.
-- El diseño técnico pendiente de ADR-008 (cómo el publisher real consulta el diagnóstico antes de publicar) — pieza propia, con su propio spec, no de esta API.
-- La envoltura MCP en sí (herramientas orquestables por un agente) — sub-proyecto siguiente, spec aparte, depende de que esta API exista y esté mergeada primero.
+- El diseño técnico pendiente de ADR-008.
+- Arreglar el vacío preexistente de `automation_runs`/`PUBLISH_REQUEST` en el pipeline de publicación — heredado, documentado, no resuelto aquí.
+- La envoltura MCP en sí — sub-proyecto siguiente.
 - Rate-limiting.
 
 ## Testing (nivel de spec, detalle real en el plan)
 
-- Claves hasheadas verificadas correctamente; una clave revocada deja de autenticar en el siguiente request, sin excepción.
-- Ningún cross-tenant leak: pedir un recurso de otra organización con una clave válida responde `404`, nunca confirma ni niega existencia con detalle.
-- `key_hash` nunca viajero en ninguna respuesta de la API, verificado también a nivel de privilegio de columna (no solo por omisión accidental en el código de serialización).
-- Creación de campaña vía API con logo configurado produce un asset con el logo compuesto y revalidado (dimensiones/MIME/checksum recalculados); sin logo configurado, produce el asset sin logo, sin error.
-- Publicación vía API: target inexistente o de otra organización → 404; target existente pero no `APPROVED` → 409; target `APPROVED` → sigue exactamente el mismo camino que ya usa `preparePublishRequest`/n8n hoy.
-- Repositorio construido de cero por request — un test concurrente con dos claves de dos organizaciones distintas confirma que ninguna ve datos de la otra, sin depender de orden de ejecución.
-- Modo demo/no-configurado responde `503`, nunca sirve datos falsos a un caller de API real.
-- Límites de tamaño (2MB logo, incluyendo el descargado; `MAX_ASSET_BYTES` creativo) rechazados con el código de estado correcto.
+- Claves hasheadas verificadas correctamente; clave revocada, o cuyo creador ya no es owner, deja de autenticar (mismo `401 INVALID_API_KEY` en ambos casos, sin distinguir el motivo).
+- `create_organization_api_key`/`revoke_organization_api_key` rechazan a un no-owner; ninguna policy de INSERT/UPDATE de propósito general existe sobre la tabla.
+- `key_hash` nunca viaja en ninguna respuesta ni es alcanzable por el cliente autenticado normal — verificado también a nivel de grant de columna (`grant select (...)` explícito, no un `revoke` de columna sobre un rol que igual conserva SELECT de tabla).
+- Ningún cross-tenant leak en `GET`/`publish`: recurso de otra organización responde `404`.
+- Publicación: target inexistente o de otra organización → 404; error real de consulta → 503 (nunca 409 falso); target no aprobado → 409; target aprobado → sigue el mismo camino que ya usa `preparePublishRequest`/n8n hoy, con `assetUrl`/`copy` derivados del registro almacenado, nunca del body del caller.
+- Creación de campaña vía API con logo configurado produce un asset con el logo compuesto y revalidado; sin logo, produce el asset sin logo, sin error; logo heredado por encima de 2MB → fallo controlado, no crash.
+- Repositorio construido de cero por request; modo demo/no-configurado responde 503, nunca sirve datos falsos a un caller real.
+- RPCs extendidas con `p_actor_metadata` siguen aceptando el flujo existente sin ese parámetro (default `{}`), sin romper los callers de sesión actuales.
