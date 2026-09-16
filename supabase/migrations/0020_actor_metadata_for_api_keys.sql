@@ -64,11 +64,11 @@ $$;
 
 revoke all on function public.create_content_item_with_asset_in_organization(
   uuid, uuid, uuid, text, text, text, integer, integer, text, text, text, text,
-  text, text, text, text, text, jsonb, text, text, text, text, text, jsonb
+  text, text, text, text, text, jsonb, text, text, text, text, text, text, jsonb
 ) from public, anon, authenticated;
 grant execute on function public.create_content_item_with_asset_in_organization(
   uuid, uuid, uuid, text, text, text, integer, integer, text, text, text, text,
-  text, text, text, text, text, jsonb, text, text, text, text, text, jsonb
+  text, text, text, text, text, jsonb, text, text, text, text, text, text, jsonb
 ) to service_role;
 
 drop function if exists public.enqueue_copy_automation_job(uuid, uuid, uuid, uuid);
