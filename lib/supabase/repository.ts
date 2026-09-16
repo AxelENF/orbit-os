@@ -673,6 +673,21 @@ class SupabaseContentRepository
     return toPublicationTargets(data);
   }
 
+  async checkPublicationTargetOwnership(
+    contentItemId: string,
+    publicationTargetId: string,
+  ): Promise<{ target: { id: string; status: string } | null; failed: boolean }> {
+    const { data, error } = await this.client
+      .from("publication_targets")
+      .select("id, status")
+      .eq("id", publicationTargetId)
+      .eq("content_item_id", contentItemId)
+      .eq("organization_id", this.organization.organizationId)
+      .maybeSingle();
+    if (error) return { target: null, failed: true };
+    return { target: data as { id: string; status: string } | null, failed: false };
+  }
+
   async listContentItems(): Promise<ContentItem[]> {
     const { data, error } = await this.client
       .from("content_items")

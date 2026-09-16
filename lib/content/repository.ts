@@ -328,6 +328,13 @@ export interface ContentRepository
   listContentSummaries(): Promise<ContentSummary[]>;
   getContentRecord(contentItemId: string): Promise<ContentRecord | null>;
   listPublicationTargets(contentItemId: string): Promise<PublicationTarget[]>;
+  // Existencia + pertenencia + estado de un target, clasificados por
+  // separado de PublishTargetConflictError (que colapsa "no existe" y "error
+  // real" en el mismo tipo) — ver spec, sección de publicación.
+  checkPublicationTargetOwnership(
+    contentItemId: string,
+    publicationTargetId: string,
+  ): Promise<{ target: { id: string; status: string } | null; failed: boolean }>;
   approvePublicationTarget(
     contentItemId: string,
     publicationTargetId: string,

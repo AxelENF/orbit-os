@@ -203,6 +203,15 @@ export class DemoContentRepository
     return structuredClone(this.targetsByContentItem.get(contentItemId) ?? []);
   }
 
+  async checkPublicationTargetOwnership(
+    contentItemId: string,
+    publicationTargetId: string,
+  ): Promise<{ target: { id: string; status: string } | null; failed: boolean }> {
+    const targets = this.targetsByContentItem.get(contentItemId) ?? [];
+    const target = targets.find((candidate) => candidate.id === publicationTargetId);
+    return { target: target ? { id: target.id, status: target.status } : null, failed: false };
+  }
+
   async listContentItems(): Promise<ContentItem[]> {
     return structuredClone([...this.contentItems.values()]);
   }
