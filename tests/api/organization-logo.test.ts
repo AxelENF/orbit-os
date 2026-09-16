@@ -234,8 +234,8 @@ describe("POST /api/organizations/[id]/logo", () => {
     });
   });
 
-  it("rejects a file over 5MB with 413", async () => {
-    const tooLarge = new Uint8Array(5 * 1024 * 1024 + 1);
+  it("rejects a file over 2MB with 413", async () => {
+    const tooLarge = new Uint8Array(2 * 1024 * 1024 + 1);
     tooLarge.set(pngSignature);
     const handler = createOrganizationLogoPostHandler({
       getSession: async () => ({ userId: "user-1" }),

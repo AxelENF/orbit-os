@@ -8,7 +8,7 @@ import {
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 const organizationIdSchema = z.string().uuid();
-const MAX_LOGO_BYTES = 5 * 1024 * 1024;
+export const MAX_LOGO_BYTES = 2 * 1024 * 1024;
 const PNG_SIGNATURE = [
   0x89,
   0x50,
