@@ -4,10 +4,16 @@ export type OrganizationSession = {
   userId: string;
 };
 
+export type OrganizationApiKeyContext = {
+  id: string;
+  label: string;
+};
+
 export type OrganizationMembership = {
   organizationId: string;
   userId: string;
   role: OrganizationRole;
+  apiKey?: OrganizationApiKeyContext;
 };
 
 export type OrganizationContext = OrganizationMembership;

@@ -280,6 +280,63 @@ describe("SupabaseContentRepository", () => {
     );
   });
 
+  it("passes p_actor_metadata with the api key context when the organization context came from an API key", async () => {
+    // createContentItemWithAsset (singular) is a thin wrapper around the
+    // atomic multi-asset RPC (create_content_item_with_assets_in_organization,
+    // plural) — the RPC name below reflects that, not the older
+    // singular-only RPC.
+    const rpc = vi.fn().mockResolvedValue({ data: createdRow, error: null });
+    const upload = vi.fn().mockResolvedValue({ error: null });
+    const client = { rpc, storage: { from: () => ({ upload }) } };
+    const organizationWithApiKey = { ...organizationA, apiKey: { id: "key-1", label: "n8n integration" } };
+    const repository = createSupabaseRepository(client as never, organizationWithApiKey);
+
+    await repository.createContentItemWithAsset({
+      brief: validBrief,
+      asset: {
+        id: "c1b1a1a1-1111-4111-8111-111111111111",
+        filename: "creative.png",
+        mimeType: "image/png",
+        width: 1080,
+        height: 1350,
+        checksum: "a".repeat(64),
+        bytes: new Uint8Array([1, 2, 3]),
+      },
+    });
+
+    expect(rpc).toHaveBeenCalledWith(
+      "create_content_item_with_assets_in_organization",
+      expect.objectContaining({
+        p_actor_metadata: { via: "api_key", apiKeyId: "key-1", apiKeyLabel: "n8n integration" },
+      }),
+    );
+  });
+
+  it("passes an empty p_actor_metadata when the organization context has no apiKey (session-authenticated)", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: createdRow, error: null });
+    const upload = vi.fn().mockResolvedValue({ error: null });
+    const client = { rpc, storage: { from: () => ({ upload }) } };
+    const repository = createSupabaseRepository(client as never, organizationA);
+
+    await repository.createContentItemWithAsset({
+      brief: validBrief,
+      asset: {
+        id: "c1b1a1a1-1111-4111-8111-111111111111",
+        filename: "creative.png",
+        mimeType: "image/png",
+        width: 1080,
+        height: 1350,
+        checksum: "a".repeat(64),
+        bytes: new Uint8Array([1, 2, 3]),
+      },
+    });
+
+    expect(rpc).toHaveBeenCalledWith(
+      "create_content_item_with_assets_in_organization",
+      expect.objectContaining({ p_actor_metadata: {} }),
+    );
+  });
+
   it("propagates an RPC failure without attempting partial repository writes", async () => {
     const rpc = vi.fn().mockResolvedValue({
       data: null,
@@ -572,7 +629,39 @@ describe("SupabaseContentRepository", () => {
       p_actor_id: organizationA.userId,
       p_content_item_id: createdRow.id,
       p_idempotency_key: idempotencyKey,
+      p_actor_metadata: {},
     });
+  });
+
+  it("passes p_actor_metadata to enqueue_copy_automation_job when the context came from an API key", async () => {
+    const jobId = "d32c92ce-9e2b-4aa2-9c39-5c5d97746156";
+    const idempotencyKey = "4a150496-852d-46d4-8f25-951f6512db73";
+    const rpc = vi.fn().mockResolvedValue({ data: { created: true, jobId, idempotencyKey }, error: null });
+    const organizationWithApiKey = { ...organizationA, apiKey: { id: "key-1", label: "n8n integration" } };
+    const repository = createSupabaseRepository({ rpc } as never, organizationWithApiKey);
+
+    await repository.enqueueCopyJob({ contentItemId: createdRow.id, idempotencyKey });
+
+    expect(rpc).toHaveBeenCalledWith(
+      "enqueue_copy_automation_job",
+      expect.objectContaining({
+        p_actor_metadata: { via: "api_key", apiKeyId: "key-1", apiKeyLabel: "n8n integration" },
+      }),
+    );
+  });
+
+  it("passes an empty p_actor_metadata to enqueue_copy_automation_job for a session-authenticated context", async () => {
+    const jobId = "d32c92ce-9e2b-4aa2-9c39-5c5d97746156";
+    const idempotencyKey = "4a150496-852d-46d4-8f25-951f6512db73";
+    const rpc = vi.fn().mockResolvedValue({ data: { created: true, jobId, idempotencyKey }, error: null });
+    const repository = createSupabaseRepository({ rpc } as never, organizationA);
+
+    await repository.enqueueCopyJob({ contentItemId: createdRow.id, idempotencyKey });
+
+    expect(rpc).toHaveBeenCalledWith(
+      "enqueue_copy_automation_job",
+      expect.objectContaining({ p_actor_metadata: {} }),
+    );
   });
 
   it("claims derived asset data and completes a job only through service RPCs", async () => {

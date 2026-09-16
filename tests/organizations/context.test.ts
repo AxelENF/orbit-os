@@ -31,6 +31,14 @@ describe("organization context", () => {
     expect(context).toEqual({ organizationId, userId: ownerId, role: "owner" });
   });
 
+  it("carries an optional apiKey field, absent by default, for session-authenticated contexts", async () => {
+    const context = await requireOrganizationContext("org-1", {
+      getSession: async () => ({ userId: "user-1" }),
+      getMembership: async () => ({ organizationId: "org-1", userId: "user-1", role: "owner" }),
+    });
+    expect(context.apiKey).toBeUndefined();
+  });
+
   it("rejects an authenticated user who is not a member", async () => {
     await expect(
       requireOrganizationContext(organizationId, {

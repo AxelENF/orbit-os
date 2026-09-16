@@ -621,6 +621,9 @@ class SupabaseContentRepository
           p_campaign_code: campaign.success
             ? buildCampaignCode(campaign.data.campaignName, coverAsset.id)
             : null,
+          p_actor_metadata: this.organization.apiKey
+            ? { via: "api_key", apiKeyId: this.organization.apiKey.id, apiKeyLabel: this.organization.apiKey.label }
+            : {},
         },
       );
 
@@ -1092,6 +1095,9 @@ class SupabaseContentRepository
       p_actor_id: this.organization.userId,
       p_content_item_id: input.contentItemId,
       p_idempotency_key: input.idempotencyKey,
+      p_actor_metadata: this.organization.apiKey
+        ? { via: "api_key", apiKeyId: this.organization.apiKey.id, apiKeyLabel: this.organization.apiKey.label }
+        : {},
     });
     if (error) {
       if (
