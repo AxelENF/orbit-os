@@ -193,6 +193,10 @@ export class DemoContentRepository
     });
   }
 
+  async downloadOrganizationLogo(): Promise<Buffer | null> {
+    return null;
+  }
+
   async listPublicationTargets(
     contentItemId: string,
   ): Promise<PublicationTarget[]> {

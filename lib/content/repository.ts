@@ -320,6 +320,10 @@ export interface ContentRepository
     brief: unknown;
     asset: ContentAssetUpload;
   }): Promise<ContentItem>;
+  // Descarga el logo de la organización activa para composición server-side.
+  // null cuando la organización no tiene logo configurado todavía — nunca
+  // lanza para ese caso, solo para un fallo real de Storage.
+  downloadOrganizationLogo(): Promise<Buffer | null>;
   listContentItems(): Promise<ContentItem[]>;
   listContentSummaries(): Promise<ContentSummary[]>;
   getContentRecord(contentItemId: string): Promise<ContentRecord | null>;

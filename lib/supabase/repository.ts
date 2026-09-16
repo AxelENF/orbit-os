@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import "server-only";
 
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { StorageApiError, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 
 import { contentBriefSchema } from "@/lib/content/contracts";
@@ -643,6 +643,17 @@ class SupabaseContentRepository
       brief: input.brief,
       assets: [input.asset],
     });
+  }
+
+  async downloadOrganizationLogo(): Promise<Buffer | null> {
+    const { data, error } = await this.client.storage
+      .from("organization-logos")
+      .download(`${this.organization.organizationId}/logo.png`);
+    if (error) {
+      if (error instanceof StorageApiError && error.code === "NoSuchKey") return null;
+      throw error;
+    }
+    return Buffer.from(await data.arrayBuffer());
   }
 
   async listPublicationTargets(
