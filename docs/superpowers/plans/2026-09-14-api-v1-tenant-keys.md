@@ -264,12 +264,30 @@ describe("actor metadata migration", () => {
     );
   });
 
-  it("re-grants execute on both recreated functions to authenticated", async () => {
+  it("re-grants execute on both recreated functions to service_role only, never to authenticated/public/anon", async () => {
+    // Corrección ronda 1 de revisión del plan (hallazgo real de seguridad):
+    // ambas funciones ya están revocadas de public/anon/authenticated y
+    // concedidas solo a service_role hoy (0009:321-329, 0010:151-156) —
+    // createContentRepository las llama con el cliente de service role
+    // después de validar la sesión en TypeScript (repository-factory.ts:193),
+    // nunca directo desde una sesión de navegador. Conceder EXECUTE a
+    // authenticated aquí abriría estas RPCs privilegiadas a cualquier
+    // usuario autenticado, saltándose esa validación.
     const sql = await readMigration();
     expect(sql).toMatch(
-      /grant execute on function public\.create_content_item_with_asset_in_organization\(/i,
+      /revoke all on function public\.create_content_item_with_asset_in_organization\([^)]*\) from public, anon, authenticated/is,
     );
-    expect(sql).toMatch(/grant execute on function public\.enqueue_copy_automation_job\(/i);
+    expect(sql).toMatch(
+      /grant execute on function public\.create_content_item_with_asset_in_organization\([^)]*\) to service_role/is,
+    );
+    expect(sql).toMatch(
+      /revoke all on function public\.enqueue_copy_automation_job\([^)]*\) from public, anon, authenticated/is,
+    );
+    expect(sql).toMatch(
+      /grant execute on function public\.enqueue_copy_automation_job\([^)]*\) to service_role/is,
+    );
+    expect(sql).not.toMatch(/grant execute on function public\.create_content_item_with_asset_in_organization\([^)]*\) to authenticated/is);
+    expect(sql).not.toMatch(/grant execute on function public\.enqueue_copy_automation_job\([^)]*\) to authenticated/is);
   });
 });
 ```
@@ -348,10 +366,22 @@ begin
 end;
 $$;
 
+-- Corrección ronda 1 de revisión del plan (hallazgo real de seguridad): la
+-- versión anterior de este plan concedía EXECUTE a `authenticated` — pero
+-- esta función hoy está revocada de public/anon/authenticated y concedida
+-- solo a service_role (0009:321-329); createContentRepository ya valida la
+-- sesión/membresía en TypeScript antes de invocarla con el cliente de
+-- service role (repository-factory.ts:193). Conceder EXECUTE a
+-- authenticated aquí saltearía esa validación para cualquier usuario con
+-- sesión. Se replica el mismo revoke/grant que la función ya tenía.
+revoke all on function public.create_content_item_with_asset_in_organization(
+  uuid, uuid, uuid, text, text, text, integer, integer, text, text, text, text,
+  text, text, text, text, text, jsonb, text, text, text, text, text, text, jsonb
+) from public, anon, authenticated;
 grant execute on function public.create_content_item_with_asset_in_organization(
   uuid, uuid, uuid, text, text, text, integer, integer, text, text, text, text,
   text, text, text, text, text, jsonb, text, text, text, text, text, text, jsonb
-) to authenticated;
+) to service_role;
 
 drop function if exists public.enqueue_copy_automation_job(uuid, uuid, uuid, uuid);
 
@@ -443,7 +473,11 @@ begin
 end;
 $$;
 
-grant execute on function public.enqueue_copy_automation_job(uuid, uuid, uuid, uuid, jsonb) to authenticated;
+-- Mismo motivo que create_content_item_with_asset_in_organization arriba:
+-- service_role únicamente, replicando el revoke/grant que ya tenía
+-- (0010:151-156).
+revoke all on function public.enqueue_copy_automation_job(uuid, uuid, uuid, uuid, jsonb) from public, anon, authenticated;
+grant execute on function public.enqueue_copy_automation_job(uuid, uuid, uuid, uuid, jsonb) to service_role;
 ```
 
 (Verifica contra el archivo real `0009_tenantize_content_and_jobs.sql` que no exista ninguna otra función que dependa de la firma vieja de 23 parámetros antes de aplicar el `drop function` — `grep -rn "create_content_item_with_asset_in_organization" supabase/ lib/` para confirmarlo.)
@@ -565,11 +599,11 @@ git commit -m "feat: thread API key context into audit metadata"
 
 ### Task 4: `lib/api/keys.ts` — verificación de clave
 
+**Corrección ronda 1 de revisión del plan (rediseño, no solo un fix puntual):** la versión anterior de este task hacía que `verifyApiKey` resolviera TAMBIÉN el rol de membresía (una segunda consulta a `organization_members`), duplicando lógica que `requireOrganizationContext` (`lib/organizations/context.ts:35-54`) ya existe para hacer — y como resultado, el spec exigía que la Task 5 usara `requireOrganizationContext` para la revalidación de membresía/manejo de `OrganizationAccessError`, pero la Task 5 nunca lo hacía, porque `verifyApiKey` ya se había quedado con toda la lógica. Se separa así: **esta task SOLO verifica el secreto y resuelve `organizationId`/`userId`/`apiKey`** — una única consulta, sin rol. La Task 5 usa `requireOrganizationContext` para resolver el rol real y manejar `OrganizationAccessError`, reutilizando código existente en vez de duplicar su lógica.
+
 **Files:**
 - Create: `lib/api/keys.ts`
 - Test: `lib/api/keys.test.ts`
-
-**Antes de escribir código, lee `lib/content/repository-factory.ts:106-194`** completo — esta función replica su misma secuencia base (resolver modo, construir cliente de service role, construir `OrganizationContext`, llamar `createSupabaseRepository`), pero resolviendo la identidad desde una clave de API en vez de una sesión de cookies.
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
@@ -579,81 +613,44 @@ import { describe, expect, it, vi } from "vitest";
 
 import { verifyApiKey, ApiKeyAuthenticationError } from "@/lib/api/keys";
 
-function serviceClient(overrides: Partial<{
-  keyRow: unknown;
-  keyError: unknown;
-  membershipRow: unknown;
-  membershipError: unknown;
-}> = {}) {
-  return {
-    from: vi.fn((table: string) => {
-      if (table === "organization_api_keys") {
-        return {
-          select: () => ({
-            eq: () => ({
-              is: () => ({
-                maybeSingle: async () => ({
-                  data: overrides.keyRow ?? null,
-                  error: overrides.keyError ?? null,
-                }),
-              }),
-            }),
-          }),
-        };
-      }
-      if (table === "organization_members") {
-        return {
-          select: () => ({
-            eq: () => ({
-              eq: () => ({
-                maybeSingle: async () => ({
-                  data: overrides.membershipRow ?? null,
-                  error: overrides.membershipError ?? null,
-                }),
-              }),
-            }),
-          }),
-        };
-      }
-      throw new Error(`Unexpected table in test double: ${table}`);
-    }),
-  };
+function serviceClient(overrides: Partial<{ keyRow: unknown; keyError: unknown }> = {}) {
+  const maybeSingle = vi.fn().mockResolvedValue({
+    data: overrides.keyRow ?? null,
+    error: overrides.keyError ?? null,
+  });
+  const is = vi.fn().mockReturnValue({ maybeSingle });
+  const eq = vi.fn().mockReturnValue({ is });
+  const select = vi.fn().mockReturnValue({ eq });
+  const from = vi.fn().mockReturnValue({ select });
+  return { from };
 }
 
 describe("verifyApiKey", () => {
-  it("resolves organizationId/userId/role from a valid, active owner key", async () => {
+  it("resolves organizationId/userId/apiKey from a valid, active key", async () => {
     const client = serviceClient({
       keyRow: { id: "key-1", organization_id: "org-1", label: "n8n", created_by: "user-1" },
-      membershipRow: { role: "owner" },
     });
     const result = await verifyApiKey("sk_live_abc", client as never);
     expect(result).toEqual({
       organizationId: "org-1",
       userId: "user-1",
-      role: "owner",
       apiKey: { id: "key-1", label: "n8n" },
     });
+  });
+
+  it("hashes the secret before querying — never queries with the raw secret", async () => {
+    const client = serviceClient({
+      keyRow: { id: "key-1", organization_id: "org-1", label: "n8n", created_by: "user-1" },
+    });
+    await verifyApiKey("sk_live_abc", client as never);
+    const selectCall = vi.mocked(client.from).mock.results[0]!.value.select;
+    const eqCall = vi.mocked(selectCall).mock.results[0]!.value.eq;
+    expect(eqCall).toHaveBeenCalledWith("key_hash", expect.not.stringContaining("sk_live_abc"));
   });
 
   it("rejects when no key row matches (unknown or revoked secret)", async () => {
     const client = serviceClient({ keyRow: null });
     await expect(verifyApiKey("sk_live_unknown", client as never)).rejects.toThrow(ApiKeyAuthenticationError);
-  });
-
-  it("rejects when the key's creator is no longer an owner (role changed or membership removed)", async () => {
-    const client = serviceClient({
-      keyRow: { id: "key-1", organization_id: "org-1", label: "n8n", created_by: "user-1" },
-      membershipRow: { role: "editor" },
-    });
-    await expect(verifyApiKey("sk_live_abc", client as never)).rejects.toThrow(ApiKeyAuthenticationError);
-  });
-
-  it("rejects when the key's creator has no membership at all, without throwing an unhandled error", async () => {
-    const client = serviceClient({
-      keyRow: { id: "key-1", organization_id: "org-1", label: "n8n", created_by: "user-1" },
-      membershipRow: null,
-    });
-    await expect(verifyApiKey("sk_live_abc", client as never)).rejects.toThrow(ApiKeyAuthenticationError);
   });
 
   it("rejects on a real lookup failure (not a leak — same error type as an unknown key)", async () => {
@@ -684,16 +681,20 @@ export class ApiKeyAuthenticationError extends Error {
 export type ApiKeyPrincipal = {
   organizationId: string;
   userId: string;
-  role: "owner";
   apiKey: { id: string; label: string };
 };
 
+// Corrección ronda 1 de revisión del plan (hallazgo real): el cliente real
+// de Supabase devuelve un PostgrestBuilder, que implementa PromiseLike, no
+// Promise — un tipo estructural que exige Promise<...> no compila contra
+// el cliente real. PromiseLike es correcto aquí y sigue siendo awaitable.
 type ServiceRoleClientLike = {
   from: (table: string) => {
     select: (columns: string) => {
       eq: (column: string, value: string) => {
-        is?: (column: string, value: null) => { maybeSingle: () => Promise<{ data: unknown; error: unknown }> };
-        eq?: (column: string, value: string) => { maybeSingle: () => Promise<{ data: unknown; error: unknown }> };
+        is: (column: string, value: null) => {
+          maybeSingle: () => PromiseLike<{ data: unknown; error: unknown }>;
+        };
       };
     };
   };
@@ -705,72 +706,56 @@ export async function verifyApiKey(
 ): Promise<ApiKeyPrincipal> {
   const keyHash = createHash("sha256").update(secret).digest("hex");
 
-  const { data: keyRow, error: keyError } = await (serviceClient
+  const { data: keyRow, error: keyError } = await serviceClient
     .from("organization_api_keys")
     .select("id, organization_id, label, created_by")
-    .eq("key_hash", keyHash) as unknown as {
-      is: (column: string, value: null) => { maybeSingle: () => Promise<{ data: unknown; error: unknown }> };
-    })
+    .eq("key_hash", keyHash)
     .is("revoked_at", null)
     .maybeSingle();
 
   if (keyError || !keyRow) throw new ApiKeyAuthenticationError();
 
   const key = keyRow as { id: string; organization_id: string; label: string; created_by: string };
-
-  const { data: membershipRow, error: membershipError } = await (serviceClient
-    .from("organization_members")
-    .select("role")
-    .eq("organization_id", key.organization_id) as unknown as {
-      eq: (column: string, value: string) => { maybeSingle: () => Promise<{ data: unknown; error: unknown }> };
-    })
-    .eq("user_id", key.created_by)
-    .maybeSingle();
-
-  if (membershipError || !membershipRow) throw new ApiKeyAuthenticationError();
-
-  const membership = membershipRow as { role: string };
-  if (membership.role !== "owner") throw new ApiKeyAuthenticationError();
-
   return {
     organizationId: key.organization_id,
     userId: key.created_by,
-    role: "owner",
     apiKey: { id: key.id, label: key.label },
   };
 }
 ```
 
-(El tipo `ServiceRoleClientLike` es deliberadamente mínimo/estructural para que el test pueda pasar un doble simple sin depender del tipo real generado de Supabase — ajusta el cast si el cliente real de `@/lib/supabase/server` tiene una forma que lo requiera de otro modo; el objetivo es que las dos consultas encadenadas de arriba compilen contra el cliente real sin `as never` en producción.)
+(Verifica el tipo real de retorno de `createSupabaseServiceRoleClient()` contra `lib/supabase/server.ts:36-47` antes de dar por bueno `ServiceRoleClientLike` — el objetivo es que la llamada real `verifyApiKey(secret, createSupabaseServiceRoleClient())` en la Task 5 compile sin `as never`/`as any`; ajusta la forma estructural si el cliente real encadena los métodos de otro modo.)
 
 - [ ] **Step 4: Confirmar que pasa**
 
 Run: `npm test -- lib/api/keys.test.ts`
-Expected: PASS, 5 tests.
+Expected: PASS, 4 tests.
 
 - [ ] **Step 5: `tsc`, lint**
 
 Run: `npx tsc --noEmit && npx eslint lib/api/keys.ts lib/api/keys.test.ts`
-Expected: limpio. Si el cast estructural contra el cliente real de Supabase no compila limpio, ajusta los tipos de `ServiceRoleClientLike` hasta que sí — no uses `any`.
+Expected: limpio.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add lib/api/keys.ts lib/api/keys.test.ts
-git commit -m "feat: add API key verification"
+git commit -m "feat: add API key hash verification"
 ```
 
 ---
 
 ### Task 5: Fachada de autenticación para `/api/v1/*` — construir el repositorio de la request
 
+Este módulo es el punto único que las rutas de `/api/v1/*` (Tasks 9-10) usan para pasar de un `Request` a un repositorio listo para usar.
+
+**Corrección ronda 1 de revisión del plan (hallazgo real — esta task, tal como estaba antes, no hacía lo que el spec exige):** el spec (sección "Autenticación de la superficie v1", paso 7) exige que esta capa use `requireOrganizationContext` (`lib/organizations/context.ts:35-54`) para resolver el rol real y capturar `OrganizationAccessError` si la membresía desapareció entre la verificación de la clave y la construcción del repositorio. La versión anterior de este task construía el `OrganizationContext` directo desde `verifyApiKey`, sin pasar por `requireOrganizationContext` en absoluto — ahora que la Task 4 ya no resuelve el rol (ver su corrección), esta task es el lugar correcto para hacerlo, reutilizando la función existente en vez de reimplementar su lógica.
+
 **Files:**
 - Create: `lib/api/v1-context.ts`
 - Test: `lib/api/v1-context.test.ts`
 
-Este módulo es el punto único que las rutas de `/api/v1/*` (Tasks 7-8) usan para pasar de un `Request` a un repositorio listo para usar — encapsula el resto de las reglas de la sección "Autenticación de la superficie v1" del spec que `verifyApiKey` (Task 4) no cubre: el header, el rechazo de modo demo, la construcción fresca del repositorio por request, y el manejo de `OrganizationAccessError`.
-
-**Antes de escribir código, lee `lib/content/repository-factory.ts` completo** (de nuevo, con foco esta vez en `getContentRepositoryMode`, `createSupabaseServiceRoleClient`, y `createSupabaseRepository`) — reutiliza esas piezas, no las reimplementes.
+**Antes de escribir código, lee `lib/organizations/context.ts` completo y `lib/content/repository-factory.ts:106-194`** — esta función combina ambas: usa `requireOrganizationContext` (como ya hace `repository-factory.ts:177-191`) para resolver membresía/rol, pero con `getSession`/`getMembership` construidos desde la clave de API en vez de una sesión de cookies.
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
@@ -786,15 +771,32 @@ vi.mock("@/lib/content/repository-factory", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/content/repository-factory")>();
   return { ...actual, getContentRepositoryMode: vi.fn() };
 });
+vi.mock("@/lib/supabase/server", () => ({
+  createSupabaseServiceRoleClient: vi.fn(),
+}));
+vi.mock("@/lib/supabase/repository", () => ({
+  createSupabaseRepository: vi.fn(),
+}));
 
 import { resolveV1RequestContext, V1AuthenticationError, V1NotConfiguredError } from "@/lib/api/v1-context";
 import { verifyApiKey } from "@/lib/api/keys";
 import { getContentRepositoryMode } from "@/lib/content/repository-factory";
+import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
+import { createSupabaseRepository } from "@/lib/supabase/repository";
 
 function requestWithAuth(header?: string) {
   const headers = new Headers();
   if (header) headers.set("authorization", header);
   return new Request("http://localhost/api/v1/campaigns", { headers });
+}
+
+function fakeServiceClient(membershipRow: unknown, membershipError: unknown = null) {
+  const maybeSingle = vi.fn().mockResolvedValue({ data: membershipRow, error: membershipError });
+  const eq2 = vi.fn().mockReturnValue({ maybeSingle });
+  const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+  const select = vi.fn().mockReturnValue({ eq: eq1 });
+  const from = vi.fn().mockReturnValue({ select });
+  return { from };
 }
 
 describe("resolveV1RequestContext", () => {
@@ -814,24 +816,54 @@ describe("resolveV1RequestContext", () => {
     expect(verifyApiKey).not.toHaveBeenCalled();
   });
 
-  it("returns a fresh repository built from the verified key's principal", async () => {
+  it("wraps ApiKeyAuthenticationError as V1AuthenticationError, not an unhandled exception", async () => {
+    vi.mocked(getContentRepositoryMode).mockReturnValue("supabase");
+    vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(fakeServiceClient(null) as never);
+    const { ApiKeyAuthenticationError } = await import("@/lib/api/keys");
+    vi.mocked(verifyApiKey).mockRejectedValue(new ApiKeyAuthenticationError());
+    await expect(resolveV1RequestContext(requestWithAuth("Bearer sk_live_bad"))).rejects.toThrow(V1AuthenticationError);
+  });
+
+  it("rejects when the key's creator has no membership in the organization at all (OrganizationAccessError, not an unhandled exception)", async () => {
     vi.mocked(getContentRepositoryMode).mockReturnValue("supabase");
     vi.mocked(verifyApiKey).mockResolvedValue({
-      organizationId: "org-1", userId: "user-1", role: "owner",
-      apiKey: { id: "key-1", label: "n8n" },
+      organizationId: "org-1", userId: "user-1", apiKey: { id: "key-1", label: "n8n" },
     });
+    vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(fakeServiceClient(null) as never);
+    await expect(resolveV1RequestContext(requestWithAuth("Bearer sk_live_abc"))).rejects.toThrow(V1AuthenticationError);
+  });
+
+  it("rejects when the key's creator is no longer an owner (role changed since the key was created)", async () => {
+    vi.mocked(getContentRepositoryMode).mockReturnValue("supabase");
+    vi.mocked(verifyApiKey).mockResolvedValue({
+      organizationId: "org-1", userId: "user-1", apiKey: { id: "key-1", label: "n8n" },
+    });
+    vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(
+      fakeServiceClient({ organization_id: "org-1", user_id: "user-1", role: "editor" }) as never,
+    );
+    await expect(resolveV1RequestContext(requestWithAuth("Bearer sk_live_abc"))).rejects.toThrow(V1AuthenticationError);
+  });
+
+  it("returns a fresh repository built from the verified owner's real membership", async () => {
+    vi.mocked(getContentRepositoryMode).mockReturnValue("supabase");
+    vi.mocked(verifyApiKey).mockResolvedValue({
+      organizationId: "org-1", userId: "user-1", apiKey: { id: "key-1", label: "n8n" },
+    });
+    const serviceClient = fakeServiceClient({ organization_id: "org-1", user_id: "user-1", role: "owner" });
+    vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(serviceClient as never);
+    const fakeRepository = { listContentItems: vi.fn() };
+    vi.mocked(createSupabaseRepository).mockReturnValue(fakeRepository as never);
+
     const result = await resolveV1RequestContext(requestWithAuth("Bearer sk_live_abc"));
+
     expect(result.organization).toEqual({
       organizationId: "org-1", userId: "user-1", role: "owner",
       apiKey: { id: "key-1", label: "n8n" },
     });
-  });
-
-  it("wraps ApiKeyAuthenticationError as V1AuthenticationError, not an unhandled exception", async () => {
-    vi.mocked(getContentRepositoryMode).mockReturnValue("supabase");
-    const { ApiKeyAuthenticationError } = await import("@/lib/api/keys");
-    vi.mocked(verifyApiKey).mockRejectedValue(new ApiKeyAuthenticationError());
-    await expect(resolveV1RequestContext(requestWithAuth("Bearer sk_live_bad"))).rejects.toThrow(V1AuthenticationError);
+    expect(result.repository).toBe(fakeRepository);
+    // Construido de cero, con el mismo cliente de service role usado para
+    // verificar la clave — nunca el demoRepository singleton.
+    expect(createSupabaseRepository).toHaveBeenCalledWith(serviceClient, result.organization);
   });
 });
 ```
@@ -847,9 +879,12 @@ Expected: FAIL — el módulo no existe todavía.
 import "server-only";
 
 import { verifyApiKey, ApiKeyAuthenticationError } from "@/lib/api/keys";
+import { getContentRepositoryMode } from "@/lib/content/repository-factory";
 import {
-  getContentRepositoryMode,
-} from "@/lib/content/repository-factory";
+  requireOrganizationContext,
+  OrganizationAccessError,
+  type OrganizationApiKeyContext,
+} from "@/lib/organizations/context";
 import { createSupabaseRepository } from "@/lib/supabase/repository";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import type { ContentRepository } from "@/lib/content/repository";
@@ -893,25 +928,52 @@ export async function resolveV1RequestContext(request: Request): Promise<V1Reque
   const secret = extractBearerSecret(request);
   const serviceClient = createSupabaseServiceRoleClient();
 
-  let organization: OrganizationContext;
+  let apiKeyPrincipal: { organizationId: string; userId: string; apiKey: OrganizationApiKeyContext };
   try {
-    organization = await verifyApiKey(secret, serviceClient);
+    apiKeyPrincipal = await verifyApiKey(secret, serviceClient);
   } catch (error) {
     if (error instanceof ApiKeyAuthenticationError) throw new V1AuthenticationError();
     throw error;
   }
 
+  let membership: OrganizationContext;
+  try {
+    membership = await requireOrganizationContext(apiKeyPrincipal.organizationId, {
+      getSession: async () => ({ userId: apiKeyPrincipal.userId }),
+      getMembership: async ({ organizationId, userId }) => {
+        const { data, error } = await serviceClient
+          .from("organization_members")
+          .select("organization_id, user_id, role")
+          .eq("organization_id", organizationId)
+          .eq("user_id", userId)
+          .maybeSingle();
+        if (error || !data) return null;
+        const row = data as { organization_id: string; user_id: string; role: string };
+        return { organizationId: row.organization_id, userId: row.user_id, role: row.role as never };
+      },
+    });
+  } catch (error) {
+    if (error instanceof OrganizationAccessError) throw new V1AuthenticationError();
+    throw error;
+  }
+
+  // Explícito: aunque cualquier rol produce un OrganizationContext válido,
+  // solo un owner puede haber creado esta clave (create_organization_api_key
+  // lo exige) — si ya no lo es, se trata igual que una clave inválida.
+  if (membership.role !== "owner") throw new V1AuthenticationError();
+
+  const organization: OrganizationContext = { ...membership, apiKey: apiKeyPrincipal.apiKey };
   const repository = createSupabaseRepository(serviceClient, organization);
   return { organization, repository };
 }
 ```
 
-(Verifica la firma real de `createSupabaseRepository` contra `lib/supabase/repository.ts` antes de dar esto por bueno — el ejemplo asume que acepta `(client, organization)` como ya vimos en `repository-factory.ts:193`.)
+(Verifica la firma real de `createSupabaseRepository` y el tipo exacto de fila que devuelve una consulta a `organization_members` contra los archivos reales antes de dar esto por bueno — el ejemplo asume que acepta `(client, organization)` como ya vimos en `repository-factory.ts:193`, y que `organization_role` en la fila es directamente asignable a `OrganizationRole`.)
 
 - [ ] **Step 4: Confirmar que pasa**
 
 Run: `npm test -- lib/api/v1-context.test.ts`
-Expected: PASS, 5 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 5: `tsc`, lint**
 
@@ -930,9 +992,13 @@ git commit -m "feat: add API v1 request authentication context"
 ### Task 6: Rutas de gestión de claves (autenticadas por sesión)
 
 **Files:**
-- Create: `app/api/organizations/[id]/api-keys/route.ts` (POST, GET)
-- Create: `app/api/organizations/[id]/api-keys/[keyId]/route.ts` (DELETE)
+- Create: `app/api/organizations/[id]/api-keys/route-handlers.ts` (POST, GET — inyectable para test, mismo patrón que `route.ts`/lógica separada ya usa `app/api/organizations/[id]/logo/route.ts`)
+- Create: `app/api/organizations/[id]/api-keys/route.ts` (reexporta `GET`/`POST` de `route-handlers.ts` sin dependencias inyectadas — el patrón real de Next.js)
+- Create: `app/api/organizations/[id]/api-keys/[keyId]/route-handlers.ts` (DELETE)
+- Create: `app/api/organizations/[id]/api-keys/[keyId]/route.ts`
 - Test: `tests/organizations/api-keys-route.test.ts`
+
+**Corrección ronda 1 de revisión del plan (hallazgo real):** la versión anterior de este task tenía el test importando `.../api-keys/route-handlers`, pero ese archivo nunca aparecía en `Files` ni en el `git add` del Step 6 — no puede existir sin declararlo. Ahora está explícito arriba, siguiendo el mismo patrón de separación `route-handlers.ts`/`route.ts` que ya usa `app/api/organizations/[id]/logo/route.ts` (revísalo para el ejemplo exacto de cómo `route.ts` importa y reexporta desde `route-handlers.ts`).
 
 **Antes de escribir código, lee `app/api/organizations/[id]/profile/route.ts` completo** — estas rutas siguen su misma secuencia base (validar UUID con zod → `supabase.auth.getUser()` → resolver membership), con sesión de navegador, no clave de API — son las rutas que un owner usa desde el dashboard para gestionar sus propias claves.
 
@@ -1027,9 +1093,55 @@ describe("DELETE /api/organizations/[id]/api-keys/[keyId]", () => {
     expect(rpc).toHaveBeenCalledWith("revoke_organization_api_key", { p_key_id: "key-1" });
   });
 });
+
+// Corrección ronda 1 de revisión del plan (hallazgo real): los tests de
+// arriba solo prueban que un error DEVUELTO POR LA RPC se traduce en 403 —
+// una implementación que se saltara el gate de la ruta y llamara la RPC
+// directamente para CUALQUIER rol pasaría igual, porque el mock de la RPC
+// nunca refleja el rol real. Estos tres tests fuerzan el gate a nivel de
+// ruta: mockean la resolución de membership (no la RPC) devolviendo un rol
+// no-owner, y confirman que la RPC ni se llama.
+describe("owner-only gate enforced by the route itself, not just the RPC", () => {
+  it("POST rejects a non-owner without calling create_organization_api_key", async () => {
+    const rpc = vi.fn();
+    const handler = createApiKeyCreateHandler({
+      getClient: async () => ({ rpc } as never),
+      getMembership: async () => ({ role: "editor" }),
+    });
+    const request = new Request("http://localhost", { method: "POST", body: JSON.stringify({ label: "n8n" }) });
+    const response = await handler(request, context());
+    expect(response.status).toBe(403);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("GET rejects a non-owner without querying organization_api_keys", async () => {
+    const from = vi.fn();
+    const handler = createApiKeyListHandler({
+      getClient: async () => ({ from } as never),
+      getMembership: async () => ({ role: "editor" }),
+    });
+    const response = await handler(new Request("http://localhost"), context());
+    expect(response.status).toBe(403);
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("DELETE rejects a non-owner without calling revoke_organization_api_key", async () => {
+    const rpc = vi.fn();
+    const handler = createApiKeyRevokeHandler({
+      getClient: async () => ({ rpc } as never),
+      getMembership: async () => ({ role: "editor" }),
+    });
+    const response = await handler(
+      new Request("http://localhost", { method: "DELETE" }),
+      context({ keyId: "key-1" }),
+    );
+    expect(response.status).toBe(403);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+});
 ```
 
-(`route-handlers.ts` separado de `route.ts` sigue el patrón ya usado en otras rutas de este proyecto para poder inyectar dependencias en el test sin pegarle a Supabase real — revisa `app/api/organizations/[id]/logo/route.ts` para el patrón exacto de `createOrganizationLogoGetHandler`/`withDependencies` y replícalo aquí en vez de inventar uno nuevo.)
+(`route-handlers.ts` separado de `route.ts` sigue el patrón ya usado en otras rutas de este proyecto para poder inyectar dependencias en el test sin pegarle a Supabase real — revisa `app/api/organizations/[id]/logo/route.ts` para el patrón exacto de `createOrganizationLogoGetHandler`/`withDependencies` y replícalo aquí en vez de inventar uno nuevo. `getMembership` en las inyecciones de arriba es la misma resolución de membership que ese patrón ya usa — ajusta el nombre exacto de la dependencia inyectable a como ese archivo real la llama.)
 
 - [ ] **Step 2: Confirmar que falla**
 
@@ -1047,7 +1159,7 @@ Sigue el patrón de `app/api/organizations/[id]/logo/route.ts` (auth de sesión 
 - [ ] **Step 4: Confirmar que pasa**
 
 Run: `npm test -- tests/organizations/api-keys-route.test.ts`
-Expected: PASS, 6 tests.
+Expected: PASS, 9 tests.
 
 - [ ] **Step 5: `tsc`, lint, build**
 
@@ -1060,6 +1172,8 @@ Expected: limpio.
 git add "app/api/organizations/[id]/api-keys" tests/organizations/api-keys-route.test.ts
 git commit -m "feat: add session-authenticated API key management routes"
 ```
+
+(El `git add` de la carpeta captura los 4 archivos nuevos — `route-handlers.ts`/`route.ts` en ambos niveles — confirma con `git status` antes de commitear que los 4 están efectivamente staged, no solo los dos `route.ts`.)
 
 ---
 
@@ -1293,9 +1407,14 @@ git commit -m "feat: add server-side logo compositing with sharp"
 **Files:**
 - Create: `app/api/v1/campaigns/route.ts`
 - Create: `app/api/v1/campaigns/[id]/route.ts`
+- Modify: `lib/content/repository.ts` (agrega `downloadOrganizationLogo` a la interfaz `ContentRepository`)
+- Modify: `lib/supabase/repository.ts` (implementación real, reutilizando el mismo bucket/manejo de `StorageApiError` que `app/api/organizations/[id]/logo/route.ts`)
+- Modify: `lib/demo/repository.ts` (implementación de `DemoContentRepository` — sin Storage real en modo demo, devuelve `null` siempre; la API v1 nunca llega a llamarla porque rechaza el modo demo en la Task 5, pero la interfaz debe seguir siendo implementable)
 - Test: `tests/api/v1-campaigns.test.ts`
 
-**Antes de escribir código, lee `app/api/content/route.ts` y `app/api/content/[id]/route.ts` completos** — estas rutas nuevas replican su contrato exacto (mismo `campaignBriefSchema`, mismo `validateAsset`, mismo `ContentRecord`), cambiando únicamente la resolución de auth (`resolveV1RequestContext` de la Task 5 en vez de `createContentRepository`).
+**Corrección ronda 1 de revisión del plan (hallazgo real):** la versión anterior de este task usaba `repository.downloadOrganizationLogo?.()` (encadenamiento opcional) como si el método pudiera no existir — eso permite que una implementación incompleta omita el estampado en silencio. Ahora es un método **requerido** de `ContentRepository`, implementado en las dos clases que la satisfacen hoy (`SupabaseRepository`/`DemoContentRepository`) — verifica con `grep -rn "implements ContentRepository\|: ContentRepository" lib/` que no haya una tercera implementación antes de dar esto por completo.
+
+**Antes de escribir código, lee `app/api/content/route.ts` y `app/api/content/[id]/route.ts` completos, Y `app/api/organizations/[id]/logo/route.ts` (la parte del `GET`, líneas ~88-109) para el manejo exacto de `StorageApiError`/`NoSuchKey`** — estas rutas nuevas replican el contrato exacto de las primeras dos (mismo `campaignBriefSchema`, mismo `validateAsset`, mismo `MAX_MULTIPART_BYTES`, mismo `enqueueCopyJob` tras crear el item, mismo checksum sha-256), cambiando únicamente la resolución de auth (`resolveV1RequestContext` de la Task 5 en vez de `createContentRepository`) y agregando el paso de estampado de logo entre validar el asset y crear el item.
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
@@ -1308,10 +1427,15 @@ vi.mock("@/lib/api/v1-context", () => ({
   V1AuthenticationError: class V1AuthenticationError extends Error {},
   V1NotConfiguredError: class V1NotConfiguredError extends Error {},
 }));
+vi.mock("@/lib/logo-studio/compose-server", () => ({
+  composeLogoServerSide: vi.fn(),
+  LogoTooLargeError: class LogoTooLargeError extends Error {},
+}));
 
 import { GET as listCampaigns, POST as createCampaign } from "@/app/api/v1/campaigns/route";
 import { GET as getCampaign } from "@/app/api/v1/campaigns/[id]/route";
 import { resolveV1RequestContext, V1AuthenticationError } from "@/lib/api/v1-context";
+import { composeLogoServerSide } from "@/lib/logo-studio/compose-server";
 
 describe("GET /api/v1/campaigns", () => {
   it("responds 401 when authentication fails, without leaking whether the key format was merely wrong", async () => {
@@ -1348,25 +1472,115 @@ describe("GET /api/v1/campaigns/:id", () => {
 });
 
 describe("POST /api/v1/campaigns", () => {
+  function formDataRequest(png: Uint8Array) {
+    const formData = new FormData();
+    formData.set("brief", JSON.stringify({
+      businessLine: "b", service: "s", niche: "n", contentType: "IMAGE", objective: "o",
+      format: "SINGLE_IMAGE", cta: "c", humanDescription: "d", allowedFacts: [],
+      campaignName: "Campaña", offer: "Oferta", funnelStage: "TOFU",
+      destination: "WHATSAPP", destinationValue: "https://wa.me/1",
+    }));
+    formData.set("asset", new File([png], "creative.png", { type: "image/png" }));
+    return new Request("http://localhost", { method: "POST", body: formData });
+  }
+
   it("stamps the organization's logo onto the creative automatically when one is configured", async () => {
-    // Mockea resolveV1RequestContext con un repositorio cuyo
-    // createContentItemWithAsset capture el asset recibido, y mockea la
-    // descarga del logo (vía el storage del cliente subyacente) para que
-    // devuelva bytes reales — confirma que composeLogoServerSide (Task 8)
-    // se invocó y que el asset persistido es el resultado compuesto, no el
-    // creativo original en bruto.
+    const validCreativePng = await makeValidPng(); // helper: PNG 4:5 válido, ver nota abajo
+    const composedBuffer = Buffer.from("composed-bytes");
+    vi.mocked(composeLogoServerSide).mockResolvedValue(composedBuffer);
+    const createContentItemWithAsset = vi.fn().mockResolvedValue({ id: "content-1" });
+    const enqueueCopyJob = vi.fn().mockResolvedValue({ created: true });
+    const downloadOrganizationLogo = vi.fn().mockResolvedValue(Buffer.from("logo-bytes"));
+    vi.mocked(resolveV1RequestContext).mockResolvedValue({
+      organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
+      repository: { createContentItemWithAsset, enqueueCopyJob, downloadOrganizationLogo } as never,
+    });
+
+    const response = await createCampaign(formDataRequest(validCreativePng));
+
+    expect(response.status).toBe(201);
+    expect(downloadOrganizationLogo).toHaveBeenCalled();
+    expect(composeLogoServerSide).toHaveBeenCalled();
+    // El asset persistido debe ser el resultado COMPUESTO, no el creativo
+    // original — confirma que los bytes que llegan a
+    // createContentItemWithAsset vienen de composedBuffer, no del PNG crudo
+    // subido en la request.
+    const persistedAsset = createContentItemWithAsset.mock.calls[0][0].asset;
+    expect(Buffer.from(persistedAsset.bytes)).toEqual(composedBuffer);
   });
 
   it("creates the campaign without a logo, without error, when the organization has none configured yet", async () => {
-    // Mockea la descarga del logo respondiendo "no existe" (mismo
-    // StorageApiError/NoSuchKey que ya usa la ruta manual del logo) —
-    // confirma que la campaña se crea igual, con el asset original sin
-    // modificar.
+    const validCreativePng = await makeValidPng();
+    const createContentItemWithAsset = vi.fn().mockResolvedValue({ id: "content-1" });
+    const enqueueCopyJob = vi.fn().mockResolvedValue({ created: true });
+    // downloadOrganizationLogo resuelve null cuando no hay logo — el
+    // manejo de StorageApiError/NoSuchKey vive DENTRO de la implementación
+    // real del repositorio (Step 3), nunca se filtra hasta esta ruta.
+    const downloadOrganizationLogo = vi.fn().mockResolvedValue(null);
+    vi.mocked(resolveV1RequestContext).mockResolvedValue({
+      organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
+      repository: { createContentItemWithAsset, enqueueCopyJob, downloadOrganizationLogo } as never,
+    });
+
+    const response = await createCampaign(formDataRequest(validCreativePng));
+
+    expect(response.status).toBe(201);
+    expect(composeLogoServerSide).not.toHaveBeenCalled();
+    const persistedAsset = createContentItemWithAsset.mock.calls[0][0].asset;
+    expect(Buffer.from(persistedAsset.bytes)).toEqual(Buffer.from(validCreativePng));
+  });
+
+  it("enqueues the copy generation job after creating the item, matching POST /api/content's behavior exactly", async () => {
+    const validCreativePng = await makeValidPng();
+    const createContentItemWithAsset = vi.fn().mockResolvedValue({ id: "content-1" });
+    const enqueueCopyJob = vi.fn().mockResolvedValue({ created: true });
+    const downloadOrganizationLogo = vi.fn().mockResolvedValue(null);
+    vi.mocked(resolveV1RequestContext).mockResolvedValue({
+      organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
+      repository: { createContentItemWithAsset, enqueueCopyJob, downloadOrganizationLogo } as never,
+    });
+
+    const response = await createCampaign(formDataRequest(validCreativePng));
+
+    expect(enqueueCopyJob).toHaveBeenCalledWith(
+      expect.objectContaining({ contentItemId: "content-1" }),
+    );
+    const body = await response.json();
+    expect(body.content.state).toBe("GENERATING");
+  });
+
+  it("responds 202 with COPY_QUEUE_PENDING, not a false GENERATING state, when the queue is temporarily unavailable", async () => {
+    // Mismo comportamiento que app/api/content/route.ts:119-132 — el asset
+    // ya se persistió de forma durable, así que esto no es un error, es un
+    // 202 con advertencia para que el caller pueda reintentar el encolado.
+    const validCreativePng = await makeValidPng();
+    const createContentItemWithAsset = vi.fn().mockResolvedValue({ id: "content-1" });
+    const enqueueCopyJob = vi.fn().mockRejectedValue(new Error("queue unavailable"));
+    const downloadOrganizationLogo = vi.fn().mockResolvedValue(null);
+    vi.mocked(resolveV1RequestContext).mockResolvedValue({
+      organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
+      repository: { createContentItemWithAsset, enqueueCopyJob, downloadOrganizationLogo } as never,
+    });
+
+    const response = await createCampaign(formDataRequest(validCreativePng));
+
+    expect(response.status).toBe(202);
+    const body = await response.json();
+    expect(body.warning).toBe("COPY_QUEUE_PENDING");
+  });
+
+  it("rejects a request over the multipart size limit with 413 before even reading the body", async () => {
+    const request = formDataRequest(await makeValidPng());
+    Object.defineProperty(request, "headers", {
+      value: new Headers({ "content-length": String(25 * 1024 * 1024) }),
+    });
+    const response = await createCampaign(request);
+    expect(response.status).toBe(413);
   });
 });
 ```
 
-(Los dos últimos tests de `POST` son los más importantes de esta tarea — no los dejes como placeholders. Sigue el patrón de mock de Storage ya usado en `tests/api/organization-logo.test.ts` para el caso "no existe todavía" en vez de inventar uno nuevo.)
+(`makeValidPng()` es un helper que genera un PNG real de al menos 540×675 con proporción 4:5 — reutiliza el mismo enfoque que ya usan los tests existentes de `validateAsset`/`tests/api/organization-logo.test.ts` para construir un PNG válido de prueba, no inventes uno nuevo. `vi.mock("@/lib/logo-studio/compose-server", ...)` con `composeLogoServerSide` mockeado debe agregarse junto a los otros `vi.mock(...)` al inicio del archivo, igual que `resolveV1RequestContext`.)
 
 - [ ] **Step 2: Confirmar que falla**
 
@@ -1375,16 +1589,50 @@ Expected: FAIL — los módulos no existen todavía.
 
 - [ ] **Step 3: Implementar**
 
+**Paso previo — agregar `downloadOrganizationLogo` a `ContentRepository` (`lib/content/repository.ts`, junto a las otras firmas de la interfaz):**
+
+```typescript
+// Descarga el logo de la organización activa para composición server-side.
+// null cuando la organización no tiene logo configurado todavía — nunca
+// lanza para ese caso, solo para un fallo real de Storage.
+downloadOrganizationLogo(): Promise<Buffer | null>;
+```
+
+**Implementación real en `lib/supabase/repository.ts`** (mismo bucket y misma distinción `StorageApiError`/`NoSuchKey` que ya usa `app/api/organizations/[id]/logo/route.ts:88-109` — reutiliza ese predicado exacto, no lo reinventes):
+
+```typescript
+async downloadOrganizationLogo(): Promise<Buffer | null> {
+  const { data, error } = await this.client.storage
+    .from("organization-logos")
+    .download(`${this.organization.organizationId}/logo.png`);
+  if (error) {
+    if (error instanceof StorageApiError && error.code === "NoSuchKey") return null;
+    throw error;
+  }
+  return Buffer.from(await data.arrayBuffer());
+}
+```
+
+**Implementación en `lib/demo/repository.ts`** (`DemoContentRepository` — sin Storage real en modo demo; la API v1 nunca llega a invocar esto porque la Task 5 rechaza el modo demo antes, pero la interfaz debe seguir siendo implementable):
+
+```typescript
+async downloadOrganizationLogo(): Promise<Buffer | null> {
+  return null;
+}
+```
+
 `app/api/v1/campaigns/route.ts`:
 
 ```typescript
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { resolveV1RequestContext, V1AuthenticationError, V1NotConfiguredError } from "@/lib/api/v1-context";
 import { campaignBriefSchema } from "@/lib/content/campaign";
-import { AssetValidationError, validateAsset } from "@/lib/content/asset-validation";
+import { AssetValidationError, MAX_ASSET_BYTES, validateAsset } from "@/lib/content/asset-validation";
 import { composeLogoServerSide, LogoTooLargeError } from "@/lib/logo-studio/compose-server";
-import { StorageApiError } from "@supabase/supabase-js";
+
+const MAX_MULTIPART_BYTES = MAX_ASSET_BYTES + 64_000;
 
 function jsonError(error: string, status: number): Response {
   return Response.json({ error }, { status });
@@ -1409,14 +1657,22 @@ function isFilePart(value: FormDataEntryValue | null): value is File {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  // Corrección ronda 1 de revisión del plan: límite de multipart ANTES de
+  // leer el body, igual que app/api/content/route.ts:75-78 — la versión
+  // anterior de este plan lo omitía por completo.
+  const declaredLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_MULTIPART_BYTES) {
+    return jsonError("ASSET_TOO_LARGE", 413);
+  }
+
   try {
-    const { organization, repository } = await resolveV1RequestContext(request);
+    const { repository } = await resolveV1RequestContext(request);
 
     let formData: FormData;
     try {
       formData = await request.formData();
     } catch {
-      return jsonError("INVALID_REQUEST", 400);
+      return jsonError("INVALID_MULTIPART_REQUEST", 400);
     }
 
     const rawBrief = formData.get("brief");
@@ -1432,17 +1688,20 @@ export async function POST(request: Request): Promise<Response> {
       return jsonError("INVALID_BRIEF", 400);
     }
 
-    const brief = campaignBriefSchema.parse(briefPayload);
+    campaignBriefSchema.parse(briefPayload);
     let validatedAsset = await validateAsset(assetFile);
+    let finalBytes = validatedAsset.bytes;
 
     // Estampa el logo de la organización automáticamente si existe — sin
-    // logo configurado, sigue con el creativo original, sin error (ver
-    // spec: "Composición de logo server-side").
-    const logoDownload = await repository.downloadOrganizationLogo?.();
-    if (logoDownload?.bytes) {
+    // logo configurado (downloadOrganizationLogo devuelve null), sigue con
+    // el creativo original, sin error (ver spec: "Composición de logo
+    // server-side"). El resultado se revalida completo con validateAsset
+    // otra vez — recalcula dimensiones/MIME, no confía en el compositor.
+    const logoBytes = await repository.downloadOrganizationLogo();
+    if (logoBytes) {
       const composedBytes = await composeLogoServerSide({
         creativeBytes: Buffer.from(validatedAsset.bytes),
-        logoBytes: Buffer.from(logoDownload.bytes),
+        logoBytes,
         options: { corner: "bottom-right", sizePercent: 15, marginPercent: 4 },
         outputFormat: validatedAsset.mimeType === "image/png" ? "image/png" : "image/jpeg",
       });
@@ -1452,20 +1711,38 @@ export async function POST(request: Request): Promise<Response> {
         { type: validatedAsset.mimeType === "image/png" ? "image/png" : "image/jpeg" },
       );
       validatedAsset = await validateAsset(composedFile);
+      finalBytes = validatedAsset.bytes;
     }
+
+    // Corrección ronda 1: checksum real sobre los bytes FINALES (compuestos
+    // o no), igual que app/api/content/route.ts:103-105 — no un placeholder.
+    const checksum = createHash("sha256").update(finalBytes).digest("hex");
 
     const content = await repository.createContentItemWithAsset({
       brief: briefPayload,
       asset: {
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         filename: assetFile.name,
         mimeType: validatedAsset.mimeType,
         width: validatedAsset.width,
         height: validatedAsset.height,
-        checksum: "", // recalculado dentro del repositorio, igual que POST /api/content
-        bytes: validatedAsset.bytes,
+        checksum,
+        bytes: finalBytes,
       },
     });
+
+    // Corrección ronda 1 (hallazgo real): la versión anterior nunca llamaba
+    // enqueueCopyJob y devolvía state: "GENERATING" de todas formas, aunque
+    // la base quedaba en UPLOADED sin ningún job de generación encolado —
+    // ahora replica exactamente app/api/content/route.ts:119-133.
+    try {
+      await repository.enqueueCopyJob({
+        contentItemId: content.id,
+        idempotencyKey: randomUUID(),
+      });
+    } catch {
+      return Response.json({ content, warning: "COPY_QUEUE_PENDING" }, { status: 202 });
+    }
 
     return Response.json({ content: { ...content, state: "GENERATING" } }, { status: 201 });
   } catch (error) {
@@ -1480,7 +1757,7 @@ export async function POST(request: Request): Promise<Response> {
 }
 ```
 
-(El método `downloadOrganizationLogo`/manejo de `StorageApiError` de arriba es un boceto — **verifica el shape real de `ContentRepository`/`SupabaseRepository` antes de implementar**: puede que no exista ese método todavía y haga falta agregarlo al repositorio, descargando de `organization-logos` igual que ya hace `app/api/organizations/[id]/logo/route.ts`, capturando `StorageApiError`/`NoSuchKey` para el caso "sin logo" tal como ya se hace ahí — reutiliza esa lógica, no la dupliques a ciegas. El recálculo de `checksum` real (sha-256 sobre los bytes finales, igual que `app/api/content/route.ts:103-105`) también se te dejó como placeholder arriba — complétalo con el mismo `createHash("sha256")` que ya usa esa ruta.)
+(Verifica el shape real de `ContentRepository`/`SupabaseRepository`/`DemoContentRepository` contra los archivos reales antes de dar esto por bueno — los tres bloques de arriba son el diseño completo, no un boceto, pero confirma nombres exactos de propiedades/imports (`this.client.storage`, `this.organization.organizationId`) contra el código real de `lib/supabase/repository.ts` antes de copiarlos literalmente.)
 
 `app/api/v1/campaigns/[id]/route.ts`:
 
@@ -1519,19 +1796,21 @@ export async function GET(
 - [ ] **Step 4: Confirmar que pasa**
 
 Run: `npm test -- tests/api/v1-campaigns.test.ts`
-Expected: PASS.
+Expected: PASS, 8 tests.
 
 - [ ] **Step 5: `tsc`, lint, build**
 
-Run: `npx tsc --noEmit && npx eslint app/api/v1/campaigns/route.ts "app/api/v1/campaigns/[id]/route.ts" tests/api/v1-campaigns.test.ts && npm run build`
+Run: `npx tsc --noEmit && npx eslint app/api/v1/campaigns/route.ts "app/api/v1/campaigns/[id]/route.ts" lib/content/repository.ts lib/supabase/repository.ts lib/demo/repository.ts tests/api/v1-campaigns.test.ts && npm run build`
 Expected: limpio.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/api/v1/campaigns tests/api/v1-campaigns.test.ts
+git add app/api/v1/campaigns lib/content/repository.ts lib/supabase/repository.ts lib/demo/repository.ts tests/api/v1-campaigns.test.ts
 git commit -m "feat: add GET/POST /api/v1/campaigns with automatic logo stamping"
 ```
+
+(Confirma con `git status` que los tres archivos de repositorio modificados quedaron staged — es fácil olvidarlos porque no están en `app/api/v1/campaigns`.)
 
 ---
 
@@ -1539,9 +1818,57 @@ git commit -m "feat: add GET/POST /api/v1/campaigns with automatic logo stamping
 
 **Files:**
 - Create: `app/api/v1/campaigns/[id]/publish/route.ts`
+- Modify: `lib/content/repository.ts` (agrega `checkPublicationTargetOwnership` a la interfaz)
+- Modify: `lib/supabase/repository.ts` (implementación real)
+- Modify: `lib/demo/repository.ts` (implementación de `DemoContentRepository`)
 - Test: `tests/api/v1-publish.test.ts`
 
+**Corrección ronda 1 de revisión del plan (hallazgo real):** la versión anterior de este task inyectaba un `supabaseClientForTests` inventado en el repositorio de prueba, sin que `checkPublicationTargetOwnership` estuviera declarado en ningún lado real (`ContentRepository`, `SupabaseRepository`, `DemoContentRepository`) ni en la lista de `Files`. Ahora es, igual que `downloadOrganizationLogo` en la Task 9, un método **requerido** de la interfaz, con sus dos implementaciones reales listadas explícitamente — los tests mockean el método del repositorio directamente, no un cliente interno inventado.
+
 **Antes de escribir código, lee `app/api/integrations/n8n/publish/route.ts` y `lib/integrations/n8n-client.ts` completos** — esta ruta reutiliza `requestN8nPublish`, pero deriva `assetUrl`/`copy` del `ContentRecord` almacenado en vez de aceptarlos del caller (hallazgo de seguridad de la ronda 2 del spec).
+
+**Paso previo — agregar `checkPublicationTargetOwnership` a `ContentRepository` (`lib/content/repository.ts`):**
+
+```typescript
+// Existencia + pertenencia + estado de un target, clasificados por
+// separado de PublishTargetConflictError (que colapsa "no existe" y "error
+// real" en el mismo tipo) — ver spec, sección de publicación.
+checkPublicationTargetOwnership(
+  contentItemId: string,
+  publicationTargetId: string,
+): Promise<{ target: { id: string; status: string } | null; failed: boolean }>;
+```
+
+**Implementación real en `lib/supabase/repository.ts`** (misma consulta base que ya usa `preparePublishRequest`, `lib/supabase/repository.ts:995-1001`, pero sin colapsar "sin fila" y "error" en la misma rama):
+
+```typescript
+async checkPublicationTargetOwnership(
+  contentItemId: string,
+  publicationTargetId: string,
+): Promise<{ target: { id: string; status: string } | null; failed: boolean }> {
+  const { data, error } = await this.client
+    .from("publication_targets")
+    .select("id, status")
+    .eq("id", publicationTargetId)
+    .eq("content_item_id", contentItemId)
+    .eq("organization_id", this.organization.organizationId)
+    .maybeSingle();
+  if (error) return { target: null, failed: true };
+  return { target: data as { id: string; status: string } | null, failed: false };
+}
+```
+
+**Implementación en `lib/demo/repository.ts`** (`DemoContentRepository` — busca en su propia colección local de targets en memoria; sigue el mismo patrón que ya usan sus otros métodos de lectura de `publication_targets`, revísalos antes de escribir este):
+
+```typescript
+async checkPublicationTargetOwnership(
+  contentItemId: string,
+  publicationTargetId: string,
+): Promise<{ target: { id: string; status: string } | null; failed: boolean }> {
+  const target = /* busca en el store local de demo, filtrando por ambos ids */;
+  return { target: target ? { id: target.id, status: target.status } : null, failed: false };
+}
+```
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
@@ -1575,51 +1902,64 @@ function requestWithBody(body: unknown) {
   return new Request("http://localhost", { method: "POST", body: JSON.stringify(body) });
 }
 
+function mockRepository(overrides: {
+  checkPublicationTargetOwnership: { target: { id: string; status: string } | null; failed: boolean };
+  getContentRecord?: unknown;
+}) {
+  vi.mocked(resolveV1RequestContext).mockResolvedValue({
+    organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
+    repository: {
+      checkPublicationTargetOwnership: vi.fn().mockResolvedValue(overrides.checkPublicationTargetOwnership),
+      getContentRecord: vi.fn().mockResolvedValue(overrides.getContentRecord ?? null),
+    } as never,
+  });
+}
+
 describe("POST /api/v1/campaigns/:id/publish", () => {
   it("responds 404 when the target doesn't exist for this organization — never distinguishing from a cross-tenant target", async () => {
-    const maybeSingle = vi.fn().mockResolvedValue({ data: null, error: null });
-    const queryChain = { select: () => queryChain, eq: () => queryChain, maybeSingle };
-    vi.mocked(resolveV1RequestContext).mockResolvedValue({
-      organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
-      repository: { supabaseClientForTests: { from: () => queryChain } } as never,
-    });
+    mockRepository({ checkPublicationTargetOwnership: { target: null, failed: false } });
     const response = await publishCampaign(requestWithBody({ publicationTargetId: targetId }), context());
     expect(response.status).toBe(404);
   });
 
   it("responds 503, not a false 409, when the ownership lookup itself fails", async () => {
-    const maybeSingle = vi.fn().mockResolvedValue({ data: null, error: new Error("connection reset") });
-    const queryChain = { select: () => queryChain, eq: () => queryChain, maybeSingle };
-    vi.mocked(resolveV1RequestContext).mockResolvedValue({
-      organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
-      repository: { supabaseClientForTests: { from: () => queryChain } } as never,
-    });
+    mockRepository({ checkPublicationTargetOwnership: { target: null, failed: true } });
     const response = await publishCampaign(requestWithBody({ publicationTargetId: targetId }), context());
     expect(response.status).toBe(503);
   });
 
   it("responds 409 when the target exists for this organization but isn't APPROVED", async () => {
-    const maybeSingle = vi.fn().mockResolvedValue({ data: { id: targetId, status: "PENDING_REVIEW" }, error: null });
-    const queryChain = { select: () => queryChain, eq: () => queryChain, maybeSingle };
-    vi.mocked(resolveV1RequestContext).mockResolvedValue({
-      organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
-      repository: { supabaseClientForTests: { from: () => queryChain } } as never,
+    mockRepository({
+      checkPublicationTargetOwnership: { target: { id: targetId, status: "PENDING_REVIEW" }, failed: false },
     });
     const response = await publishCampaign(requestWithBody({ publicationTargetId: targetId }), context());
     expect(response.status).toBe(409);
     expect(requestN8nPublish).not.toHaveBeenCalled();
   });
 
-  it("derives assetUrl/copy from the stored record server-side — the caller cannot supply their own", async () => {
-    const maybeSingle = vi.fn().mockResolvedValue({ data: { id: targetId, status: "APPROVED" }, error: null });
-    const queryChain = { select: () => queryChain, eq: () => queryChain, maybeSingle };
-    const getContentRecord = vi.fn().mockResolvedValue({
-      asset: { signedUrl: "https://storage.example/real-asset.png" },
-      finalCopy: { headline: "Real headline", body: "Real body", cta: "Real CTA" },
+  it("responds 503 (internal inconsistency, not a caller error) when the approved target has no signed asset URL", async () => {
+    // Corrección ronda 1 de revisión del plan (hallazgo real):
+    // ContentRecord.asset.signedUrl es opcional (lib/content/repository.ts:90)
+    // — sin este guard, un undefined llegaría hasta requestN8nPublish y su
+    // propia validación zod lo convertiría en un 400 que culpa al caller,
+    // cuando en realidad es un estado interno inconsistente (target
+    // aprobado pero sin asset servible).
+    mockRepository({
+      checkPublicationTargetOwnership: { target: { id: targetId, status: "APPROVED" }, failed: false },
+      getContentRecord: { asset: {}, finalCopy: { headline: "H", body: "B", cta: "C" } },
     });
-    vi.mocked(resolveV1RequestContext).mockResolvedValue({
-      organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
-      repository: { supabaseClientForTests: { from: () => queryChain }, getContentRecord } as never,
+    const response = await publishCampaign(requestWithBody({ publicationTargetId: targetId }), context());
+    expect(response.status).toBe(503);
+    expect(requestN8nPublish).not.toHaveBeenCalled();
+  });
+
+  it("derives assetUrl/copy from the stored record server-side — the caller cannot supply their own", async () => {
+    mockRepository({
+      checkPublicationTargetOwnership: { target: { id: targetId, status: "APPROVED" }, failed: false },
+      getContentRecord: {
+        asset: { signedUrl: "https://storage.example/real-asset.png" },
+        finalCopy: { headline: "Real headline", body: "Real body", cta: "Real CTA" },
+      },
     });
     vi.mocked(requestN8nPublish).mockResolvedValue({
       created: true, status: "QUEUED", idempotencyKey: "idem-1", publicationTargetId: targetId, platform: "FACEBOOK",
@@ -1642,15 +1982,12 @@ describe("POST /api/v1/campaigns/:id/publish", () => {
     // (que internamente vuelve a llamar preparePublishRequest) igual lanza
     // PublishTargetConflictError, es una condición de carrera transitoria,
     // no un 409 real — el 409 real ya se habría dado en el paso anterior.
-    const maybeSingle = vi.fn().mockResolvedValue({ data: { id: targetId, status: "APPROVED" }, error: null });
-    const queryChain = { select: () => queryChain, eq: () => queryChain, maybeSingle };
-    const getContentRecord = vi.fn().mockResolvedValue({
-      asset: { signedUrl: "https://storage.example/real-asset.png" },
-      finalCopy: { headline: "H", body: "B", cta: "C" },
-    });
-    vi.mocked(resolveV1RequestContext).mockResolvedValue({
-      organization: { organizationId: "org-1", userId: "user-1", role: "owner" },
-      repository: { supabaseClientForTests: { from: () => queryChain }, getContentRecord } as never,
+    mockRepository({
+      checkPublicationTargetOwnership: { target: { id: targetId, status: "APPROVED" }, failed: false },
+      getContentRecord: {
+        asset: { signedUrl: "https://storage.example/real-asset.png" },
+        finalCopy: { headline: "H", body: "B", cta: "C" },
+      },
     });
     const { PublishTargetConflictError } = await import("@/lib/content/repository");
     vi.mocked(requestN8nPublish).mockRejectedValue(new PublishTargetConflictError());
@@ -1660,8 +1997,6 @@ describe("POST /api/v1/campaigns/:id/publish", () => {
   });
 });
 ```
-
-(El doble `supabaseClientForTests` de arriba es un boceto de cómo inyectar el cliente subyacente para el pre-chequeo propio — **ajusta esto a como el repositorio real expone o permite construir esa consulta**: puede que necesites agregar un método `checkPublicationTargetOwnership(contentItemId, publicationTargetId)` al `ContentRepository`/`SupabaseRepository` en vez de alcanzar un cliente interno desde la ruta. Decide el diseño exacto leyendo `lib/content/repository.ts`/`lib/supabase/repository.ts` primero — el punto no negociable es el comportamiento (404/503/409 tal como los tests lo exigen), no la forma exacta de la inyección.)
 
 - [ ] **Step 2: Confirmar que falla**
 
@@ -1699,7 +2034,7 @@ export async function POST(
     const params = await context.params;
     const contentItemId = contentIdSchema.parse(params.id);
 
-    const { organization, repository } = await resolveV1RequestContext(request);
+    const { repository } = await resolveV1RequestContext(request);
 
     let rawBody: unknown;
     try {
@@ -1716,12 +2051,20 @@ export async function POST(
       contentItemId,
       body.publicationTargetId,
     );
-    if (ownershipCheck.error) return jsonError("TARGET_LOOKUP_FAILED", 503);
+    if (ownershipCheck.failed) return jsonError("TARGET_LOOKUP_FAILED", 503);
     if (!ownershipCheck.target) return jsonError("TARGET_NOT_FOUND", 404);
     if (ownershipCheck.target.status !== "APPROVED") return jsonError("TARGET_NOT_APPROVED", 409);
 
     const record = await repository.getContentRecord(contentItemId);
-    if (!record?.asset || !record.finalCopy) return jsonError("TARGET_NOT_FOUND", 404);
+    // Corrección ronda 1 de revisión del plan (hallazgo real):
+    // record.asset.signedUrl es opcional — un target APPROVED sin una URL
+    // firmada servible es una inconsistencia interna, no un error del
+    // caller. Se distingue explícitamente en vez de dejar que
+    // assetUrl: undefined llegue a la validación zod de requestN8nPublish,
+    // que lo clasificaría como 400 (culpa del caller) en vez de 503.
+    if (!record?.asset?.signedUrl || !record.finalCopy) {
+      return jsonError("TARGET_LOOKUP_FAILED", 503);
+    }
 
     try {
       const result = await requestN8nPublish(
@@ -1758,24 +2101,26 @@ export async function POST(
 }
 ```
 
-(`repository.checkPublicationTargetOwnership` y `record.asset.signedUrl` son bocetos de la forma que necesita este endpoint — **el shape real de `ContentRecord`/`getContentRecord` y si ya expone una `signedUrl` para el asset se verifica contra `lib/content/repository.ts`/`lib/supabase/repository.ts:754-758` antes de dar esto por bueno**; si `checkPublicationTargetOwnership` no existe, agrégalo al repositorio como un método nuevo y angosto, reutilizando la misma consulta que ya hace `preparePublishRequest` pero separando la clasificación de errores como exige este task.)
+(Verifica el shape real de `ContentRecord`/`getContentRecord` contra `lib/content/repository.ts`/`lib/supabase/repository.ts:754-758` antes de dar esto por bueno.)
 
 - [ ] **Step 4: Confirmar que pasa**
 
 Run: `npm test -- tests/api/v1-publish.test.ts`
-Expected: PASS, 5 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 5: `tsc`, lint, build**
 
-Run: `npx tsc --noEmit && npx eslint "app/api/v1/campaigns/[id]/publish/route.ts" tests/api/v1-publish.test.ts && npm run build`
+Run: `npx tsc --noEmit && npx eslint "app/api/v1/campaigns/[id]/publish/route.ts" lib/content/repository.ts lib/supabase/repository.ts lib/demo/repository.ts tests/api/v1-publish.test.ts && npm run build`
 Expected: limpio.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add "app/api/v1/campaigns/[id]/publish" tests/api/v1-publish.test.ts
+git add "app/api/v1/campaigns/[id]/publish" lib/content/repository.ts lib/supabase/repository.ts lib/demo/repository.ts tests/api/v1-publish.test.ts
 git commit -m "feat: add POST /api/v1/campaigns/:id/publish with server-derived payload"
 ```
+
+(Confirma con `git status` que los tres archivos de repositorio quedaron staged junto con la ruta nueva — si la Task 9 ya los había modificado y commiteado, este `git add` solo captura los cambios incrementales de esta task.)
 
 ---
 
