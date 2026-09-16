@@ -523,19 +523,27 @@ it("carries an optional apiKey field, absent by default, for session-authenticat
 });
 ```
 
-**Corrección ronda 2 de revisión del plan (hallazgo real — estos dos tests seguían siendo placeholders tras la ronda 1, que no los tocó):** agrega a `tests/content/supabase-repository.test.ts` (léelo primero — ya existe y ya cubre `createContentItemWithAsset`/`enqueueCopyJob` con un mock de `client.rpc`; sigue su patrón exacto, no inventes uno nuevo):
+**Corrección ronda 3 de revisión del plan (hallazgo real — los "fixtures reutilizados" de la ronda 2 no existían con esos nombres):** `tests/content/supabase-repository.test.ts` ya declara `organizationA`/`organizationB` (`OrganizationContext` completos, línea 13-22), `validBrief` (línea 24-34, NO `validCampaignBrief`) y `createdRow` (línea 36-55, la fila completa que `toContentItem` exige — un mock `{ id: "content-1" }` a secas no alcanza, `toContentItem` lee todos sus campos). El archivo NO tiene un test directo de `createContentItemWithAsset` todavía (esa función solo se prueba indirectamente vía `tests/api/content-create.test.ts`, a nivel de ruta) — este es el primero. Usa exactamente estos fixtures reales:
 
 ```typescript
 it("passes p_actor_metadata with the api key context when the organization context came from an API key", async () => {
-  const rpc = vi.fn().mockResolvedValue({ data: { id: "content-1" }, error: null });
-  const repository = createSupabaseRepository(
-    { rpc, storage: { from: () => ({ upload: vi.fn().mockResolvedValue({ error: null }) }) } } as never,
-    { organizationId: "org-1", userId: "user-1", role: "owner", apiKey: { id: "key-1", label: "n8n integration" } },
-  );
+  const rpc = vi.fn().mockResolvedValue({ data: createdRow, error: null });
+  const upload = vi.fn().mockResolvedValue({ error: null });
+  const client = { rpc, storage: { from: () => ({ upload }) } };
+  const organizationWithApiKey = { ...organizationA, apiKey: { id: "key-1", label: "n8n integration" } };
+  const repository = createSupabaseRepository(client as never, organizationWithApiKey);
 
   await repository.createContentItemWithAsset({
-    brief: validCampaignBrief, // reutiliza el fixture de brief que ya use este archivo
-    asset: validAssetUpload,   // reutiliza el fixture de asset que ya use este archivo
+    brief: validBrief,
+    asset: {
+      id: "c1b1a1a1-1111-4111-8111-111111111111",
+      filename: "creative.png",
+      mimeType: "image/png",
+      width: 1080,
+      height: 1350,
+      checksum: "a".repeat(64),
+      bytes: new Uint8Array([1, 2, 3]),
+    },
   });
 
   expect(rpc).toHaveBeenCalledWith(
@@ -547,24 +555,63 @@ it("passes p_actor_metadata with the api key context when the organization conte
 });
 
 it("passes an empty p_actor_metadata when the organization context has no apiKey (session-authenticated)", async () => {
-  const rpc = vi.fn().mockResolvedValue({ data: { id: "content-1" }, error: null });
-  const repository = createSupabaseRepository(
-    { rpc, storage: { from: () => ({ upload: vi.fn().mockResolvedValue({ error: null }) }) } } as never,
-    { organizationId: "org-1", userId: "user-1", role: "owner" },
-  );
+  const rpc = vi.fn().mockResolvedValue({ data: createdRow, error: null });
+  const upload = vi.fn().mockResolvedValue({ error: null });
+  const client = { rpc, storage: { from: () => ({ upload }) } };
+  const repository = createSupabaseRepository(client as never, organizationA);
 
-  await repository.createContentItemWithAsset({ brief: validCampaignBrief, asset: validAssetUpload });
+  await repository.createContentItemWithAsset({
+    brief: validBrief,
+    asset: {
+      id: "c1b1a1a1-1111-4111-8111-111111111111",
+      filename: "creative.png",
+      mimeType: "image/png",
+      width: 1080,
+      height: 1350,
+      checksum: "a".repeat(64),
+      bytes: new Uint8Array([1, 2, 3]),
+    },
+  });
 
   expect(rpc).toHaveBeenCalledWith(
     "create_content_item_with_asset_in_organization",
     expect.objectContaining({ p_actor_metadata: {} }),
   );
 });
+
+it("passes p_actor_metadata to enqueue_copy_automation_job when the context came from an API key", async () => {
+  const jobId = "d32c92ce-9e2b-4aa2-9c39-5c5d97746156";
+  const idempotencyKey = "4a150496-852d-46d4-8f25-951f6512db73";
+  const rpc = vi.fn().mockResolvedValue({ data: { created: true, jobId, idempotencyKey }, error: null });
+  const organizationWithApiKey = { ...organizationA, apiKey: { id: "key-1", label: "n8n integration" } };
+  const repository = createSupabaseRepository({ rpc } as never, organizationWithApiKey);
+
+  await repository.enqueueCopyJob({ contentItemId: createdRow.id, idempotencyKey });
+
+  expect(rpc).toHaveBeenCalledWith(
+    "enqueue_copy_automation_job",
+    expect.objectContaining({
+      p_actor_metadata: { via: "api_key", apiKeyId: "key-1", apiKeyLabel: "n8n integration" },
+    }),
+  );
+});
+
+it("passes an empty p_actor_metadata to enqueue_copy_automation_job for a session-authenticated context", async () => {
+  const jobId = "d32c92ce-9e2b-4aa2-9c39-5c5d97746156";
+  const idempotencyKey = "4a150496-852d-46d4-8f25-951f6512db73";
+  const rpc = vi.fn().mockResolvedValue({ data: { created: true, jobId, idempotencyKey }, error: null });
+  const repository = createSupabaseRepository({ rpc } as never, organizationA);
+
+  await repository.enqueueCopyJob({ contentItemId: createdRow.id, idempotencyKey });
+
+  expect(rpc).toHaveBeenCalledWith(
+    "enqueue_copy_automation_job",
+    expect.objectContaining({ p_actor_metadata: {} }),
+  );
+});
 ```
 
-(Ajusta los nombres de los fixtures `validCampaignBrief`/`validAssetUpload`/el mock de `storage.from(...).upload` a lo que el archivo real ya declara — el punto no negociable es la aserción sobre `p_actor_metadata`, no los datos de entrada exactos. Escribe el par equivalente para `enqueueCopyJob` en el mismo archivo o el que ya cubra ese método, verificando `p_actor_metadata` en la llamada a `"enqueue_copy_automation_job"`.)
-
-**Además, corrección ronda 2 (hallazgo real):** `tests/content/supabase-repository.test.ts:367` ya tiene un test existente para `enqueueCopyJob` con una aserción exacta sobre los argumentos de `client.rpc(...)` — al agregar `p_actor_metadata` a esa llamada real (Step 3), esa aserción existente deja de coincidir. Actualízala en el mismo commit para incluir `p_actor_metadata: {}`, no la dejes rota.
+**Además, corrección ronda 2 (hallazgo real, sigue vigente):** el test existente de `enqueueCopyJob` en la línea ~367-379 (`"enqueues a copy job atomically in the trusted organization"`) hace `expect(rpc).toHaveBeenCalledWith("enqueue_copy_automation_job", { p_organization_id: ..., p_actor_id: ..., p_content_item_id: ..., p_idempotency_key: ... })` — un objeto exacto, sin `p_actor_metadata`. Al agregar ese parámetro en el Step 3, esta aserción exacta deja de coincidir (el objeto real ahora tiene un campo de más). Actualízala en el mismo commit agregando `p_actor_metadata: {}` al objeto esperado — no la dejes rota. Busca si `approvePublicationTarget` (línea ~359-364) u otro test de este archivo hace una aserción exacta similar contra una RPC que la Task 2 no tocó — esos NO necesitan cambio, solo los dos que sí se recrearon (`create_content_item_with_asset_in_organization`, `enqueue_copy_automation_job`).
 
 - [ ] **Step 2: Confirmar que fallan**
 
@@ -604,7 +651,7 @@ Y en `enqueueCopyJob` (alrededor de la línea 970), el mismo patrón dentro del 
 - [ ] **Step 4: Confirmar que pasan**
 
 Run: `npm test -- tests/organizations/context.test.ts tests/content/supabase-repository.test.ts`
-Expected: PASS — 1 test nuevo en `context.test.ts`, 4 nuevos (2 pares) más la aserción actualizada en `supabase-repository.test.ts`.
+Expected: PASS — 1 test nuevo en `context.test.ts`, 4 tests nuevos más la aserción actualizada del test existente de `enqueueCopyJob` en `supabase-repository.test.ts`.
 
 - [ ] **Step 5: `tsc`, lint**
 
@@ -1122,15 +1169,43 @@ describe("GET /api/organizations/[id]/api-keys", () => {
 });
 
 describe("DELETE /api/organizations/[id]/api-keys/[keyId]", () => {
-  it("revokes the key via the RPC", async () => {
+  it("revokes the key via the RPC when it belongs to the organization in the URL", async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { id: "key-1" }, error: null });
+    const eq2 = vi.fn().mockReturnValue({ maybeSingle });
+    const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+    const select = vi.fn().mockReturnValue({ eq: eq1 });
     const rpc = vi.fn().mockResolvedValue({ error: null });
-    const handler = createApiKeyRevokeHandler({ ...ownerSession, getClient: async () => ({ rpc } as never) });
+    const from = vi.fn().mockReturnValue({ select });
+    const handler = createApiKeyRevokeHandler({ ...ownerSession, getClient: async () => ({ from, rpc } as never) });
     const response = await handler(
       new Request("http://localhost", { method: "DELETE" }),
       context({ keyId: "key-1" }),
     );
     expect(response.status).toBe(204);
     expect(rpc).toHaveBeenCalledWith("revoke_organization_api_key", { p_key_id: "key-1" });
+  });
+
+  it("responds 404, without calling the RPC, when the key belongs to a DIFFERENT organization than the URL", async () => {
+    // Corrección ronda 3 de revisión del plan (hallazgo real de seguridad):
+    // revoke_organization_api_key solo recibe p_key_id y valida el owner de
+    // la organización REAL de esa clave — no la organización de la URL. Un
+    // owner de la organización A Y B podría llamar
+    // DELETE /api/organizations/A/api-keys/<clave-de-B> y revocarla, aunque
+    // la URL diga A. La ruta debe confirmar que la clave pertenece a la
+    // organización de la URL ANTES de invocar la RPC.
+    const maybeSingle = vi.fn().mockResolvedValue({ data: null, error: null }); // no existe PARA ESTA organización
+    const eq2 = vi.fn().mockReturnValue({ maybeSingle });
+    const eq1 = vi.fn().mockReturnValue({ eq: eq2 });
+    const select = vi.fn().mockReturnValue({ eq: eq1 });
+    const rpc = vi.fn();
+    const from = vi.fn().mockReturnValue({ select });
+    const handler = createApiKeyRevokeHandler({ ...ownerSession, getClient: async () => ({ from, rpc } as never) });
+    const response = await handler(
+      new Request("http://localhost", { method: "DELETE" }),
+      context({ keyId: "key-from-another-org" }),
+    );
+    expect(response.status).toBe(404);
+    expect(rpc).not.toHaveBeenCalled();
   });
 });
 
@@ -1186,13 +1261,13 @@ Expected: FAIL — el módulo no existe todavía.
 Sigue el patrón de `app/api/organizations/[id]/logo/route.ts` (auth de sesión vía `getSession` → resolver membership vía `getMembership` → gate `canManageConnections`, owner-únicamente, igual que las claves de API) para las tres rutas. Puntos no negociables del spec/plan:
 - `POST`: valida `label` no vacío con zod antes de llamar la RPC; llama `create_organization_api_key`; **desenvuelve `data[0]`** del arreglo devuelto (`data.length !== 1` → `500`); responde `201` con `{ id, keyPrefix, secret }` (mapea `key_prefix`→`keyPrefix` en la respuesta).
 - `GET`: `select` directo sobre `organization_api_keys` con las columnas seguras (las mismas que el `grant select (...)` de la Task 1 permite) — nunca pidas `key_hash`. **Corrección ronda 2 de revisión del plan (hallazgo real):** además filtra explícitamente `.eq("organization_id", organizationId)` — la policy de RLS por sí sola permite a un owner leer claves de CUALQUIERA de sus organizaciones, no solo la de la URL, así que sin este filtro un owner de varias organizaciones vería la lista equivocada.
-- `DELETE`: llama `revoke_organization_api_key` con el `keyId` de la URL; `204` sin body en éxito.
-- Las tres exigen rol owner (mismo gate `canManageConnections` que ya usa Logo Studio) antes de llegar a la RPC — la RPC también lo exige, pero fallar rápido en la ruta da un mensaje más claro que dejar que la RPC lo rechace.
+- `DELETE`: **Corrección ronda 3 de revisión del plan (hallazgo real de seguridad):** `revoke_organization_api_key` solo recibe `p_key_id` y autoriza contra la organización REAL de esa clave, no la de la URL — un owner de dos organizaciones podría revocar una clave de la organización B llamando la ruta de la organización A. Antes de llamar la RPC, la ruta hace su propia consulta `select id from organization_api_keys where id = :keyId and organization_id = :urlOrganizationId` (mismas columnas seguras que el `GET`); si no hay fila, `404` sin tocar la RPC. Solo si esa consulta confirma pertenencia se llama `revoke_organization_api_key` con el `keyId` de la URL; `204` sin body en éxito.
+- Las tres exigen rol owner (mismo gate `canManageConnections` que ya usa Logo Studio) antes de llegar a cualquier consulta o RPC — la RPC también lo exige para su propia organización, pero fallar rápido en la ruta da un mensaje más claro.
 
 - [ ] **Step 4: Confirmar que pasa**
 
 Run: `npm test -- tests/organizations/api-keys-route.test.ts`
-Expected: PASS, 10 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 5: `tsc`, lint, build**
 
@@ -1453,7 +1528,7 @@ git commit -m "feat: add server-side logo compositing with sharp"
 
 ```typescript
 /** @vitest-environment node */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/api/v1-context", () => ({
   resolveV1RequestContext: vi.fn(),
@@ -1469,6 +1544,17 @@ import { GET as listCampaigns, POST as createCampaign } from "@/app/api/v1/campa
 import { GET as getCampaign } from "@/app/api/v1/campaigns/[id]/route";
 import { resolveV1RequestContext, V1AuthenticationError } from "@/lib/api/v1-context";
 import { composeLogoServerSide } from "@/lib/logo-studio/compose-server";
+
+// Corrección ronda 3 de revisión del plan (hallazgo real): este proyecto
+// no tiene clearMocks/restoreMocks configurado globalmente
+// (vitest.config.ts) — sin este afterEach, el historial de llamadas de
+// composeLogoServerSide (y de los demás mocks a nivel de módulo) se
+// acumula entre tests del mismo archivo. El test "sin logo configurado"
+// exige composeLogoServerSide NOT toHaveBeenCalled(), lo cual solo es
+// significativo si el conteo de llamadas se resetea antes de cada test.
+afterEach(() => {
+  vi.clearAllMocks();
+});
 
 describe("GET /api/v1/campaigns", () => {
   it("responds 401 when authentication fails, without leaking whether the key format was merely wrong", async () => {
@@ -1525,13 +1611,25 @@ function makeValidPng(width = 1080, height = 1350): Uint8Array {
 }
 
 describe("POST /api/v1/campaigns", () => {
+  // Corrección ronda 3 de revisión del plan (hallazgo real): la ronda
+  // anterior inventaba valores de enum ("IMAGE", "SINGLE_IMAGE", "TOFU",
+  // "WHATSAPP") que no existen en los schemas reales — campaignBriefSchema.parse
+  // los habría rechazado con 400 antes de llegar a componer/encolar nada.
+  // Estos valores son los mismos que ya usa el fixture `validBrief` de
+  // tests/content/supabase-repository.test.ts:24-34 (contentType/objective/
+  // format vienen de CONTENT_TYPES/CONTENT_OBJECTIVES/CONTENT_FORMATS,
+  // lib/content/constants.ts) más los campos que campaignBriefSchema agrega
+  // (funnelStage ∈ lib/content/campaign.ts:7-12, destination ∈ :14).
   function formDataRequest(png: Uint8Array) {
     const formData = new FormData();
     formData.set("brief", JSON.stringify({
-      businessLine: "b", service: "s", niche: "n", contentType: "IMAGE", objective: "o",
-      format: "SINGLE_IMAGE", cta: "c", humanDescription: "d", allowedFacts: [],
-      campaignName: "Campaña", offer: "Oferta", funnelStage: "TOFU",
-      destination: "WHATSAPP", destinationValue: "https://wa.me/1",
+      businessLine: "CONTROLAR", service: "pos", niche: "clinicas",
+      contentType: "educativo", objective: "conversaciones_whatsapp", format: "feed_4_5",
+      cta: "Escribe POS por WhatsApp", humanDescription: "Mostrar el corte de caja de una clínica.",
+      allowedFacts: ["El POS registra ventas y cortes de caja."],
+      campaignName: "Agenda clínica septiembre", offer: "Automatización de agenda",
+      funnelStage: "captacion", destination: "whatsapp",
+      destinationValue: "https://wa.me/5215555555555?text=AGENDA",
     }));
     formData.set("asset", new File([png], "creative.png", { type: "image/png" }));
     return new Request("http://localhost", { method: "POST", body: formData });
@@ -1918,14 +2016,15 @@ async checkPublicationTargetOwnership(
 }
 ```
 
-**Implementación en `lib/demo/repository.ts`** (`DemoContentRepository` — busca en su propia colección local de targets en memoria; sigue el mismo patrón que ya usan sus otros métodos de lectura de `publication_targets`, revísalos antes de escribir este):
+**Implementación en `lib/demo/repository.ts`** (`DemoContentRepository` — corrección ronda 3 de revisión del plan: la versión anterior dejaba `const target = /* busca ... */;`, sintaxis inválida, no código real. El store local ya existe: `private readonly targetsByContentItem = new Map<string, PublicationTarget[]>()`, línea 90 — `listPublicationTargets` (línea 181-185) ya muestra el patrón exacto de lectura, `structuredClone(this.targetsByContentItem.get(contentItemId) ?? [])`):
 
 ```typescript
 async checkPublicationTargetOwnership(
   contentItemId: string,
   publicationTargetId: string,
 ): Promise<{ target: { id: string; status: string } | null; failed: boolean }> {
-  const target = /* busca en el store local de demo, filtrando por ambos ids */;
+  const targets = this.targetsByContentItem.get(contentItemId) ?? [];
+  const target = targets.find((candidate) => candidate.id === publicationTargetId);
   return { target: target ? { id: target.id, status: target.status } : null, failed: false };
 }
 ```
