@@ -56,6 +56,17 @@ histórico lo menciona, pero no hay `app/api/mcp` ni herramientas registradas.
 - La publicación orgánica puede continuar automáticamente sólo cuando el
   diagnóstico persistido ya declara el target apto. Un agente no puede saltar
   findings, programar gasto publicitario ni crear claims fuera del perfil AIAS.
+- Codex/Claude son el cerebro creativo preferido: generan o seleccionan el
+  asset, interpretan el nicho y proponen copy de alta conversión. Orbit
+  versiona contexto, valida hechos, distribuye por target, conserva resultados
+  y elimina trabajo repetitivo. OpenRouter queda como fallback interno para
+  jobs programados, no como sustituto obligado del criterio creativo del agente.
+- La pauta queda fuera del publicador: Meta Business Suite decide inversión.
+  Orbit prepara creativos/copy, conserva evidencia y registra resultados, pero
+  no crea campañas de ads ni mueve presupuesto.
+- Logo no se aplica globalmente: la campaña elegirá `NONE`,
+  `FIRST_ASSET_ONLY`, `ALL_ASSETS` o `SELECTED_ASSETS`; originales
+  inmutables y derivados auditables.
 
 ## Planes vinculados
 

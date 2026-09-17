@@ -34,6 +34,30 @@
 - Se conserva checksum, MIME real, dimensiones y derivativos.
 - Para Instagram se genera JPEG normalizado cuando el original no cumple el formato requerido.
 
+## Operación de contenido por agentes
+
+- Codex/Claude pueden analizar un creativo y redactar copy; Orbit guarda el
+  origen del copy, la versión AIAS, hechos permitidos y diagnóstico antes de publicar.
+- El agente recibe sólo contexto de marca y campaña. Nunca recibe secretos
+  Supabase/Meta, tokens OAuth, rutas internas de Storage ni datos de otros tenants.
+- El copy ataca un dolor y objetivo concretos; no inventa precios, testimonios,
+  resultados, urgencia, escasez ni ROI.
+- La automatización aplica a publicaciones orgánicas elegibles. Pauta, presupuesto,
+  audiencia, cargo o puja se deciden explícitamente en Meta Business Suite.
+- Con `REVIEW_REQUIRED`, el agente presenta hallazgos y corrige; no oculta
+  riesgo ni fuerza una publicación.
+
+## Política de logo por campaña
+
+- El original nunca se sobrescribe. Logo, resize y normalización crean
+  derivativos trazables con asset fuente, versión de logo y parámetros.
+- La campaña declara `NONE`, `FIRST_ASSET_ONLY`, `ALL_ASSETS` o
+  `SELECTED_ASSETS`; no hay estampado global silencioso.
+- `FIRST_ASSET_ONLY` usa posición `0`. `SELECTED_ASSETS` requiere
+  posiciones únicas pertenecientes a esa campaña.
+- Esquina, escala, margen y opacidad provienen de campaña o perfil aprobado.
+  El agente puede sugerirlos, pero no altera una versión ya aprobada.
+
 ## Generación visual: escala física de dispositivos
 
 - Toda pieza SnapGad 4:5 con laptop debe representar una ultrabook realista de **13–14 pulgadas, relación 16:10**; nunca un monitor, una laptop de tamaño imposible ni un teclado desproporcionado.

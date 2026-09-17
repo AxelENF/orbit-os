@@ -1,67 +1,56 @@
-# Estado actual — 2026-09-10
+# Estado actual — 2026-09-17
 
-## Resumen
+## Resumen ejecutivo
 
-SnapGad Content OS tiene una base local sólida para campañas, borradores, copy final, revisión, auditoría y una frontera durable de jobs. Sigue siendo demo por defecto y todavía no publica automáticamente en Meta; el esquema persistente ya está aplicado y verificado en el proyecto Supabase conectado.
+**Orbit OS by SnapGad** es el sistema operativo de contenido de marketing para organizaciones. Un agente como Codex o Claude analiza el creativo, el perfil AIAS, las pruebas permitidas y los resultados previos para diseñar copy por campaña; Orbit conserva activos, variantes, decisiones, guardrails, publicación y observaciones.
 
-## Consolidado
+La rama publicada `integration/main-consolidation` pasa 613 pruebas, TypeScript, lint y build. Este checkout no contiene `.env.local`, por lo que aún no hay prueba real de Supabase/Auth/Storage/Meta y no se declara producción.
 
-- Next.js + React + TypeScript.
-- Repositorio demo en memoria cuando no existen variables Supabase.
-- Repositorio Supabase aplicado al proyecto `zsljrjuebdgcyinexdlj`; el historial remoto contiene `0001`–`0017` en orden.
-- Validación server-side de PNG/JPEG/WEBP, máximo 20 MB y formato vertical 4:5.
-- Bucket privado `content-assets` creado y verificado como no público.
-- Organizaciones, membresías, roles y RLS definidos en migraciones.
-- `organization_id` agregado a entidades de contenido y jobs.
-- `automation_jobs` con idempotencia, claim, lease y completion para copy.
-- Bridge n8n firmado e inactivo; no es el flujo operativo predeterminado.
-- Meta limitada a preflight; no existe publisher real.
-- UI local navegable para biblioteca, nuevo contenido, revisión, borradores e historial.
-- Contrato AIAS para perfil y preferencias de workflow, con defaults seguros y claims prohibidos.
-- Resolver de organización activa validado contra memberships, codec HMAC y `POST /api/organizations/active` con cookie `httpOnly`.
-- Listado autenticado `GET /api/organizations`, selector accesible y pantallas de onboarding/organizaciones; el perfil AIAS ya se carga y guarda desde ambas pantallas cuando existe configuración pública de Supabase, y muestra un límite explícito en demo local.
-- Diagnóstico determinista de publicaciones AIAS con score, hallazgos, claims fail-closed y recomendación de revisión humana; aún no genera copy ni publica.
-- Contrato local de perfil AIAS con versionado optimista, hash SHA-256, auditoría y validación de metadata JSON acíclica; además existe adaptador Supabase con RPC/historial. Falta el smoke test con usuarios Auth reales.
-- Kernel local de jobs con leases, recuperación, reintentos, dead-letter, cancelación, health y adapters inyectables; todavía no consulta Supabase ni ejecuta Meta/n8n.
-- Persistencia AIAS aplicada mediante `0011_aias_profiles.sql`, con historial append-only y adaptador Supabase con RPC/versionado; falta probarlo con una sesión Auth real.
-- Contrato portable del worker durable, enum de estados de `0012_automation_job_status_values.sql`, RPCs de `0013_automation_job_lifecycle.sql` y adaptador `SupabaseCopyWorkerStore` aplicados; el worker aún requiere un processor de copy explícito y pruebas de jobs reales.
-- Endpoint interno `GET /api/internal/worker/health` protegido por token de servicio y sin payloads de jobs; reporta sólo telemetría agregada cuando existe store durable configurado.
-- Runner persistente `worker/durable-runner.ts` y entrypoint `npm run worker` con polling, heartbeat, recuperación y configuración fail-closed; requiere un processor de copy explícito y no hace llamadas de proveedor por defecto.
-- API autenticada `/api/organizations/[id]/profile` con GET/PUT/PATCH, roles y límites de payload/profundidad; está conectada al formulario de onboarding/settings. La migración/RLS existe, pero falta el smoke test con usuarios y membresías reales.
-- Registro manual de entrega por destino: URL HTTPS, fecha y nota opcional con idempotencia, auditoría y tenant scope. La migración `0016_manual_publication_delivery.sql` ya está aplicada; falta el smoke con usuario Auth y publicación real.
-- Snapshots manuales de resultados por destino: alcance, impresiones, conversaciones, leads calificados, citas, gasto/ingreso MXN y nota opcional. La migración `0017_publication_result_snapshots.sql` ya está aplicada; el sistema conserva observaciones y no atribuye ROI automáticamente.
-- Panel `/pilot` y API `/api/pilot/readiness`: muestra postura de configuración de persistencia, sesión/organización, worker y entrega manual sin filtrar secretos ni tratar un worker configurado como un worker en ejecución.
+## Consolidado en código
 
-## Brecha adicional detectada
+- Multi-organización con RLS, `organization_id`, roles, perfil AIAS versionado, organización activa y auditoría.
+- Biblioteca de campañas, activos privados, múltiples assets, borradores, copy final, hashtags, diagnóstico por target y resultados observados.
+- Generación interna de copy/intake con límites de costo, guardrails y worker durable con leases, recuperación y dead-letter.
+- Logo Studio: logo, composición en lote, posición/tamaño/margen, preview y ZIP; la API v1 puede estampar logo server-side.
+- OAuth Meta por organización, selección de Page, cola durable y conectores Graph para Facebook e Instagram. Sólo están probados de forma aislada.
+- API v1 con API keys por organización para campañas, detalle y encolado de publicación. El tenant deriva de la clave, no de parámetros del agente.
+- n8n queda como bridge opcional; la ruta objetivo es portal + worker interno.
 
-`lib/content/contracts.ts` todavía limita `businessLine`, `service` y `niche` a enums globales de SnapGad. Para una AIAS multi-organización esto no es suficiente: el perfil del cliente debe poder definir su propio catálogo o aceptar valores controlados por organización. La migración debe conservar validación, pero no bloquear rubros válidos de clientes nuevos.
+## Modelo de operación de contenido
 
-## No consolidado
+1. Codex/Claude genera o selecciona un creativo alineado al sistema visual SnapGad o a la marca cliente.
+2. El agente lee oferta, cliente ideal, dolor, pruebas permitidas, claims prohibidos, objetivo y resultados previos.
+3. El agente redacta copy de alta conversión para contenido educativo/autoridad, venta directa orgánica o creativo preparado para pauta. Orbit guarda origen, contexto y validación.
+4. Orbit evalúa el diagnóstico por target; si está apto pasa al worker orgánico y, si hay riesgo, devuelve hallazgos corregibles.
+5. Meta Business Suite se usa para decidir gasto y pauta. Orbit prepara asset/copy y registra resultados, pero no crea presupuestos, audiencias ni cargos.
 
-- Crear organización y completar el onboarding de perfil AIAS en staging con usuarios Supabase reales.
-- Integrar la cookie activa en los handlers de contenido restantes y validar el cambio de organización contra cada ruta mutante.
-- Operar el worker interno persistente con un processor de copy explícito y smoke test durable.
-- Smoke test de store durable/RPC con un usuario Auth, un asset privado y un job real.
-- Retries, dead-letter y recuperación operativa completa.
-- OAuth Meta por organización.
-- Cifrado/rotación de credenciales de proveedores.
-- Publicación real Facebook/Instagram.
-- Delivery URL compatible con el fetch externo de Meta.
-- Storage local como adaptador explícito.
-- Validar RLS, storage y shape de RPC con usuarios reales en staging.
+## Política de logo pendiente
 
-## Evidencia principal
+El compositor existe, pero la campaña debe elegir la regla antes de generar derivativos:
 
-- `README.md`
-- `lib/content/repository-factory.ts`
-- `lib/content/asset-validation.ts`
-- `lib/automation/jobs.ts`
-- `lib/integrations/meta-publisher.ts`
-- `supabase/migrations/0008_tenancy_foundation.sql`
-- `supabase/migrations/0009_tenantize_content_and_jobs.sql`
-- `supabase/migrations/0010_automation_jobs.sql`
-- `supabase/migrations/0011_aias_profiles.sql`
-- `supabase/migrations/0012_automation_job_status_values.sql`
-- `supabase/migrations/0013_automation_job_lifecycle.sql`
-- `lib/automation/supabase-copy-worker-store.ts`
-- `app/api/internal/worker/health/route.ts`
+- `NONE`: conservar creativos originales.
+- `FIRST_ASSET_ONLY`: marcar sólo portada/primer slide.
+- `ALL_ASSETS`: marcar todos los slides.
+- `SELECTED_ASSETS`: marcar posiciones elegidas.
+
+El original privado es inmutable. Cada estampado es un derivativo auditable con asset fuente, versión de logo, esquina, escala y margen; no se aplica un logo globalmente por una regla silenciosa.
+
+## Persistencia y release
+
+- La evidencia anterior verificó remoto hasta migración `0017`.
+- El repositorio incluye `0018`–`0030`, pero todavía no hay comparación actual contra Supabase.
+- `0031` moverá Page tokens y tokens temporales OAuth a Supabase Vault antes de conectar clientes reales.
+- API v1 debe recibir contexto de marca, envío de copy final, readiness, resultados y scopes antes del MCP local.
+
+## Próxima secuencia correcta
+
+1. Conectar Supabase por MCP OAuth o Supabase CLI y capturar el baseline real.
+2. Aplicar/verificar `0018`–`0031` en staging con Auth/RLS/Storage/OAuth/worker.
+3. Implementar política explícita de logo y extensiones agent-safe de API v1.
+4. Instalar MCP local stdio para Codex/Claude usando API key scoped, sin secretos de infraestructura.
+
+## Evidencia y planes
+
+- [Reconciliación de producto](07-reconciliacion-2026-09-17.md)
+- [Seguridad de base y staging](../superpowers/plans/2026-09-17-database-security-and-staging.md)
+- [MCP de operación por agentes](../superpowers/plans/2026-09-17-orbit-agent-mcp.md)

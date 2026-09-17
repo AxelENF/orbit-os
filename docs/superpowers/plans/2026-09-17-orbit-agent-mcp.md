@@ -4,7 +4,7 @@
 
 **Goal:** Let Codex and Claude operate Orbit's marketing workflow through a small, tenant-safe local MCP server without exposing Meta, Supabase, or provider secrets to the model.
 
-**Architecture:** Extend API v1 until it covers agent workflows, then create a local stdio MCP wrapper that authenticates with one organization-scoped Orbit API key from its process environment. MCP exposes high-value workflow tools and brand/campaign resources, not raw database access. Remote Streamable HTTP is deliberately deferred until the local agent path and staging security smoke pass.
+**Architecture:** Extend API v1 until it covers agent workflows, then create a local stdio MCP wrapper that authenticates with one organization-scoped Orbit API key from its process environment. Codex/Claude remain the preferred creative reasoning layer: inspect asset plus brand context, write copy, then submit it to Orbit for validation. MCP exposes high-value workflow tools and brand/campaign resources, not raw database access. Remote Streamable HTTP is deliberately deferred until local operation and staging security smoke pass.
 
 **Tech Stack:** TypeScript, Next.js API v1, Zod, `@modelcontextprotocol/sdk`, stdio MCP transport, Vitest, MCP Inspector.
 
@@ -38,6 +38,7 @@
 
 - [ ] Add `GET /api/v1/brand-context`, protected by `brand:read`, returning the active API-key organization profile, allowed facts, forbidden claims, default CTA, configured platforms, and no connection token or secret identifiers.
 - [ ] Add `POST /api/v1/campaigns/:id/final-copy`, protected by `campaigns:write`, accepting headline/body/CTA/hashtags. Reuse the existing final-copy validation and persistence path, then run the existing deterministic diagnosis; it must return `AUTOMATIC_READY` or `REVIEW_REQUIRED` plus sanitized findings.
+- [ ] Extend final-copy input with `origin` (`agent`, `internal_worker`, or `operator`) and optional non-secret `modelLabel`. Persist audit metadata so learning can compare sources without treating either as proof of ROI.
 - [ ] Add `GET /api/v1/campaigns/:id/readiness`, protected by `campaigns:read`, returning asset count, copy state, target state, diagnosis quality, safe next action, and no sensitive configuration.
 - [ ] Add `GET /api/v1/results`, protected by `results:read`, with cursor pagination and optional campaign ID. Return recorded observations only; never calculate or promise ROI.
 - [ ] Keep `POST /api/v1/campaigns/:id/publish` behind `campaigns:publish` and reject it unless readiness is `AUTOMATIC_READY` or the existing explicit human review path has approved the target. It must never create spend, ads, audiences, or boosted posts.
@@ -58,8 +59,10 @@
 - [ ] Implement a single API client that sends the API key in an Authorization header, validates every response with Zod, applies a 30-second timeout, and converts 401/403/409/422/503 responses into actionable MCP errors without server payload leakage.
 - [ ] Implement read-only tools: `orbit_get_brand_context`, `orbit_list_campaigns`, `orbit_get_campaign`, `orbit_get_campaign_readiness`, and `orbit_list_results`. Mark them read-only and return concise structured output with IDs agents can reuse.
 - [ ] Implement action tools: `orbit_create_campaign_from_file`, `orbit_submit_final_copy`, and `orbit_publish_campaign`. `orbit_create_campaign_from_file` must resolve a real local path, reject symbolic-link escapes, enforce that it belongs to `ORBIT_MCP_ASSET_ROOTS`, and stream it as the existing multipart API v1 request. It must not fetch arbitrary URLs or accept base64 payloads.
+- [ ] Make `orbit_submit_final_copy` send agent-written copy with `origin: "agent"` and optional `modelLabel`; it never sends Meta credentials or provider keys. Its response includes diagnosis findings so the agent revises unsafe copy.
 - [ ] Implement resources `orbit://brand-context` and `orbit://campaigns/{campaignId}` plus a `compose_brand_safe_post` prompt that injects only the selected organization profile and an explicit “do not invent claims” rule.
 - [ ] Make `orbit_publish_campaign` return the persisted readiness decision and target IDs. If review is required, return the exact sanitized findings and do not retry/override automatically.
+- [ ] Add logo-policy inputs to `orbit_create_campaign_from_file`: `NONE`, `FIRST_ASSET_ONLY`, `ALL_ASSETS`, or `SELECTED_ASSETS` with positions. Reject duplicate/out-of-range positions and create derivatives only after policy persistence; never overwrite source assets.
 - [ ] Write unit tests with a fake API client for scope failures, asset-root escapes, publication blocks, pagination, and token redaction. Run `npx @modelcontextprotocol/inspector` against a test API fixture and commit with `feat: add local Orbit agent MCP`.
 
 ### Task 4: Make Codex/Claude operation reproducible
