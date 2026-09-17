@@ -34,6 +34,7 @@ import {
   type CopyResultCallback,
   type CopyResultIngestion,
   type CopyResultRepository,
+  type PublicationPlatform,
   type PublicationTarget,
   type PublicationTargetStatus,
   type PublishRequestPreparation,
@@ -676,16 +677,16 @@ class SupabaseContentRepository
   async checkPublicationTargetOwnership(
     contentItemId: string,
     publicationTargetId: string,
-  ): Promise<{ target: { id: string; status: string } | null; failed: boolean }> {
+  ): Promise<{ target: { id: string; status: string; platform: PublicationPlatform } | null; failed: boolean }> {
     const { data, error } = await this.client
       .from("publication_targets")
-      .select("id, status")
+      .select("id, status, platform")
       .eq("id", publicationTargetId)
       .eq("content_item_id", contentItemId)
       .eq("organization_id", this.organization.organizationId)
       .maybeSingle();
     if (error) return { target: null, failed: true };
-    return { target: data as { id: string; status: string } | null, failed: false };
+    return { target: data as { id: string; status: string; platform: PublicationPlatform } | null, failed: false };
   }
 
   async listContentItems(): Promise<ContentItem[]> {

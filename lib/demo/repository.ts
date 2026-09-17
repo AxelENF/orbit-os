@@ -16,6 +16,7 @@ import {
   type FinalCopySubmission,
   type ContentRepository,
   type ManualPublicationDeliveryInput,
+  type PublicationPlatform,
   type PublicationResult,
   type PublicationResultInput,
   type PublicationTarget,
@@ -206,10 +207,10 @@ export class DemoContentRepository
   async checkPublicationTargetOwnership(
     contentItemId: string,
     publicationTargetId: string,
-  ): Promise<{ target: { id: string; status: string } | null; failed: boolean }> {
+  ): Promise<{ target: { id: string; status: string; platform: PublicationPlatform } | null; failed: boolean }> {
     const targets = this.targetsByContentItem.get(contentItemId) ?? [];
     const target = targets.find((candidate) => candidate.id === publicationTargetId);
-    return { target: target ? { id: target.id, status: target.status } : null, failed: false };
+    return { target: target ? { id: target.id, status: target.status, platform: target.platform } : null, failed: false };
   }
 
   async listContentItems(): Promise<ContentItem[]> {

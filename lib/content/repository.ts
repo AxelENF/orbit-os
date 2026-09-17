@@ -334,7 +334,7 @@ export interface ContentRepository
   checkPublicationTargetOwnership(
     contentItemId: string,
     publicationTargetId: string,
-  ): Promise<{ target: { id: string; status: string } | null; failed: boolean }>;
+  ): Promise<{ target: { id: string; status: string; platform: PublicationPlatform } | null; failed: boolean }>;
   approvePublicationTarget(
     contentItemId: string,
     publicationTargetId: string,
