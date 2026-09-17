@@ -247,7 +247,13 @@ describe("ContentForm", () => {
       });
     });
 
-    it("limpia los banners de sugerencias cuando se rechaza el archivo seleccionado", async () => {
+    it("limpia los banners de sugerencias cuando se quita el archivo seleccionado", async () => {
+      // El dropzone multi-asset (carrusel) nunca llama onChange cuando rechaza
+      // un archivo inválido — a propósito, para no perder otros archivos ya
+      // válidos en el mismo lote (ver components/content/asset-dropzone.tsx).
+      // Por eso ContentForm no tiene forma de enterarse de un intento
+      // rechazado; la señal real y observable de "ya no hay archivo" es
+      // quitar el archivo con el botón "Quitar", no un intento inválido.
       const secondSuggestionResponse = deferred<Response>();
       const fetchMock = vi.spyOn(globalThis, "fetch")
         .mockImplementationOnce(async () => jsonResponse({ suggestions: { niche: "clinicas" } }))
@@ -259,9 +265,7 @@ describe("ContentForm", () => {
         expect(screen.getByText("✨ Sugerido por tu imagen — revisa antes de continuar.")).toBeInTheDocument();
       });
 
-      fireEvent.change(screen.getByLabelText("Creativo final de Canva"), {
-        target: { files: [new File(["txt"], "invalido.txt", { type: "text/plain" })] },
-      });
+      fireEvent.click(screen.getByRole("button", { name: "Quitar creativo-1.png" }));
       await waitFor(() => {
         expect(screen.queryByText("✨ Sugerido por tu imagen — revisa antes de continuar.")).not.toBeInTheDocument();
       });
@@ -270,9 +274,7 @@ describe("ContentForm", () => {
       await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
       await waitFor(() => expect(screen.getByText("Analizando tu creativo…")).toBeInTheDocument());
 
-      fireEvent.change(screen.getByLabelText("Creativo final de Canva"), {
-        target: { files: [new File(["txt"], "otro-invalido.txt", { type: "text/plain" })] },
-      });
+      fireEvent.click(screen.getByRole("button", { name: "Quitar creativo-2.png" }));
       await waitFor(() => {
         expect(screen.queryByText("Analizando tu creativo…")).not.toBeInTheDocument();
       });
