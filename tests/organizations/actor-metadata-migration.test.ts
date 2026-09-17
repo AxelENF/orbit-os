@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 async function readMigration(): Promise<string> {
   const path = fileURLToPath(
-    new URL("../../supabase/migrations/0020_actor_metadata_for_api_keys.sql", import.meta.url),
+    new URL("../../supabase/migrations/0029_actor_metadata_for_api_keys.sql", import.meta.url),
   );
   return readFile(path, "utf8");
 }
