@@ -19,6 +19,7 @@
 ## Reglas operativas
 
 - `organization_id` es el límite de tenant.
+- [Reconciliación de producto 2026-09-17](07-reconciliacion-2026-09-17.md): estado consolidado, inventario de endpoints y planes de seguridad/MCP.
 - El navegador nunca recibe secretos de proveedor.
 - La IA publica automáticamente por default; el diagnóstico de publicación es la red de seguridad que detiene para revisión humana sólo cuando marca riesgo real (ADR-008, supersede la regla anterior de aprobación siempre obligatoria).
 - Una publicación debe ser idempotente y conservar su ID remoto.
