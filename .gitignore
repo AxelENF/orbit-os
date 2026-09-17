@@ -44,3 +44,6 @@ supabase/.temp/
 
 # git worktrees (isolated implementation workspaces)
 /.worktrees/
+
+# local codebase-memory index cache
+.codebase-memory/
