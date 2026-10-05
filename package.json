@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest",
+    "readiness": "node scripts/orbit-local-readiness.mjs",
     "worker": "tsx worker/entrypoint.ts"
   },
   "dependencies": {

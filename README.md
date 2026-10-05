@@ -12,6 +12,7 @@ Do not commit Supabase, Meta, n8n, or any other real credentials. Use local envi
 npm install
 npm test
 npm run lint
+npm run readiness
 ```
 
 ## Modes
@@ -27,18 +28,17 @@ npm run lint
   a configuration error instead of silently using demo data. The service-role key is never imported into or
   exposed to the browser.
 
-The database schema is now applied to the connected Supabase project
-`zsljrjuebdgcyinexdlj`. The migration history contains
-`supabase/migrations/0001_content_os.sql` through
-`0017_publication_result_snapshots.sql` (including the enum-only `0012` step),
-applied and verified in order with the Supabase CLI. The migrations create
+The database schema is applied to the connected Supabase project
+`zsljrjuebdgcyinexdlj`. The migration history contains the baseline `0001` through
+`0017` plus the single applied consolidation
+`20261005124203_orbit_os_mvp_consolidation.sql`. The migrations create
 organization-scoped tables, a private `content-assets` storage bucket,
 membership RLS policies, AIAS profiles, and portal-owned durable copy jobs.
 Migration `0013` adds the worker lifecycle RPCs used by
 `SupabaseCopyWorkerStore`. Migration history, critical tables, enum values,
 RPCs and the private bucket were verified by read-only queries after the push.
 End-to-end RLS behavior with a real Auth user and the application runtime still
-requires a separate staging smoke test.
+requires the pilot smoke test in `docs/superpowers/plans/2026-10-05-orbit-os-pilot-activation.md`.
 
 Before starting the real copy worker, set a finite
 `organizations.ai_monthly_budget_usd` for the pilot organization through a
