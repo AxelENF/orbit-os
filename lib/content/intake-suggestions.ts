@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+import type {
+  OrganizationOpenRouterCredential,
+  OrganizationOpenRouterCredentialResolver,
+} from "@/lib/ai/openrouter-organization-credential";
 import { CONTENT_TYPES, CONTENT_OBJECTIVES } from "@/lib/content/constants";
 import { estimateCostUsd } from "@/worker/providers/ai-usage";
 
@@ -38,22 +42,13 @@ export type IntakeSuggestionResult = {
 };
 
 export type IntakeSuggestionDependencies = {
+  organizationId: string;
   imageDataUrl: string;
   environment: Record<string, string | undefined>;
   fetchFn?: typeof fetch;
+  /** Trusted route/worker injection. Never resolve a browser-provided key. */
+  resolveCredential: OrganizationOpenRouterCredentialResolver;
 };
-
-function requiredEnv(environment: Record<string, string | undefined>, name: string): string {
-  const value = environment[name]?.trim();
-  if (!value) throw new Error(`${name} is required for intake suggestions.`);
-  return value;
-}
-
-function requiredPriceEnv(environment: Record<string, string | undefined>, name: string): number {
-  const value = Number(requiredEnv(environment, name));
-  if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be a non-negative number.`);
-  return value;
-}
 
 function positiveNumberEnv(
   environment: Record<string, string | undefined>,
@@ -91,12 +86,26 @@ const SYSTEM_PROMPT =
 export async function fetchIntakeSuggestions(
   dependencies: IntakeSuggestionDependencies,
 ): Promise<IntakeSuggestionResult> {
-  const { environment, imageDataUrl } = dependencies;
+  const { environment, imageDataUrl, organizationId } = dependencies;
   const fetchImpl = dependencies.fetchFn ?? fetch;
-  const model = requiredEnv(environment, "SNAPGAD_INTAKE_SUGGEST_OPENROUTER_MODEL");
-  const apiKey = requiredEnv(environment, "OPENROUTER_API_KEY");
-  const inputPrice = requiredPriceEnv(environment, "SNAPGAD_INTAKE_SUGGEST_MODEL_INPUT_PRICE_PER_1M_USD");
-  const outputPrice = requiredPriceEnv(environment, "SNAPGAD_INTAKE_SUGGEST_MODEL_OUTPUT_PRICE_PER_1M_USD");
+
+  // Intake is deliberately optional. If the tenant has no active BYOK
+  // credential or its resolver fails, keep the manual form usable but make
+  // no external provider request and record no usage.
+  let credential: OrganizationOpenRouterCredential | null;
+  try {
+    credential = await dependencies.resolveCredential(organizationId);
+  } catch {
+    return { suggestions: null, usage: null };
+  }
+  if (!credential) return { suggestions: null, usage: null };
+
+  const {
+    apiKey,
+    model,
+    inputCostPerMillionUsd: inputPrice,
+    outputCostPerMillionUsd: outputPrice,
+  } = credential;
   const maxOutputTokens = positiveNumberEnv(environment, "SNAPGAD_INTAKE_SUGGEST_MAX_OUTPUT_TOKENS", 300);
   const timeoutMs = positiveNumberEnv(environment, "SNAPGAD_INTAKE_SUGGEST_TIMEOUT_MS", 15000);
 

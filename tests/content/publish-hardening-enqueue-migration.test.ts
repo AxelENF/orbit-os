@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 async function readMigration(): Promise<string> {
-  const path = fileURLToPath(new URL("../../supabase/migrations/0024_publish_hardening.sql", import.meta.url));
+  const path = fileURLToPath(new URL("../../supabase/migrations/20261005124203_orbit_os_mvp_consolidation.sql", import.meta.url));
   try {
     return await readFile(path, "utf8");
   } catch (error) {
@@ -16,9 +16,8 @@ async function readMigration(): Promise<string> {
 describe("0024 publish hardening: enqueue idempotency lookup", () => {
   it("does not lock an existing automation job during the read-only idempotency check", async () => {
     const sql = await readMigration();
-    const fn = sql.match(
-      /create or replace function public\.enqueue_publish_automation_job[\s\S]*?\$\$;/i,
-    )?.[0];
+    const definitions = Array.from(sql.matchAll(/create (?:or replace )?function public\.enqueue_publish_automation_job[\s\S]*?\$\$;/gi));
+    const fn = definitions.at(-1)?.[0];
 
     expect(fn).toBeTruthy();
     expect(fn).toMatch(

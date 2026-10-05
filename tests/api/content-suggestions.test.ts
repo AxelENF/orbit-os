@@ -168,19 +168,24 @@ describe("POST /api/content/suggestions", () => {
   });
 
   it("200 con sugerencias cuando todo sale bien", async () => {
+    const fetchSuggestions = vi.fn().mockResolvedValue({
+      suggestions: { niche: "clinicas", contentType: null, objective: null, humanDescription: null, offer: null, cta: null },
+      usage: { provider: "openrouter", model: "m", inputTokens: 1, outputTokens: 1, estimatedCostUsd: 0.001 },
+    });
     const handler = createSuggestionsHandler({
       resolveOrganization: vi.fn().mockResolvedValue({ organizationId: "org-1" }),
       hasBudget: vi.fn().mockResolvedValue(true),
-      fetchSuggestions: vi.fn().mockResolvedValue({
-        suggestions: { niche: "clinicas", contentType: null, objective: null, humanDescription: null, offer: null, cta: null },
-        usage: { provider: "openrouter", model: "m", inputTokens: 1, outputTokens: 1, estimatedCostUsd: 0.001 },
-      }),
+      fetchSuggestions,
       recordUsage: vi.fn().mockResolvedValue(undefined),
     } as never);
     const response = await handler(multipartRequest(new File([blobPart(validPngBytes)], "a.png", { type: "image/png" })));
     expect(response.status).toBe(200);
     const body = await response.json() as { suggestions: unknown };
     expect(body.suggestions).toMatchObject({ niche: "clinicas" });
+    expect(fetchSuggestions).toHaveBeenCalledWith(expect.objectContaining({
+      organizationId: "org-1",
+      resolveCredential: expect.any(Function),
+    }));
   });
 
   it("200 con suggestions:null cuando no hay presupuesto (no llama OpenRouter)", async () => {

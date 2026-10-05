@@ -1,6 +1,7 @@
 import { AssetValidationError, validateAsset } from "@/lib/content/asset-validation";
 import { fetchIntakeSuggestions } from "@/lib/content/intake-suggestions";
 import { hasIntakeSuggestionBudget, recordIntakeSuggestionUsage } from "@/lib/content/intake-suggestion-budget";
+import { resolveOrganizationOpenRouterCredential } from "@/lib/ai/openrouter-organization-credential.server";
 
 const MAX_REQUEST_COST_USD = Number(process.env.SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD ?? "0.01");
 
@@ -98,6 +99,11 @@ async function defaultRecordUsage(
   await recordIntakeSuggestionUsage(createSupabaseServiceRoleClient(), organizationId, usage);
 }
 
+async function defaultResolveOpenRouterCredential(organizationId: string) {
+  const { createSupabaseServiceRoleClient } = await import("@/lib/supabase/server");
+  return resolveOrganizationOpenRouterCredential(createSupabaseServiceRoleClient(), organizationId);
+}
+
 function isFilePart(value: FormDataEntryValue | null): value is File {
   return Boolean(value && typeof value !== "string" && typeof value.arrayBuffer === "function");
 }
@@ -148,7 +154,12 @@ export function createSuggestionsHandler(
 
     try {
       const imageDataUrl = await toDataUrl(assetFile, validatedAsset.mimeType);
-      const result = await fetchSuggestions({ imageDataUrl, environment: process.env });
+      const result = await fetchSuggestions({
+        imageDataUrl,
+        organizationId,
+        environment: process.env,
+        resolveCredential: defaultResolveOpenRouterCredential,
+      });
       if (result.usage) {
         await recordUsage(organizationId, result.usage);
       }

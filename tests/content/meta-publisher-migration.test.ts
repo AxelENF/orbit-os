@@ -3,12 +3,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 async function readMigration(): Promise<string> {
-  const path = fileURLToPath(new URL("../../supabase/migrations/0018_meta_publisher.sql", import.meta.url));
+  const path = fileURLToPath(new URL("../../supabase/migrations/20261005124203_orbit_os_mvp_consolidation.sql", import.meta.url));
   return readFile(path, "utf8");
 }
 
 async function readProviderFixMigration(): Promise<string> {
-  const path = fileURLToPath(new URL("../../supabase/migrations/0020_publish_job_provider_fix.sql", import.meta.url));
+  const path = fileURLToPath(new URL("../../supabase/migrations/20261005124203_orbit_os_mvp_consolidation.sql", import.meta.url));
   try {
     return await readFile(path, "utf8");
   } catch (error) {
@@ -18,13 +18,20 @@ async function readProviderFixMigration(): Promise<string> {
 }
 
 async function readOAuthSessionCleanupMigration(): Promise<string> {
-  const path = fileURLToPath(new URL("../../supabase/migrations/0021_meta_oauth_session_cleanup.sql", import.meta.url));
+  const path = fileURLToPath(new URL("../../supabase/migrations/20261005124203_orbit_os_mvp_consolidation.sql", import.meta.url));
   try {
     return await readFile(path, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
     throw error;
   }
+}
+
+function lastFunctionDefinition(sql: string, name: string): string | undefined {
+  const matches = Array.from(
+    sql.matchAll(new RegExp(`create (?:or replace )?function public\\.${name}[\\s\\S]*?\\$\\$;`, "gi")),
+  );
+  return matches.at(-1)?.[0];
 }
 
 describe("content_item_assets", () => {
@@ -85,9 +92,23 @@ describe("organization_meta_connections", () => {
     expect(sql).toMatch(/grant execute on function public\.mark_meta_connection_error\(uuid\) to service_role/i);
   });
 
-  it("el CHECK de page_access_token no exige texto no-vacío cuando status no es ACTIVE (para que revoke pueda limpiarlo)", async () => {
+  it("no persiste el token de página en texto plano y exige una referencia Vault cuando la conexión está activa", async () => {
     const sql = await readMigration();
-    expect(sql).toMatch(/check \(status <> 'ACTIVE' or length\(btrim\(page_access_token\)\) > 0\)/i);
+    const table = sql.match(/create table public\.organization_meta_connections[\s\S]*?\n\);/i)?.[0];
+    expect(table).toBeTruthy();
+    expect(table).not.toMatch(/\n\s*page_access_token\s+text\b/i);
+    expect(table).toMatch(/page_access_token_vault_secret_id uuid/i);
+    expect(table).toMatch(/check \(status <> 'ACTIVE' or page_access_token_vault_secret_id is not null\)/i);
+    expect(sql).toMatch(/vault\.create_secret\(/i);
+    expect(sql).toMatch(/vault\.update_secret\(/i);
+  });
+
+  it("solo permite resolver el token cifrado desde service_role", async () => {
+    const sql = await readMigration();
+    expect(sql).toMatch(/create function public\.resolve_meta_connection_for_publish\(p_organization_id uuid\)/i);
+    expect(sql).toMatch(/from vault\.decrypted_secrets/i);
+    expect(sql).toMatch(/revoke all on function public\.resolve_meta_connection_for_publish\(uuid\) from public, anon, authenticated/i);
+    expect(sql).toMatch(/grant execute on function public\.resolve_meta_connection_for_publish\(uuid\) to service_role/i);
   });
 });
 
@@ -102,6 +123,20 @@ describe("organization_meta_oauth_sessions", () => {
     const sql = await readMigration();
     expect(sql).toMatch(/discovered_pages jsonb not null check \(jsonb_typeof\(discovered_pages\) = 'array'\)/i);
   });
+
+  it("guarda el token temporal como referencia Vault y ofrece create/resolve solo para service_role", async () => {
+    const sql = await readMigration();
+    const table = sql.match(/create table public\.organization_meta_oauth_sessions[\s\S]*?\n\);/i)?.[0];
+    expect(table).toBeTruthy();
+    expect(table).not.toMatch(/\n\s*user_long_lived_token\s+text\b/i);
+    expect(table).toMatch(/user_long_lived_token_vault_secret_id uuid not null/i);
+    expect(sql).toMatch(/create function public\.create_meta_oauth_session\(/i);
+    expect(sql).toMatch(/create function public\.resolve_meta_oauth_session\(/i);
+    expect(sql).toMatch(/revoke all on function public\.create_meta_oauth_session\([^)]*\) from public, anon, authenticated/i);
+    expect(sql).toMatch(/grant execute on function public\.create_meta_oauth_session\([^)]*\) to service_role/i);
+    expect(sql).toMatch(/revoke all on function public\.resolve_meta_oauth_session\(uuid, uuid\) from public, anon, authenticated/i);
+    expect(sql).toMatch(/grant execute on function public\.resolve_meta_oauth_session\(uuid, uuid\) to service_role/i);
+  });
 });
 
 describe("0021 Meta OAuth session cleanup", () => {
@@ -112,6 +147,8 @@ describe("0021 Meta OAuth session cleanup", () => {
     expect(fn).toBeTruthy();
     expect(fn).toMatch(/security definer/i);
     expect(fn).toMatch(/perform public\.upsert_meta_connection/i);
+    expect(fn).toMatch(/perform public\.invalidate_meta_vault_secret/i);
+    expect(fn).toMatch(/user_long_lived_token_vault_secret_id/i);
     expect(fn).toMatch(/delete from public\.organization_meta_oauth_sessions/i);
     expect(fn!.search(/perform public\.upsert_meta_connection/i)).toBeLessThan(
       fn!.search(/delete from public\.organization_meta_oauth_sessions/i),
@@ -153,17 +190,17 @@ describe("automation_jobs PUBLISH kind", () => {
 describe("PUBLISH job lifecycle SQL", () => {
   it("enqueue_publish_automation_job deriva la idempotency key con md5(...)::uuid, no gen_random_uuid", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.enqueue_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "enqueue_publish_automation_job")!;
     expect(fn).toMatch(/md5\(p_publication_target_id::text\)::uuid/i);
   });
   it("claim_next_publish_automation_job bloquea la fila del target (for update) antes de decidir si lo reclama, para serializar dos claims concurrentes del mismo target", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "claim_next_publish_automation_job")!;
     expect(fn).toMatch(/select \* into target\s+from public\.publication_targets\s+where id = job\.publication_target_id and organization_id = job\.organization_id\s+for update/i);
   });
   it("claim_next_publish_automation_job re-verifica jobs PROCESSING concurrentes para el mismo target DESPUÉS de bloquear el target, no antes", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "claim_next_publish_automation_job")!;
     const targetLockIndex = fn.search(/for update;[\s\S]*?if target\.status/i);
     const concurrentCheckIndex = fn.search(/active\.status = 'PROCESSING'/i);
     expect(targetLockIndex).toBeGreaterThan(-1);
@@ -171,7 +208,7 @@ describe("PUBLISH job lifecycle SQL", () => {
   });
   it("claim_next_publish_automation_job llama fail_claim_publish_job (que pone el target en ERROR, no solo el job) en cada rama de falla temprana genuina", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "claim_next_publish_automation_job")!;
     const failCalls = fn.match(/perform public\.fail_claim_publish_job/gi) ?? [];
     // target no encontrado, target no APPROVED (tras descartar PUBLISHED),
     // sin conexión, IG no conectado, sin copy final, sin assets.
@@ -179,24 +216,24 @@ describe("PUBLISH job lifecycle SQL", () => {
   });
   it("un target ya PUBLISHED con un job duplicado obsoleto se cancela el job SIN llamar fail_claim_publish_job (no sobrescribe el estado bueno con ERROR)", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.claim_next_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "claim_next_publish_automation_job")!;
     expect(fn).toMatch(/if target\.status = 'PUBLISHED' then/i);
     expect(fn).toMatch(/'PUBLISH_JOB_TARGET_ALREADY_PUBLISHED'/i);
   });
   it("recover_expired_publish_automation_jobs pone en ERROR los targets de los jobs que terminan en DEAD_LETTER", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.recover_expired_publish_automation_jobs[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "recover_expired_publish_automation_jobs")!;
     expect(fn).toMatch(/'ERROR'::public\.publication_status/i);
   });
   it("fail_publish_automation_job audita PUBLISH_JOB_FAILED y marca ERROR solo en transición terminal", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.fail_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "fail_publish_automation_job")!;
     expect(fn).toMatch(/'PUBLISH_JOB_FAILED'/i);
     expect(fn).toMatch(/next_status in \('FAILED', 'DEAD_LETTER'\)/i);
   });
   it("fail_publish_automation_job con p_requires_reconnect llama mark_meta_connection_error", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.fail_publish_automation_job[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "fail_publish_automation_job")!;
     expect(fn).toMatch(/if p_requires_reconnect then/i);
     expect(fn).toMatch(/perform public\.mark_meta_connection_error/i);
   });
@@ -218,11 +255,9 @@ describe("0020 publish job provider fix", () => {
     const sql = await readProviderFixMigration();
 
     for (const functionName of ["enqueue_publish_automation_job", "retry_publish_target"]) {
-      const functionMatch = sql.match(
-        new RegExp(`create (?:or replace )?function public\\.${functionName}[\\s\\S]*?\\$\\$;`, "i"),
-      );
-      expect(functionMatch).not.toBeNull();
-      expect(functionMatch?.[0]).toMatch(
+      const definition = lastFunctionDefinition(sql, functionName);
+      expect(definition).toBeTruthy();
+      expect(definition).toMatch(
         /insert into public\.automation_jobs\s*\([^)]*\bprovider\b[^)]*\)\s*values\s*\([^;]*'meta'/i,
       );
     }
@@ -232,14 +267,12 @@ describe("0020 publish job provider fix", () => {
 describe("0020 retry target content validation", () => {
   it("valida content_item_id en el lock inicial y elimina el overload anterior", async () => {
     const sql = await readProviderFixMigration();
-    const functionMatch = sql.match(
-      /create (?:or replace )?function public\.retry_publish_target[\s\S]*?\$\$;/i,
-    );
+    const definition = lastFunctionDefinition(sql, "retry_publish_target");
 
     expect(sql).toMatch(/drop function if exists public\.retry_publish_target\(uuid, uuid, uuid\)/i);
-    expect(functionMatch).not.toBeNull();
-    expect(functionMatch?.[0]).toMatch(/p_content_item_id uuid/i);
-    expect(functionMatch?.[0]).toMatch(
+    expect(definition).toBeTruthy();
+    expect(definition).toMatch(/p_content_item_id uuid/i);
+    expect(definition).toMatch(
       /select \* into target[\s\S]*?where\s+id = p_publication_target_id\s+and organization_id = p_organization_id\s+and content_item_id = p_content_item_id\s+for update/i,
     );
     expect(sql).toMatch(
@@ -254,15 +287,13 @@ describe("0020 retry target content validation", () => {
 describe("0020 Meta connection status actor binding", () => {
   it("deriva el actor desde auth.uid y elimina el overload que aceptaba actor del cliente", async () => {
     const sql = await readProviderFixMigration();
-    const functionMatch = sql.match(
-      /create or replace function public\.get_meta_connection_status[\s\S]*?\$\$;/i,
-    );
+    const definition = lastFunctionDefinition(sql, "get_meta_connection_status");
 
     expect(sql).toMatch(/drop function if exists public\.get_meta_connection_status\(uuid, uuid\)/i);
-    expect(functionMatch).not.toBeNull();
-    expect(functionMatch?.[0]).toMatch(/p_organization_id uuid/i);
-    expect(functionMatch?.[0]).not.toMatch(/p_actor_id/i);
-    expect(functionMatch?.[0]).toMatch(
+    expect(definition).toBeTruthy();
+    expect(definition).toMatch(/p_organization_id uuid/i);
+    expect(definition).not.toMatch(/p_actor_id/i);
+    expect(definition).toMatch(
       /assert_organization_actor\(\s*p_organization_id\s*,\s*auth\.uid\(\)/i,
     );
     expect(sql).toMatch(/grant execute on function public\.get_meta_connection_status\(uuid\) to authenticated/i);
@@ -277,12 +308,12 @@ describe("apply_publication_diagnosis SQL", () => {
   });
   it("is_safe exige quality_level='promising' Y que TODOS los findings tengan severity='info' (fail-closed ante severity nula/desconocida)", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.apply_publication_diagnosis[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "apply_publication_diagnosis")!;
     expect(fn).toMatch(/coalesce\(finding->>'severity', ''\) <> 'info'/i);
   });
   it("bloquea con lock en content_items antes que en publication_targets (mismo orden que approve_publication_target)", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.apply_publication_diagnosis[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "apply_publication_diagnosis")!;
     const itemLockIndex = fn.search(/select \* into item from public\.content_items[\s\S]*?for update/i);
     const targetUpdateIndex = fn.search(/update public\.publication_targets set status = 'APPROVED'/i);
     expect(itemLockIndex).toBeGreaterThan(-1);
@@ -293,13 +324,13 @@ describe("apply_publication_diagnosis SQL", () => {
 describe("approve_publication_target fixes (regex sobre la migración)", () => {
   it("encola el job PUBLISH tanto en el camino de retorno anticipado como en el de recién-aprobado", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create or replace function public\.approve_publication_target[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "approve_publication_target")!;
     const calls = fn.match(/perform public\.enqueue_publish_automation_job/gi) ?? [];
     expect(calls.length).toBe(2);
   });
   it("el conteo de pendientes excluye APPROVED y PUBLISHED, no solo APPROVED", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create or replace function public\.approve_publication_target[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "approve_publication_target")!;
     expect(fn).toMatch(/status not in \('APPROVED', 'PUBLISHED'\)/i);
   });
 });
@@ -307,7 +338,7 @@ describe("approve_publication_target fixes (regex sobre la migración)", () => {
 describe("retry_publish_target (regex sobre la migración)", () => {
   it("exige status='ERROR' y usa gen_random_uuid (no una key determinística) para el reintento", async () => {
     const sql = await readMigration();
-    const fn = sql.match(/create function public\.retry_publish_target[\s\S]*?\$\$;/i)![0];
+    const fn = lastFunctionDefinition(sql, "retry_publish_target")!;
     expect(fn).toMatch(/if target\.status <> 'ERROR' then/i);
     expect(fn).toMatch(/'PUBLISH', 'QUEUED', gen_random_uuid\(\)/i);
   });

@@ -3,6 +3,11 @@ import { z } from "zod";
 
 import type { DurableJob } from "@/lib/automation/durable-job-contract";
 import type { SupabaseCopyJobPayload } from "@/lib/automation/supabase-copy-worker-store";
+import {
+  resolveOrganizationOpenRouterCredential,
+  type OrganizationOpenRouterCredential,
+  type OrganizationOpenRouterCredentialResolver,
+} from "@/lib/ai/openrouter-organization-credential";
 import { validateFinalCopy } from "@/lib/content/final-copy";
 import { CopyGuardrailError } from "@/worker/providers/copy-guardrail-error";
 import {
@@ -43,19 +48,12 @@ export type CopyProcessorDependencies = {
   fetchFn?: typeof fetch;
   environment?: CopyProcessorEnvironment;
   getSupabaseClient?: () => SupabaseClient;
+  resolveCredential?: OrganizationOpenRouterCredentialResolver;
 };
 
 function requiredEnv(environment: CopyProcessorEnvironment, name: string): string {
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required for the copy processor.`);
-  return value;
-}
-
-function requiredPriceEnv(environment: CopyProcessorEnvironment, name: string): number {
-  const value = Number(requiredEnv(environment, name));
-  if (!Number.isFinite(value) || value < 0) {
-    throw new Error(`${name} must be a non-negative number.`);
-  }
   return value;
 }
 
@@ -140,13 +138,25 @@ export function createCopyProcessor(dependencies: CopyProcessorDependencies = {}
     job: DurableJob<SupabaseCopyJobPayload, CopyProcessorResult>,
   ): Promise<CopyProcessorResult> {
     const client = getClient();
-    const model = requiredEnv(environment, "SNAPGAD_COPY_OPENROUTER_MODEL");
-    const apiKey = requiredEnv(environment, "OPENROUTER_API_KEY");
     const timeoutMs = Number(environment.SNAPGAD_COPY_TIMEOUT_MS ?? "45000");
-    const inputPrice = requiredPriceEnv(environment, "SNAPGAD_COPY_MODEL_INPUT_PRICE_PER_1M_USD");
-    const outputPrice = requiredPriceEnv(environment, "SNAPGAD_COPY_MODEL_OUTPUT_PRICE_PER_1M_USD");
     const maxOutputTokens = positiveIntegerEnv(environment, "SNAPGAD_COPY_MAX_OUTPUT_TOKENS", 700);
     const maxRequestCostUsd = positiveMoneyEnv(environment, "SNAPGAD_COPY_MAX_REQUEST_COST_USD", 0.05);
+
+    // Never fall back to a portal-owned key. A missing/revoked/invalid BYOK
+    // configuration is not retryable: repeating this job cannot fix it and
+    // must not create a provider request or consume the tenant's budget.
+    const resolveCredential = dependencies.resolveCredential
+      ?? ((organizationId: string) => resolveOrganizationOpenRouterCredential(client, organizationId));
+    let credential: OrganizationOpenRouterCredential | null;
+    try {
+      credential = await resolveCredential(job.organizationId);
+    } catch {
+      throw new CopyGuardrailError("Organization OpenRouter credential is unavailable.", false);
+    }
+    if (!credential) {
+      throw new CopyGuardrailError("Organization OpenRouter credential is not configured.", false);
+    }
+    const { apiKey, model, inputCostPerMillionUsd: inputPrice, outputCostPerMillionUsd: outputPrice } = credential;
 
     // Guardrail 1: reserve budget in one database transaction before the
     // provider call. This closes the read-then-write race between workers.

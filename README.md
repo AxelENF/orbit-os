@@ -147,8 +147,9 @@ destination and final copy. It is safe to use while preparing a campaign. The
 Meta configuration boundary is deliberately preflight-only: credentials in
 `META_*` are server-only and do not make any Meta API call or publish a post.
 Even a configured n8n publish URL is fail-closed unless the explicit,
-reviewed `SNAPGAD_PUBLISH_WORKER_ENABLED=true` staging flag is present; the
-default remains no network publication.
+reviewed `SNAPGAD_N8N_PUBLISH_ENABLED=true` staging flag is present. Native
+Meta delivery uses its independent `SNAPGAD_META_PUBLISH_WORKER_ENABLED=true`
+flag; both default to no network publication.
 The actual Facebook/Instagram publishing connector remains staging work until
 a single approved asset and target-specific Meta permissions are verified.
 

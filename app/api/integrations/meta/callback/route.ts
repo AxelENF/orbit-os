@@ -239,16 +239,17 @@ export function createMetaOAuthCallbackHandler(
         return redirectToSettings(request, { metaOAuth: "connected" });
       }
 
-      const { error } = await serviceRole
-        .from("organization_meta_oauth_sessions")
-        .insert({
-          nonce: state.nonce,
-          organization_id: state.organization_id,
-        discovered_pages: pages.map(({ id, name, hasInstagram }) => ({ id, name, hasInstagram })),
-          user_long_lived_token: longLivedToken,
-          created_by: user.id,
-          expires_at: new Date(state.exp * 1000).toISOString(),
-        });
+      // The temporary user token is passed directly to a service-role-only
+      // RPC. The database stores only its Vault reference; this route never
+      // writes or reads a token-bearing public table.
+      const { error } = await serviceRole.rpc("create_meta_oauth_session", {
+        p_nonce: state.nonce,
+        p_organization_id: state.organization_id,
+        p_discovered_pages: pages.map(({ id, name, hasInstagram }) => ({ id, name, hasInstagram })),
+        p_user_long_lived_token: longLivedToken,
+        p_created_by: user.id,
+        p_expires_at: new Date(state.exp * 1000).toISOString(),
+      });
       if (error) throw new MetaOAuthCallbackError("META_OAUTH_SESSION_PERSIST_FAILED");
       return redirectToSettings(request, {
         metaOAuth: "select",

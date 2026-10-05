@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 async function readMigration(): Promise<string> {
   const path = fileURLToPath(
-    new URL("../../supabase/migrations/0030_actor_metadata_for_multi_asset_rpc.sql", import.meta.url),
+    new URL("../../supabase/migrations/20261005124203_orbit_os_mvp_consolidation.sql", import.meta.url),
   );
   return readFile(path, "utf8");
 }
@@ -23,7 +23,8 @@ describe("multi-asset actor metadata migration", () => {
 
   it("gives create_content_item_with_assets_in_organization a p_actor_metadata parameter merged into its audit event", async () => {
     const sql = await readMigration();
-    const fn = sql.split("create function public.create_content_item_with_assets_in_organization")[1] ?? "";
+    const definitions = Array.from(sql.matchAll(/create function public\.create_content_item_with_assets_in_organization[\s\S]*?\$\$;/gi));
+    const fn = definitions.at(-1)?.[0] ?? "";
     expect(fn).toMatch(/p_actor_metadata jsonb default '\{\}'::jsonb/i);
     expect(fn).toMatch(
       /jsonb_build_object\('assetId', asset_id, 'assetCount', asset_count, 'campaignCode', p_campaign_code\)\s*\|\|\s*p_actor_metadata/i,

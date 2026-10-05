@@ -1,4 +1,4 @@
--- 0019_organization_api_keys.sql
+-- 0028_organization_api_keys.sql
 -- Tabla + RPCs para claves de API por organización (API v1). Ver
 -- docs/superpowers/specs/2026-09-14-api-v1-tenant-keys-design.md.
 
@@ -28,12 +28,12 @@ create function public.create_organization_api_key(p_organization_id uuid, p_lab
 returns table (id uuid, key_prefix text, secret text)
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog
 as $$
 declare
-  v_secret text := 'sk_live_' || encode(gen_random_bytes(32), 'hex');
-  v_hash text := encode(digest(v_secret, 'sha256'), 'hex');
-  v_prefix text := left(v_secret, 12);
+  v_secret text := 'sk_live_' || pg_catalog.encode(extensions.gen_random_bytes(32), 'hex');
+  v_hash text := pg_catalog.encode(extensions.digest(v_secret, 'sha256'), 'hex');
+  v_prefix text := pg_catalog.left(v_secret, 12);
   v_id uuid;
 begin
   -- has_organization_role devuelve NULL (no false) cuando el caller no
@@ -53,7 +53,7 @@ create function public.revoke_organization_api_key(p_key_id uuid)
 returns void
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog
 as $$
 declare
   v_organization_id uuid;

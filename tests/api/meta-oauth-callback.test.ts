@@ -7,9 +7,7 @@ const createSupabaseServerClient = vi.hoisted(() => vi.fn());
 const createSupabaseServiceRoleClient = vi.hoisted(() => vi.fn());
 const getUser = vi.hoisted(() => vi.fn());
 const serverFrom = vi.hoisted(() => vi.fn());
-const serviceFrom = vi.hoisted(() => vi.fn());
 const rpc = vi.hoisted(() => vi.fn());
-const insert = vi.hoisted(() => vi.fn());
 const fetchMock = vi.hoisted(() => vi.fn());
 
 vi.mock("next/headers", () => ({
@@ -87,9 +85,7 @@ function configureGraph(pages: Page[], accountPages: Page[][] = [pages]) {
 }
 
 function configureSupabaseServiceRole() {
-  serviceFrom.mockReturnValue({ insert });
-  insert.mockResolvedValue({ error: null });
-  createSupabaseServiceRoleClient.mockReturnValue({ rpc, from: serviceFrom });
+  createSupabaseServiceRoleClient.mockReturnValue({ rpc });
   rpc.mockResolvedValue({ data: { connected: true }, error: null });
 }
 
@@ -158,7 +154,7 @@ describe("GET /api/integrations/meta/callback", () => {
       p_instagram_business_account_id: "instagram-account-page-1",
       p_page_access_token: "page-token-1",
     });
-    expect(serviceFrom).not.toHaveBeenCalled();
+    expect(createSupabaseServiceRoleClient).toHaveBeenCalledTimes(1);
   });
 
   it("con varias páginas guarda una sesión temporal sin tokens de página y redirige al selector", async () => {
@@ -175,19 +171,18 @@ describe("GET /api/integrations/meta/callback", () => {
     expect(location.pathname).toBe("/settings/organizations");
     expect(location.searchParams.get("metaOAuth")).toBe("select");
     expect(location.searchParams.get("nonce")).toBe("11111111-1111-4111-8111-111111111111");
-    expect(rpc).not.toHaveBeenCalled();
-    expect(insert).toHaveBeenCalledWith({
-      nonce: "11111111-1111-4111-8111-111111111111",
-      organization_id: organizationId,
-      discovered_pages: [
+    expect(rpc).toHaveBeenCalledWith("create_meta_oauth_session", {
+      p_nonce: "11111111-1111-4111-8111-111111111111",
+      p_organization_id: organizationId,
+      p_discovered_pages: [
         { id: "page-1", name: "Página Uno", hasInstagram: true },
         { id: "page-2", name: "Página Dos", hasInstagram: true },
       ],
-      user_long_lived_token: "long-lived-user-token",
-      created_by: userId,
-      expires_at: new Date((nowSeconds + 600) * 1000).toISOString(),
+      p_user_long_lived_token: "long-lived-user-token",
+      p_created_by: userId,
+      p_expires_at: new Date((nowSeconds + 600) * 1000).toISOString(),
     });
-    expect(JSON.stringify(insert.mock.calls[0]?.[0])).not.toContain("page-token");
+    expect(JSON.stringify(rpc.mock.calls[0]?.[1])).not.toContain("page-token");
   });
 
   it("sigue paging.next y guarda también las páginas que Meta devuelve después", async () => {
@@ -198,8 +193,8 @@ describe("GET /api/integrations/meta/callback", () => {
     const response = await GET(callbackRequest());
 
     expect(response.status).toBe(302);
-    expect(insert).toHaveBeenCalledWith(expect.objectContaining({
-      discovered_pages: [
+    expect(rpc).toHaveBeenCalledWith("create_meta_oauth_session", expect.objectContaining({
+      p_discovered_pages: [
         { id: "page-1", name: "Página Uno", hasInstagram: true },
         { id: "page-2", name: "Página Dos", hasInstagram: true },
       ],

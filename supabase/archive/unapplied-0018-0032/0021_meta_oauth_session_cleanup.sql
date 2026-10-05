@@ -16,7 +16,27 @@ language plpgsql
 security definer
 set search_path = pg_catalog
 as $$
+declare
+  session_secret_id uuid;
+  session_created_by uuid;
 begin
+  -- Bloquea y verifica la sesión ANTES de persistir la página. Así un nonce
+  -- vencido, de otra organización o de otro actor nunca puede enlazar una
+  -- página mediante una RPC privilegiada.
+  select user_long_lived_token_vault_secret_id, created_by
+  into session_secret_id, session_created_by
+  from public.organization_meta_oauth_sessions
+  where nonce = p_nonce
+    and organization_id = p_organization_id
+    and expires_at > now()
+  for update;
+  if not found then
+    raise exception using errcode = 'P0001', message = 'META_OAUTH_SESSION_NOT_FOUND';
+  end if;
+  if session_created_by <> p_connected_by then
+    raise exception using errcode = 'P0001', message = 'META_OAUTH_SESSION_ACTOR_MISMATCH';
+  end if;
+
   perform public.upsert_meta_connection(
     p_organization_id,
     p_connected_by,
@@ -26,11 +46,15 @@ begin
     p_page_access_token
   );
 
+  -- No se borra directamente desde Vault: se invalida el cifrado y después
+  -- se remueve la referencia temporal. La API/cliente nunca ve este valor.
+  perform public.invalidate_meta_vault_secret(
+    session_secret_id,
+    'Meta OAuth session completed'
+  );
+
   delete from public.organization_meta_oauth_sessions
   where nonce = p_nonce and organization_id = p_organization_id;
-  if not found then
-    raise exception using errcode = 'P0001', message = 'META_OAUTH_SESSION_NOT_FOUND';
-  end if;
 
   return jsonb_build_object('connected', true);
 end;
@@ -48,24 +72,29 @@ set search_path = pg_catalog
 as $$
 declare
   deleted_count integer := 0;
+  expired_session record;
 begin
   if p_limit < 1 or p_limit > 1000 then
     raise exception using errcode = 'P0001', message = 'META_OAUTH_SESSION_CLEANUP_LIMIT_INVALID';
   end if;
 
-  with expired as (
-    select nonce
+  for expired_session in
+    select nonce, user_long_lived_token_vault_secret_id
     from public.organization_meta_oauth_sessions
     where expires_at <= now()
     order by expires_at asc
     for update skip locked
     limit p_limit
-  )
-  delete from public.organization_meta_oauth_sessions as session
-  using expired
-  where session.nonce = expired.nonce;
+  loop
+    perform public.invalidate_meta_vault_secret(
+      expired_session.user_long_lived_token_vault_secret_id,
+      'Meta OAuth session expired'
+    );
+    delete from public.organization_meta_oauth_sessions
+    where nonce = expired_session.nonce;
+    deleted_count := deleted_count + 1;
+  end loop;
 
-  get diagnostics deleted_count = row_count;
   return jsonb_build_object('deleted', deleted_count);
 end;
 $$;

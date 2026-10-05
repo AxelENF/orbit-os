@@ -59,9 +59,27 @@ function fakeClient(overrides: {
   spend?: number;
   forbiddenClaims?: string[];
   reservationStatus?: "RESERVED" | "BUDGET_EXCEEDED";
+  credential?: "ACTIVE" | "MISSING" | "RPC_ERROR";
 }): SupabaseClient & { aiUsageInsert: ReturnType<typeof vi.fn> } {
   const aiUsageInsert = vi.fn().mockResolvedValue({ error: null });
   const rpc = vi.fn().mockImplementation((name: string) => {
+    if (name === "resolve_organization_openrouter_credential_for_worker") {
+      if (overrides.credential === "RPC_ERROR") {
+        return Promise.resolve({ data: null, error: new Error("resolver unavailable") });
+      }
+      if (overrides.credential === "MISSING") return Promise.resolve({ data: [], error: null });
+      return Promise.resolve({
+        data: [{
+          credential_id: "88888888-8888-4888-8888-888888888888",
+          api_key: "organization-openrouter-key",
+          model: "organization/vision-model",
+          input_cost_per_million_usd: 3,
+          output_cost_per_million_usd: 15,
+          monthly_budget_usd: 12,
+        }],
+        error: null,
+      });
+    }
     if (name === "reserve_ai_request_budget") {
       return Promise.resolve({
         data:
@@ -101,13 +119,9 @@ function fakeClient(overrides: {
 const environment = {
   NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
   SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
-  OPENROUTER_API_KEY: "openrouter-key",
-  SNAPGAD_COPY_OPENROUTER_MODEL: "some/vision-model",
   SNAPGAD_COPY_TIMEOUT_MS: "45000",
   SNAPGAD_COPY_MAX_OUTPUT_TOKENS: "700",
   SNAPGAD_COPY_MAX_REQUEST_COST_USD: "0.05",
-  SNAPGAD_COPY_MODEL_INPUT_PRICE_PER_1M_USD: "3",
-  SNAPGAD_COPY_MODEL_OUTPUT_PRICE_PER_1M_USD: "15",
 };
 
 function openRouterResponse(drafts: unknown) {
@@ -163,7 +177,7 @@ describe("copy-processor", () => {
     );
     const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
-    expect(body.model).toBe("some/vision-model");
+    expect(body.model).toBe("organization/vision-model");
     expect(body.max_tokens).toBe(700);
     const userMessage = body.messages.find((message: { role: string }) => message.role === "user");
     const serializedUserContent = JSON.stringify(userMessage.content);
@@ -182,6 +196,25 @@ describe("copy-processor", () => {
       p_reservation_id: "77777777-7777-4777-8777-777777777777",
       p_estimated_cost_usd: 0.0105,
     }));
+    expect(client.rpc).toHaveBeenCalledWith("resolve_organization_openrouter_credential_for_worker", {
+      p_organization_id: organizationId,
+    });
+  });
+
+  it("fails closed before reserving budget or calling OpenRouter when the organization has no active BYOK credential", async () => {
+    const fetchFn = vi.fn();
+    const client = fakeClient({ credential: "MISSING" });
+    const processor = createCopyProcessor({ environment, fetchFn, getSupabaseClient: () => client });
+
+    await expect(processor(baseJob())).rejects.toMatchObject({
+      name: "CopyGuardrailError",
+      retryable: false,
+    });
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(client.rpc).toHaveBeenCalledWith("resolve_organization_openrouter_credential_for_worker", {
+      p_organization_id: organizationId,
+    });
+    expect(client.rpc).not.toHaveBeenCalledWith("reserve_ai_request_budget", expect.anything());
   });
 
   it("rejects malformed hashtags before a draft can reach human review", async () => {

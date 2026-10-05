@@ -20,8 +20,9 @@
 
 - `organization_id` es el límite de tenant.
 - [Reconciliación de producto 2026-09-17](07-reconciliacion-2026-09-17.md): estado consolidado, inventario de endpoints y planes de seguridad/MCP.
+- [Preparación de producción 2026-10-05](09-production-preparation-2026-10-05.md): baseline Supabase, migración consolidada, gates y runbook del primer piloto.
 - El navegador nunca recibe secretos de proveedor.
-- La IA publica automáticamente por default; el diagnóstico de publicación es la red de seguridad que detiene para revisión humana sólo cuando marca riesgo real (ADR-008, supersede la regla anterior de aprobación siempre obligatoria).
+- La IA puede proponer contenido y diagnósticos; la primera publicación de cada integración y toda pauta pagada requieren revisión humana explícita.
 - Una publicación debe ser idempotente y conservar su ID remoto.
 - Demo, staging y producción deben declararse explícitamente; no se infiere conectividad por la existencia de una variable parcial.
 - No se aplican migraciones remotas sin confirmar el proyecto destino.

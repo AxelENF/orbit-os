@@ -30,11 +30,8 @@ type OAuthSession = {
   discoveredPages: Array<{ id: string; name: string; hasInstagram: boolean }>;
   userLongLivedToken: string;
   expiresAt: string;
+  createdBy: string;
 };
-
-type OAuthSessionPreview = Pick<OAuthSession, "organizationId" | "discoveredPages" | "expiresAt">;
-
-type OAuthSessionBinding = Pick<OAuthSession, "expiresAt"> & { createdBy: string };
 
 type SelectDependencies = {
   fetchFn?: typeof fetch;
@@ -93,33 +90,23 @@ function parseDiscoveredPages(value: unknown): OAuthSession["discoveredPages"] |
   });
 }
 
-function parseOAuthSessionPreview(value: unknown): OAuthSessionPreview | null {
+function parseOAuthSession(value: unknown): OAuthSession | null {
   if (!isRecord(value)) return null;
-  const organizationId = stringValue(value.organization_id);
-  const expiresAt = stringValue(value.expires_at);
-  const discoveredPages = parseDiscoveredPages(value.discovered_pages);
-  if (!organizationId || !expiresAt || !discoveredPages) {
+  const organizationId = stringValue(value.organizationId);
+  const expiresAt = stringValue(value.expiresAt);
+  const discoveredPages = parseDiscoveredPages(value.discoveredPages);
+  const createdBy = stringValue(value.createdBy);
+  const userLongLivedToken = stringValue(value.userLongLivedToken);
+  if (!organizationId || !expiresAt || !discoveredPages || !createdBy || !userLongLivedToken) {
     return null;
   }
 
-  return { organizationId, discoveredPages, expiresAt };
+  return { organizationId, discoveredPages, expiresAt, createdBy, userLongLivedToken };
 }
 
-function parseOAuthSession(value: unknown): OAuthSession | null {
-  const preview = parseOAuthSessionPreview(value);
-  if (!preview || !isRecord(value)) return null;
-  const userLongLivedToken = stringValue(value.user_long_lived_token);
-  if (!userLongLivedToken) return null;
-
-  return { ...preview, userLongLivedToken };
-}
-
-function parseOAuthSessionBinding(value: unknown): OAuthSessionBinding | null {
-  if (!isRecord(value)) return null;
-  const createdBy = stringValue(value.created_by);
-  const expiresAt = stringValue(value.expires_at);
-  if (!createdBy || !expiresAt) return null;
-  return { createdBy, expiresAt };
+function sessionIsExpired(session: OAuthSession, currentTime: Date): boolean {
+  const expiresAtMs = new Date(session.expiresAt).getTime();
+  return !Number.isFinite(expiresAtMs) || expiresAtMs <= currentTime.getTime();
 }
 
 async function graphGet(
@@ -235,49 +222,29 @@ export function createMetaOAuthSelectHandler(
     let rawSession: unknown;
     let sessionLookupError: unknown;
     try {
-      ({ data: rawSession, error: sessionLookupError } = await serviceRole
-        .from("organization_meta_oauth_sessions")
-        .select("created_by, expires_at")
-        .eq("organization_id", payload.data.organizationId)
-        .eq("nonce", payload.data.nonce)
-        .gt("expires_at", currentTime.toISOString())
-        .maybeSingle());
-    } catch {
-      return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
-    }
-    if (sessionLookupError) return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
-
-    const sessionBinding = parseOAuthSessionBinding(rawSession);
-    const bindingExpiresAtMs = sessionBinding ? new Date(sessionBinding.expiresAt).getTime() : NaN;
-    if (
-      !sessionBinding ||
-      !Number.isFinite(bindingExpiresAtMs) ||
-      bindingExpiresAtMs <= currentTime.getTime()
-    ) {
-      return jsonError("META_OAUTH_SESSION_EXPIRED", 400);
-    }
-
-    if (sessionBinding.createdBy !== user.id) {
-      return jsonError("META_OAUTH_SESSION_ACTOR_MISMATCH", 403);
-    }
-
-    try {
-      ({ data: rawSession, error: sessionLookupError } = await serviceRole
-        .from("organization_meta_oauth_sessions")
-        .select("organization_id, discovered_pages, user_long_lived_token, expires_at")
-        .eq("organization_id", payload.data.organizationId)
-        .eq("nonce", payload.data.nonce)
-        .gt("expires_at", currentTime.toISOString())
-        .maybeSingle());
+      ({ data: rawSession, error: sessionLookupError } = await serviceRole.rpc(
+        "resolve_meta_oauth_session",
+        {
+          p_organization_id: payload.data.organizationId,
+          p_nonce: payload.data.nonce,
+        },
+      ));
     } catch {
       return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
     }
     if (sessionLookupError) return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
 
     const oauthSession = parseOAuthSession(rawSession);
-    const expiresAtMs = oauthSession ? new Date(oauthSession.expiresAt).getTime() : NaN;
-    if (!oauthSession || !Number.isFinite(expiresAtMs) || expiresAtMs <= currentTime.getTime()) {
+    if (!oauthSession || sessionIsExpired(oauthSession, currentTime)) {
       return jsonError("META_OAUTH_SESSION_EXPIRED", 400);
+    }
+
+    if (oauthSession.organizationId !== payload.data.organizationId) {
+      return jsonError("META_OAUTH_SESSION_EXPIRED", 400);
+    }
+
+    if (oauthSession.createdBy !== user.id) {
+      return jsonError("META_OAUTH_SESSION_ACTOR_MISMATCH", 403);
     }
 
     if (!oauthSession.discoveredPages.some(({ id }) => id === payload.data.pageId)) {
@@ -339,6 +306,31 @@ export function createMetaOAuthPagesHandler(
     } = await supabase.auth.getUser();
     if (sessionError || !user) return jsonError("AUTHENTICATION_REQUIRED", 401);
 
+    const cookieStore = await cookies();
+    if (cookieStore.get(META_OAUTH_NONCE_COOKIE)?.value !== nonce.data) {
+      return jsonError("OAUTH_NONCE_MISMATCH", 400);
+    }
+
+    // The browser only supplies the nonce. Resolve it through each organization
+    // the actor can manage instead of reading the token-bearing session table.
+    // `nonce` is the primary key, so at most one authorized organization can
+    // resolve it; the creator check below prevents handoff between collaborators.
+    const { data: membershipRows, error: membershipError } = await supabase
+      .from("organization_members")
+      .select("organization_id, role")
+      .eq("user_id", user.id);
+    if (membershipError) return jsonError("ORGANIZATION_LOOKUP_FAILED", 503);
+
+    const memberships = Array.isArray(membershipRows)
+      ? membershipRows.flatMap((membership) => {
+          const organizationId = stringValue(membership.organization_id);
+          const role = stringValue(membership.role);
+          if (!organizationId || !role || !canManageConnections(role as OrganizationRole)) return [];
+          return [{ organizationId }];
+        })
+      : [];
+    if (memberships.length === 0) return jsonError("ORGANIZATION_NOT_FOUND", 404);
+
     let serviceRole;
     try {
       serviceRole = createSupabaseServiceRoleClient();
@@ -346,39 +338,38 @@ export function createMetaOAuthPagesHandler(
       return jsonError("META_INTEGRATION_NOT_CONFIGURED", 503);
     }
 
-    let rawSession: unknown;
-    let sessionLookupError: unknown;
-    try {
-      ({ data: rawSession, error: sessionLookupError } = await serviceRole
-        .from("organization_meta_oauth_sessions")
-        .select("organization_id, discovered_pages, expires_at")
-        .eq("nonce", nonce.data)
-        .maybeSingle());
-    } catch {
-      return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
-    }
-    if (sessionLookupError) return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
+    let oauthSession: OAuthSession | null = null;
+    for (const membership of memberships) {
+      let rawSession: unknown;
+      let sessionLookupError: unknown;
+      try {
+        ({ data: rawSession, error: sessionLookupError } = await serviceRole.rpc(
+          "resolve_meta_oauth_session",
+          {
+            p_organization_id: membership.organizationId,
+            p_nonce: nonce.data,
+          },
+        ));
+      } catch {
+        return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
+      }
+      if (sessionLookupError) return jsonError("META_OAUTH_SESSION_LOOKUP_FAILED", 503);
 
-    const oauthSession = parseOAuthSessionPreview(rawSession);
-    if (!oauthSession) return jsonError("META_OAUTH_SESSION_EXPIRED", 400);
-
-    const { data: membership, error: membershipError } = await supabase
-      .from("organization_members")
-      .select("role")
-      .eq("organization_id", oauthSession.organizationId)
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (membershipError) return jsonError("ORGANIZATION_LOOKUP_FAILED", 503);
-    if (!membership) return jsonError("ORGANIZATION_NOT_FOUND", 404);
-    if (!canManageConnections(membership.role as OrganizationRole)) {
-      return jsonError("ORGANIZATION_ACCESS_DENIED", 403);
+      const candidate = parseOAuthSession(rawSession);
+      if (!candidate) continue;
+      if (candidate.organizationId !== membership.organizationId) {
+        return jsonError("META_OAUTH_SESSION_EXPIRED", 400);
+      }
+      oauthSession = candidate;
+      break;
     }
 
-    const expiresAtMs = new Date(oauthSession.expiresAt).getTime();
-    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now().getTime()) {
-      return jsonError("META_OAUTH_SESSION_EXPIRED", 400, {
-        organizationId: oauthSession.organizationId,
-      });
+    if (!oauthSession || sessionIsExpired(oauthSession, now())) {
+      return jsonError("META_OAUTH_SESSION_EXPIRED", 400);
+    }
+
+    if (oauthSession.createdBy !== user.id) {
+      return jsonError("META_OAUTH_SESSION_ACTOR_MISMATCH", 403);
     }
 
     return Response.json(

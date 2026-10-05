@@ -55,10 +55,12 @@ create table public.organization_meta_connections (
   facebook_page_id text not null check (length(btrim(facebook_page_id)) > 0),
   facebook_page_name text not null check (length(btrim(facebook_page_name)) > 0),
   instagram_business_account_id text,
-  page_access_token text not null,
+  -- El token nunca vive en una columna public. Solo se guarda una referencia
+  -- opaca al secreto cifrado por Supabase Vault.
+  page_access_token_vault_secret_id uuid,
   status text not null default 'ACTIVE' check (status in ('ACTIVE', 'REVOKED', 'ERROR')),
-  constraint organization_meta_connections_token_nonempty_when_active
-    check (status <> 'ACTIVE' or length(btrim(page_access_token)) > 0),
+  constraint organization_meta_connections_active_token_reference
+    check (status <> 'ACTIVE' or page_access_token_vault_secret_id is not null),
   connected_by uuid not null references public.profiles(id) on delete restrict,
   connected_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -99,6 +101,32 @@ begin
 end;
 $$;
 
+-- Invalida el valor cifrado y deja de referenciarlo. Vault no expone una
+-- operación de borrado documentada, por lo que sobreescribirlo evita dejar un
+-- token Meta recuperable incluso si queda una fila de Vault para auditoría.
+create function public.invalidate_meta_vault_secret(
+  p_secret_id uuid,
+  p_reason text
+)
+returns void
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if p_secret_id is null then
+    return;
+  end if;
+
+  perform vault.update_secret(
+    p_secret_id,
+    'REVOKED:' || gen_random_uuid()::text,
+    null::text,
+    left(coalesce(nullif(btrim(p_reason), ''), 'Meta credential invalidated'), 500),
+    null::uuid
+  );
+end;
+$$;
 
 create function public.upsert_meta_connection(
   p_organization_id uuid, p_connected_by uuid,
@@ -110,29 +138,59 @@ language plpgsql
 security definer
 set search_path = pg_catalog
 as $$
+declare
+  previous_secret_id uuid;
+  new_secret_id uuid;
 begin
   if nullif(btrim(p_facebook_page_id), '') is null
      or nullif(btrim(p_facebook_page_name), '') is null
      or nullif(btrim(p_page_access_token), '') is null then
     raise exception using errcode = '22023', message = 'META_CONNECTION_INVALID_INPUT';
   end if;
+
+  -- Las rutas de OAuth ya verifican esto, pero la función privilegiada también
+  -- lo aplica para que un uso accidental de service_role no cruce tenants.
+  perform public.assert_organization_actor(
+    p_organization_id,
+    p_connected_by,
+    array['owner']::public.organization_role[]
+  );
+
+  select page_access_token_vault_secret_id into previous_secret_id
+  from public.organization_meta_connections
+  where organization_id = p_organization_id
+  for update;
+
+  new_secret_id := vault.create_secret(
+    btrim(p_page_access_token),
+    format('orbit-meta-page-token:%s:%s', p_organization_id, gen_random_uuid()),
+    'Orbit OS Meta page access token (service role only)',
+    null::uuid
+  );
+
   insert into public.organization_meta_connections (
     organization_id, facebook_page_id, facebook_page_name,
-    instagram_business_account_id, page_access_token, status,
+    instagram_business_account_id, page_access_token_vault_secret_id, status,
     connected_by, connected_at, updated_at
   ) values (
     p_organization_id, btrim(p_facebook_page_id), btrim(p_facebook_page_name),
-    nullif(btrim(p_instagram_business_account_id), ''), p_page_access_token, 'ACTIVE',
+    nullif(btrim(p_instagram_business_account_id), ''), new_secret_id, 'ACTIVE',
     p_connected_by, now(), now()
   )
   on conflict (organization_id) do update set
     facebook_page_id = excluded.facebook_page_id,
     facebook_page_name = excluded.facebook_page_name,
     instagram_business_account_id = excluded.instagram_business_account_id,
-    page_access_token = excluded.page_access_token,
+    page_access_token_vault_secret_id = excluded.page_access_token_vault_secret_id,
     status = 'ACTIVE',
     connected_by = excluded.connected_by,
     updated_at = now();
+
+  perform public.invalidate_meta_vault_secret(
+    previous_secret_id,
+    'Meta page access token replaced'
+  );
+
   return jsonb_build_object('connected', true);
 end;
 $$;
@@ -143,11 +201,21 @@ language plpgsql
 security definer
 set search_path = pg_catalog
 as $$
+declare
+  previous_secret_id uuid;
+  was_revoked boolean;
 begin
+  select page_access_token_vault_secret_id into previous_secret_id
+  from public.organization_meta_connections
+  where organization_id = p_organization_id
+  for update;
+
   update public.organization_meta_connections
-  set status = 'REVOKED', page_access_token = '', updated_at = now()
+  set status = 'REVOKED', page_access_token_vault_secret_id = null, updated_at = now()
   where organization_id = p_organization_id;
-  return jsonb_build_object('revoked', found);
+  was_revoked := found;
+  perform public.invalidate_meta_vault_secret(previous_secret_id, 'Meta connection revoked');
+  return jsonb_build_object('revoked', was_revoked);
 end;
 $$;
 
@@ -163,14 +231,55 @@ as $$
   returning jsonb_build_object('marked', true);
 $$;
 
+-- Resuelve un token solo dentro del worker con service_role. Esta es la única
+-- ruta SQL que puede incluir el token descifrado en una respuesta RPC.
+create function public.resolve_meta_connection_for_publish(p_organization_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  connection public.organization_meta_connections%rowtype;
+  page_access_token text;
+begin
+  select * into connection
+  from public.organization_meta_connections
+  where organization_id = p_organization_id and status = 'ACTIVE';
+  if not found or connection.page_access_token_vault_secret_id is null then
+    return jsonb_build_object('state', 'NOT_CONNECTED');
+  end if;
+
+  select decrypted_secret into page_access_token
+  from vault.decrypted_secrets
+  where id = connection.page_access_token_vault_secret_id;
+  if page_access_token is null
+     or length(btrim(page_access_token)) = 0
+     or page_access_token like 'REVOKED:%' then
+    return jsonb_build_object('state', 'SECRET_UNAVAILABLE');
+  end if;
+
+  return jsonb_build_object(
+    'state', 'RESOLVED',
+    'facebookPageId', connection.facebook_page_id,
+    'facebookPageName', connection.facebook_page_name,
+    'instagramBusinessAccountId', connection.instagram_business_account_id,
+    'pageAccessToken', page_access_token
+  );
+end;
+$$;
+
 revoke all on function public.get_meta_connection_status(uuid, uuid) from public, anon, authenticated;
 revoke all on function public.upsert_meta_connection(uuid, uuid, text, text, text, text) from public, anon, authenticated;
 revoke all on function public.revoke_meta_connection(uuid) from public, anon, authenticated;
 revoke all on function public.mark_meta_connection_error(uuid) from public, anon, authenticated;
+revoke all on function public.invalidate_meta_vault_secret(uuid, text) from public, anon, authenticated;
+revoke all on function public.resolve_meta_connection_for_publish(uuid) from public, anon, authenticated;
 grant execute on function public.get_meta_connection_status(uuid, uuid) to authenticated;
 grant execute on function public.upsert_meta_connection(uuid, uuid, text, text, text, text) to service_role;
 grant execute on function public.revoke_meta_connection(uuid) to service_role;
 grant execute on function public.mark_meta_connection_error(uuid) to service_role;
+grant execute on function public.resolve_meta_connection_for_publish(uuid) to service_role;
 
 -- ============================================================
 -- Task 3: organization_meta_oauth_sessions
@@ -180,12 +289,109 @@ create table public.organization_meta_oauth_sessions (
   nonce uuid primary key,
   organization_id uuid not null references public.organizations(id) on delete restrict,
   discovered_pages jsonb not null check (jsonb_typeof(discovered_pages) = 'array'),
-  user_long_lived_token text not null check (length(btrim(user_long_lived_token)) > 0),
+  user_long_lived_token_vault_secret_id uuid not null,
   created_by uuid not null references public.profiles(id) on delete restrict,
   expires_at timestamptz not null
 );
 alter table public.organization_meta_oauth_sessions enable row level security;
 revoke all on public.organization_meta_oauth_sessions from public, anon, authenticated;
+
+create function public.create_meta_oauth_session(
+  p_nonce uuid,
+  p_organization_id uuid,
+  p_discovered_pages jsonb,
+  p_user_long_lived_token text,
+  p_created_by uuid,
+  p_expires_at timestamptz
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare secret_id uuid;
+begin
+  if jsonb_typeof(p_discovered_pages) <> 'array'
+     or nullif(btrim(p_user_long_lived_token), '') is null
+     or p_expires_at <= now() then
+    raise exception using errcode = '22023', message = 'META_OAUTH_SESSION_INVALID_INPUT';
+  end if;
+  perform public.assert_organization_actor(
+    p_organization_id,
+    p_created_by,
+    array['owner']::public.organization_role[]
+  );
+
+  secret_id := vault.create_secret(
+    btrim(p_user_long_lived_token),
+    format('orbit-meta-oauth-token:%s:%s', p_organization_id, p_nonce),
+    'Orbit OS temporary Meta OAuth token (service role only)',
+    null::uuid
+  );
+
+  insert into public.organization_meta_oauth_sessions (
+    nonce, organization_id, discovered_pages, user_long_lived_token_vault_secret_id,
+    created_by, expires_at
+  ) values (
+    p_nonce, p_organization_id, p_discovered_pages, secret_id, p_created_by, p_expires_at
+  );
+
+  return jsonb_build_object('created', true);
+exception
+  when unique_violation then
+    perform public.invalidate_meta_vault_secret(secret_id, 'Duplicate Meta OAuth session');
+    raise exception using errcode = '23505', message = 'META_OAUTH_SESSION_ALREADY_EXISTS';
+end;
+$$;
+
+-- La ruta servidor valida primero la sesión del usuario y su organización;
+-- solo después invoca este resolver con service_role para obtener el token
+-- temporal. No existe una policy/RPC para que el navegador lo lea.
+create function public.resolve_meta_oauth_session(
+  p_organization_id uuid,
+  p_nonce uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  session_row public.organization_meta_oauth_sessions%rowtype;
+  user_long_lived_token text;
+begin
+  select * into session_row
+  from public.organization_meta_oauth_sessions
+  where organization_id = p_organization_id
+    and nonce = p_nonce
+    and expires_at > now();
+  if not found then
+    return null;
+  end if;
+
+  select decrypted_secret into user_long_lived_token
+  from vault.decrypted_secrets
+  where id = session_row.user_long_lived_token_vault_secret_id;
+  if user_long_lived_token is null
+     or length(btrim(user_long_lived_token)) = 0
+     or user_long_lived_token like 'REVOKED:%' then
+    raise exception using errcode = 'P0001', message = 'META_OAUTH_SESSION_SECRET_UNAVAILABLE';
+  end if;
+
+  return jsonb_build_object(
+    'organizationId', session_row.organization_id,
+    'discoveredPages', session_row.discovered_pages,
+    'createdBy', session_row.created_by,
+    'expiresAt', session_row.expires_at,
+    'userLongLivedToken', user_long_lived_token
+  );
+end;
+$$;
+
+revoke all on function public.create_meta_oauth_session(uuid, uuid, jsonb, text, uuid, timestamptz) from public, anon, authenticated;
+revoke all on function public.resolve_meta_oauth_session(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.create_meta_oauth_session(uuid, uuid, jsonb, text, uuid, timestamptz) to service_role;
+grant execute on function public.resolve_meta_oauth_session(uuid, uuid) to service_role;
 
 -- ============================================================
 -- Task 4: automation_jobs — kind PUBLISH + publication_target_id
@@ -290,7 +496,7 @@ declare
   job public.automation_jobs%rowtype;
   target public.publication_targets%rowtype;
   final_copy public.final_copy_versions%rowtype;
-  connection public.organization_meta_connections%rowtype;
+  meta_connection jsonb;
   assets_json jsonb;
   token uuid := gen_random_uuid();
 begin
@@ -365,14 +571,13 @@ begin
     return jsonb_build_object('state', 'NOT_CLAIMABLE');
   end if;
 
-  select * into connection
-  from public.organization_meta_connections
-  where organization_id = job.organization_id and status = 'ACTIVE';
-  if not found then
+  meta_connection := public.resolve_meta_connection_for_publish(job.organization_id);
+  if coalesce(meta_connection->>'state', '') <> 'RESOLVED' then
     perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_CONNECTION_NOT_FOUND');
     return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
   end if;
-  if target.platform = 'INSTAGRAM' and connection.instagram_business_account_id is null then
+  if target.platform = 'INSTAGRAM'
+     and nullif(meta_connection->>'instagramBusinessAccountId', '') is null then
     perform public.fail_claim_publish_job(job.id, job.publication_target_id, job.organization_id, 'PUBLISH_JOB_INSTAGRAM_NOT_CONNECTED');
     return jsonb_build_object('state', 'FAILED', 'jobId', job.id);
   end if;
@@ -417,9 +622,9 @@ begin
         'cta', final_copy.cta, 'hashtags', final_copy.hashtags
       ),
       'meta', jsonb_build_object(
-        'facebookPageId', connection.facebook_page_id,
-        'pageAccessToken', connection.page_access_token,
-        'instagramBusinessAccountId', connection.instagram_business_account_id
+        'facebookPageId', meta_connection->>'facebookPageId',
+        'pageAccessToken', meta_connection->>'pageAccessToken',
+        'instagramBusinessAccountId', nullif(meta_connection->>'instagramBusinessAccountId', '')
       ),
       'attempts', job.attempt_count + 1, 'maxAttempts', job.max_attempts,
       'runAt', job.run_at, 'nextAttemptAt', job.next_attempt_at,

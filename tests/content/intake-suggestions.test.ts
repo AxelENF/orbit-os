@@ -1,12 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchIntakeSuggestions, type IntakeSuggestionDependencies } from "@/lib/content/intake-suggestions";
+import {
+  fetchIntakeSuggestions,
+  type IntakeSuggestionDependencies,
+} from "@/lib/content/intake-suggestions";
+import type { OrganizationOpenRouterCredential } from "@/lib/ai/openrouter-organization-credential";
 
-const baseEnv = {
-  SNAPGAD_INTAKE_SUGGEST_OPENROUTER_MODEL: "test-model",
-  OPENROUTER_API_KEY: "test-key",
-  SNAPGAD_INTAKE_SUGGEST_MODEL_INPUT_PRICE_PER_1M_USD: "1",
-  SNAPGAD_INTAKE_SUGGEST_MODEL_OUTPUT_PRICE_PER_1M_USD: "2",
+const baseEnv = {};
+
+const activeCredential: OrganizationOpenRouterCredential = {
+  credentialId: "credential-1",
+  apiKey: "organization-openrouter-key",
+  model: "organization/test-model",
+  inputCostPerMillionUsd: 1,
+  outputCostPerMillionUsd: 2,
+  monthlyBudgetUsd: 10,
 };
+
+function intakeDependencies(
+  overrides: Partial<IntakeSuggestionDependencies> = {},
+): IntakeSuggestionDependencies {
+  return {
+    organizationId: "org-1",
+    imageDataUrl: "data:image/png;base64,AAAA",
+    environment: baseEnv,
+    resolveCredential: vi.fn().mockResolvedValue(activeCredential),
+    ...overrides,
+  };
+}
 
 function okOpenRouterResponse(suggestions: Record<string, unknown>) {
   return new Response(JSON.stringify({
@@ -22,22 +42,20 @@ describe("fetchIntakeSuggestions", () => {
       humanDescription: "Consultorio dental, promoción de limpieza.",
       offer: "Limpieza dental $299", cta: "Agenda tu cita",
     }));
-    const result = await fetchIntakeSuggestions(
-      { imageDataUrl: "data:image/png;base64,AAAA", environment: baseEnv, fetchFn } as IntakeSuggestionDependencies,
-    );
+    const resolveCredential = vi.fn().mockResolvedValue(activeCredential);
+    const result = await fetchIntakeSuggestions(intakeDependencies({ resolveCredential, fetchFn }));
     expect(result.suggestions?.niche).toBe("clinicas");
     expect(result.suggestions?.offer).toBe("Limpieza dental $299");
     expect(fetchFn).toHaveBeenCalledWith(
       "https://openrouter.ai/api/v1/chat/completions",
       expect.objectContaining({ method: "POST" }),
     );
+    expect(resolveCredential).toHaveBeenCalledWith("org-1");
   });
 
   it("campos ausentes en la respuesta del modelo se regresan como null, no se inventan", async () => {
     const fetchFn = vi.fn().mockResolvedValue(okOpenRouterResponse({ niche: "clinicas" }));
-    const result = await fetchIntakeSuggestions(
-      { imageDataUrl: "data:image/png;base64,AAAA", environment: baseEnv, fetchFn } as IntakeSuggestionDependencies,
-    );
+    const result = await fetchIntakeSuggestions(intakeDependencies({ fetchFn }));
     expect(result.suggestions?.niche).toBe("clinicas");
     expect(result.suggestions?.offer).toBeNull();
   });
@@ -47,9 +65,7 @@ describe("fetchIntakeSuggestions", () => {
       choices: [{ message: { content: "no es json" } }],
       usage: { prompt_tokens: 10, completion_tokens: 5 },
     }), { status: 200 }));
-    const result = await fetchIntakeSuggestions(
-      { imageDataUrl: "data:image/png;base64,AAAA", environment: baseEnv, fetchFn } as IntakeSuggestionDependencies,
-    );
+    const result = await fetchIntakeSuggestions(intakeDependencies({ fetchFn }));
     expect(result.suggestions).toBeNull();
   });
 
@@ -60,9 +76,7 @@ describe("fetchIntakeSuggestions", () => {
       // fetch que rechaza con AbortError no se propaga como excepción.
       reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
     }));
-    const result = await fetchIntakeSuggestions(
-      { imageDataUrl: "data:image/png;base64,AAAA", environment: baseEnv, fetchFn } as IntakeSuggestionDependencies,
-    );
+    const result = await fetchIntakeSuggestions(intakeDependencies({ fetchFn }));
     expect(result.suggestions).toBeNull();
   });
 
@@ -78,11 +92,10 @@ describe("fetchIntakeSuggestions", () => {
     const fetchFn = vi.fn().mockResolvedValue(response);
 
     try {
-      const resultPromise = fetchIntakeSuggestions({
-        imageDataUrl: "data:image/png;base64,AAAA",
+      const resultPromise = fetchIntakeSuggestions(intakeDependencies({
         environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_TIMEOUT_MS: "15000" },
         fetchFn,
-      } as IntakeSuggestionDependencies);
+      }));
 
       await Promise.resolve();
       await Promise.resolve();
@@ -113,11 +126,9 @@ describe("fetchIntakeSuggestions", () => {
       choices: [{ message: { content: JSON.stringify({ contentType: 12345 }) } }],
       usage: { prompt_tokens: 500, completion_tokens: 80 },
     }), { status: 200 }));
-    const result = await fetchIntakeSuggestions(
-      { imageDataUrl: "data:image/png;base64,AAAA", environment: baseEnv, fetchFn } as IntakeSuggestionDependencies,
-    );
+    const result = await fetchIntakeSuggestions(intakeDependencies({ fetchFn }));
     expect(result.suggestions).toBeNull();
-    expect(result.usage).toEqual({ provider: "openrouter", model: "test-model", inputTokens: 500, outputTokens: 80, estimatedCostUsd: expect.any(Number) });
+    expect(result.usage).toEqual({ provider: "openrouter", model: "organization/test-model", inputTokens: 500, outputTokens: 80, estimatedCostUsd: expect.any(Number) });
   });
 
   it("una respuesta 200 con {} (todos los campos ausentes) regresa un objeto de sugerencias todo en null, no null completo", async () => {
@@ -125,16 +136,28 @@ describe("fetchIntakeSuggestions", () => {
     // que sugerir para ningún campo. Distinto del caso de arriba (forma
     // inválida de verdad).
     const fetchFn = vi.fn().mockResolvedValue(okOpenRouterResponse({}));
-    const result = await fetchIntakeSuggestions(
-      { imageDataUrl: "data:image/png;base64,AAAA", environment: baseEnv, fetchFn } as IntakeSuggestionDependencies,
-    );
+    const result = await fetchIntakeSuggestions(intakeDependencies({ fetchFn }));
     expect(result.suggestions).toEqual({ niche: null, contentType: null, objective: null, humanDescription: null, offer: null, cta: null });
   });
 
-  it("falta configuración requerida (modelo/precios) -> lanza (la ruta lo convierte en 503)", async () => {
-    await expect(fetchIntakeSuggestions(
-      { imageDataUrl: "data:image/png;base64,AAAA", environment: {}, fetchFn: vi.fn() } as IntakeSuggestionDependencies,
-    )).rejects.toThrow();
+  it("sin credencial BYOK activa falla cerrado y no llama OpenRouter", async () => {
+    const fetchFn = vi.fn();
+    const resolveCredential = vi.fn().mockResolvedValue(null);
+    await expect(fetchIntakeSuggestions(intakeDependencies({ environment: {}, fetchFn, resolveCredential }))).resolves.toEqual({
+      suggestions: null,
+      usage: null,
+    });
+    expect(resolveCredential).toHaveBeenCalledWith("org-1");
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("un fallo al resolver la credencial BYOK falla cerrado y no llama OpenRouter", async () => {
+    const fetchFn = vi.fn();
+    await expect(fetchIntakeSuggestions(intakeDependencies({
+      fetchFn,
+      resolveCredential: vi.fn().mockRejectedValue(new Error("database unavailable")),
+    }))).resolves.toEqual({ suggestions: null, usage: null });
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it("usa el techo de costo seguro cuando el entorno no es numérico", async () => {
@@ -142,11 +165,10 @@ describe("fetchIntakeSuggestions", () => {
       choices: [{ message: { content: JSON.stringify({ niche: "clinicas" }) } }],
       usage: { prompt_tokens: 50_000, completion_tokens: 50_000 },
     }), { status: 200 }));
-    const result = await fetchIntakeSuggestions({
-      imageDataUrl: "data:image/png;base64,AAAA",
+    const result = await fetchIntakeSuggestions(intakeDependencies({
       environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD: "not-a-number" },
       fetchFn,
-    } as IntakeSuggestionDependencies);
+    }));
 
     expect(result.suggestions).toBeNull();
     expect(result.usage?.estimatedCostUsd).toBeGreaterThan(0.01);
@@ -154,11 +176,10 @@ describe("fetchIntakeSuggestions", () => {
 
   it("usa 300 tokens cuando el límite de salida configurado no es numérico", async () => {
     const fetchFn = vi.fn().mockResolvedValue(okOpenRouterResponse({ niche: "clinicas" }));
-    await fetchIntakeSuggestions({
-      imageDataUrl: "data:image/png;base64,AAAA",
+    await fetchIntakeSuggestions(intakeDependencies({
       environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_MAX_OUTPUT_TOKENS: "not-a-number" },
       fetchFn,
-    } as IntakeSuggestionDependencies);
+    }));
 
     const request = fetchFn.mock.calls[0]?.[1] as RequestInit;
     expect(JSON.parse(String(request.body))).toMatchObject({ max_tokens: 300 });
@@ -177,11 +198,10 @@ describe("fetchIntakeSuggestions", () => {
     ));
 
     try {
-      const resultPromise = fetchIntakeSuggestions({
-        imageDataUrl: "data:image/png;base64,AAAA",
+      const resultPromise = fetchIntakeSuggestions(intakeDependencies({
         environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_TIMEOUT_MS: "not-a-number" },
         fetchFn,
-      } as IntakeSuggestionDependencies);
+      }));
       await Promise.resolve();
 
       vi.advanceTimersByTime(1);
@@ -210,11 +230,7 @@ describe("fetchIntakeSuggestions", () => {
     }), { status: 200 }));
 
     try {
-      const result = await fetchIntakeSuggestions({
-        imageDataUrl: "data:image/png;base64,AAAA",
-        environment: baseEnv,
-        fetchFn,
-      } as IntakeSuggestionDependencies);
+      const result = await fetchIntakeSuggestions(intakeDependencies({ fetchFn }));
 
       expect(result.usage).toMatchObject({ inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 });
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("usage"));
@@ -235,11 +251,10 @@ describe("fetchIntakeSuggestions", () => {
       choices: [{ message: { content: JSON.stringify({ niche: "clinicas" }) } }],
       usage: { prompt_tokens: 50_000, completion_tokens: 50_000 }, // mucho más de lo esperado
     }), { status: 200 }));
-    const result = await fetchIntakeSuggestions({
-      imageDataUrl: "data:image/png;base64,AAAA",
+    const result = await fetchIntakeSuggestions(intakeDependencies({
       environment: { ...baseEnv, SNAPGAD_INTAKE_SUGGEST_MAX_REQUEST_COST_USD: "0.01" },
       fetchFn,
-    } as IntakeSuggestionDependencies);
+    }));
     expect(result.suggestions).toBeNull();
     expect(result.usage?.estimatedCostUsd).toBeGreaterThan(0.01);
   });

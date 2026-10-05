@@ -188,7 +188,7 @@ export async function requestN8nPublish(
   // Publication is intentionally fail-closed until tenant Meta credentials,
   // target-scoped leases, and the reviewed worker are staged and enabled.
   // Demo mode still records a local dry-run for UI tests without any network.
-  if (!isDemo && environment.SNAPGAD_PUBLISH_WORKER_ENABLED !== "true") {
+  if (!isDemo && environment.SNAPGAD_N8N_PUBLISH_ENABLED !== "true") {
     throw new N8nPublishConfigurationError("publish");
   }
 

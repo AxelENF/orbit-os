@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 async function readMigration(): Promise<string> {
-  const path = fileURLToPath(new URL("../../supabase/migrations/0022_publish_manual_race_guard.sql", import.meta.url));
+  const path = fileURLToPath(new URL("../../supabase/migrations/20261005124203_orbit_os_mvp_consolidation.sql", import.meta.url));
   try {
     return await readFile(path, "utf8");
   } catch (error) {
